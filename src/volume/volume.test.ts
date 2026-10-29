@@ -124,6 +124,25 @@ describe('逐體素', () => {
     ]);
   });
 
+  it('Poly-Si 3 的 bamboo defect：推面只推外表面，空洞不被填、也不往外蝕', () => {
+    const { base, ctx, poly, full } = setup();
+    const p3 = poly.find((c) => c.bbox.z0 === 90)!;
+    const voids0 = materialCounts(base.vol).get(254) ?? 0;
+    expect(voids0).toBeGreaterThan(0);
+    // 空洞只在 y 24–55，poly 3 上下仍連著，還是一塊
+    expect(base.L.comps.filter((c) => c.mat === 6).length).toBe(3);
+    const keys = [p3.key];
+    for (const dir of [UP, DOWN, [0, 0, 1] as [number, number, number], [1, 0, 0] as [number, number, number]]) {
+      const grow: Op = { kind: 'push', keys, zRange: full, dir, n: 2, follow: true, backfill: 'orig' };
+      const shrink: Op = { kind: 'push', keys, zRange: full, dir, n: -2, follow: true, backfill: 'orig' };
+      const g = applyOp(base, grow, ctx);
+      expect(materialCounts(g.vol).get(254)).toBe(voids0);
+      const sh = applyOp(base, shrink, ctx);
+      expect(materialCounts(sh.vol).get(254)).toBe(voids0);
+      expect(diffMask(applyOp(g, shrink, ctx).vol, base.vol).count).toBe(0);
+    }
+  }, 30_000);
+
   it('縮短的反方向：往下長再往下縮回到原點', () => {
     const { base, ctx, poly, full } = setup();
     const keys = [poly[1].key];

@@ -6,8 +6,11 @@ import {
   AimOutlined,
   ArrowDownOutlined,
   ArrowUpOutlined,
+  DownOutlined,
   DownloadOutlined,
   EyeInvisibleOutlined,
+  EyeOutlined,
+  ScissorOutlined,
   MenuOutlined,
   QuestionCircleOutlined,
   RollbackOutlined,
@@ -72,9 +75,24 @@ function Resizer({ onDrag }: { onDrag: (dx: number) => void }) {
 
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
 
+function Brand() {
+  return (
+    <div className="brand">
+      <span className="brand-mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fff" strokeWidth="1.6">
+          <path d="M2 13h12M4 13V8a4 4 0 0 1 8 0v5" />
+        </svg>
+      </span>
+      <span className="brand-name">Section Editor</span>
+      <Tag bordered={false}>3D</Tag>
+    </div>
+  );
+}
+
 export default function Section3DPage() {
   const ed = useEditor();
   const { message } = App.useApp();
+  const [loaded, setLoaded] = useState(false);
   const [leftW, setLeftW] = useState(240);
   const [rightW, setRightW] = useState(350);
   const narrow = useMedia('(max-width: 1199px)');
@@ -87,6 +105,8 @@ export default function Section3DPage() {
   const [clip, setClip] = useState(false);
   const [showDiff, setShowDiff] = useState(true);
   const [peek, setPeek] = useState(false);
+  const [xray, setXray] = useState(false);
+  const [translucent, setTranslucent] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -255,64 +275,84 @@ export default function Section3DPage() {
         <Text strong style={{ fontSize: 12 }}>
           3D
         </Text>
-        <Text type="secondary" ellipsis className="pane-sub" style={{ fontSize: 12, maxWidth: 260 }}>
-          {ed.isBase ? '原始模型（唯讀）：切到某個 split 才能改' : `${ed.active?.name} · 點一塊選取，Shift 多選`}
+        <Text type="secondary" ellipsis className="pane-sub" style={{ fontSize: 12, maxWidth: 240 }}>
+          {ed.isBase ? '原始模型' : ed.active?.name}
+          {ed.sel.size ? ` · 已選 ${selName}` : ' · 點一塊選取，Shift 多選'}
         </Text>
         <span className="grow" />
-        {ed.sel.size > 0 && !ed.isBase && (
-          <Space size={4} className="quick">
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {selName}
-            </Text>
-            <Tooltip title="長高 1 voxel（可以一直按）">
-              <Button size="small" icon={<ArrowUpOutlined />} onClick={() => ed.push([0, -1, 0], 1)}>
+        {ed.sel.size > 0 && (
+          <Space.Compact size="small" className="tb">
+            <Tooltip title="頂面往上 1 voxel，可以一直按">
+              <Button icon={<ArrowUpOutlined />} onClick={() => ed.push([0, -1, 0], 1)}>
                 長高
               </Button>
             </Tooltip>
-            <Tooltip title="縮短 1 voxel">
-              <Button size="small" icon={<ArrowDownOutlined />} onClick={() => ed.push([0, -1, 0], -1)}>
+            <Tooltip title="頂面往下 1 voxel">
+              <Button icon={<ArrowDownOutlined />} onClick={() => ed.push([0, -1, 0], -1)}>
                 縮短
               </Button>
             </Tooltip>
             <Dropdown menu={{ items: matItems }} trigger={['click']}>
-              <Button size="small">
+              <Button>
                 {oneMat && firstMat && <Swatch fill={firstMat.color} isVoid={isVoid(firstMat.id)} />}
                 {oneMat ? firstMat?.name : '多種材質'}
+                <DownOutlined style={{ fontSize: 10, marginLeft: 2 }} />
               </Button>
             </Dropdown>
-            <Divider type="vertical" />
-          </Space>
+          </Space.Compact>
         )}
-        <Tooltip title="復原上一步（Ctrl+Z）">
-          <Button size="small" icon={<UndoOutlined />} disabled={!ed.hist.length} onClick={ed.undo}>
-            復原
-          </Button>
-        </Tooltip>
-        <Tooltip title="丟掉這個 split 的所有改動，回到原始">
-          <Button size="small" icon={<RollbackOutlined />} disabled={!ed.diff.count} onClick={ed.resetAll}>
-            回到原始
-          </Button>
-        </Tooltip>
-        <Divider type="vertical" />
-        {ed.diff.count > 0 && (
-          <Tooltip title="按住看原始陣列（也可以按住 B）">
-            <Button
-              size="small"
-              type={peek ? 'primary' : 'default'}
-              onPointerDown={() => setPeek(true)}
-              onPointerUp={() => setPeek(false)}
-              onPointerLeave={() => setPeek(false)}
-            >
-              看原始
+        <Space.Compact size="small" className="tb">
+          <Tooltip title="復原上一步（Ctrl+Z）">
+            <Button icon={<UndoOutlined />} disabled={!ed.hist.length} onClick={ed.undo}>
+              <span className="tb-text">復原</span>
             </Button>
           </Tooltip>
-        )}
-        <Button size="small" type={clip ? 'primary' : 'default'} onClick={() => setClip(!clip)}>
-          剖開
-        </Button>
-        <Tooltip title="重設視角">
-          <Button size="small" icon={<AimOutlined />} onClick={() => view.current?.resetView()} aria-label="重設視角" />
-        </Tooltip>
+          <Tooltip title="丟掉這個 split 的所有改動">
+            <Button icon={<RollbackOutlined />} disabled={!ed.diff.count} onClick={ed.resetAll}>
+              <span className="tb-text">回到原始</span>
+            </Button>
+          </Tooltip>
+        </Space.Compact>
+        <Space.Compact size="small" className="tb">
+          {ed.diff.count > 0 && (
+            <Tooltip title="按住看原始陣列（鍵盤 B）">
+              <Button
+                type={peek ? 'primary' : 'default'}
+                icon={<EyeOutlined />}
+                onPointerDown={() => setPeek(true)}
+                onPointerUp={() => setPeek(false)}
+                onPointerLeave={() => setPeek(false)}
+              >
+                <span className="tb-text">看原始</span>
+              </Button>
+            </Tooltip>
+          )}
+          <Tooltip title="剖開到目前 z 切面，看裡面">
+            <Button type={clip ? 'primary' : 'default'} icon={<ScissorOutlined />} onClick={() => setClip(!clip)}>
+              <span className="tb-text">剖開</span>
+            </Button>
+          </Tooltip>
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              selectable: true,
+              multiple: true,
+              selectedKeys: [xray ? 'xray' : '', translucent ? 'trans' : ''],
+              items: [
+                { key: 'xray', label: '空洞透視：VOID 永遠畫在最上面', onClick: () => setXray(!xray) },
+                { key: 'trans', label: '材質半透明：看得到內部', onClick: () => setTranslucent(!translucent) },
+                { type: 'divider' },
+                { key: 'reset', icon: <AimOutlined />, label: '重設視角', onClick: () => view.current?.resetView() },
+              ],
+            }}
+          >
+            <Tooltip title="顯示">
+              <Button icon={<EyeOutlined />} aria-label="顯示選項">
+                <DownOutlined style={{ fontSize: 10 }} />
+              </Button>
+            </Tooltip>
+          </Dropdown>
+        </Space.Compact>
       </div>
       <div className="canvas-wrap" ref={wrapRef}>
         <View3D
@@ -340,6 +380,8 @@ export default function Section3DPage() {
           }}
           floatRef={tagRef}
           handle={view}
+          xray={xray}
+          translucent={translucent}
         />
         <div ref={tagRef} className="sel-tag" style={{ display: 'none' }}>
           {selName}
@@ -368,8 +410,8 @@ export default function Section3DPage() {
           {hot
             ? ed.last!.text
             : ed.sel.size
-              ? `已選 ${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 方向鍵＝整塊移動 1 格，上方「長高／縮短」＝只推頂面`
-              : '還沒選取：點一塊結構開始'}
+              ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 方向鍵整塊移動，「長高／縮短」只推頂面`
+              : '點一塊結構開始；Shift 多選'}
         </span>
         <span className="grow" />
         <span>
@@ -437,6 +479,26 @@ export default function Section3DPage() {
     </>
   );
 
+  if (!loaded)
+    return (
+      <div className="app">
+        <header className="topbar">
+          <Brand />
+        </header>
+        <div className="welcome">
+          <div className="welcome-inner">
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              開始編輯 3D 模型
+            </Typography.Title>
+            <Typography.Paragraph type="secondary" style={{ margin: '8px 0 24px' }}>
+              上傳 TCAD 輸出的材質陣列（.npy，uint8，shape (Z, Y, X)），系統會自動分出各個結構。原始陣列不會被改動；每一種情境是一個 split，匯出的陣列 shape 與 dtype 和原始相同。
+            </Typography.Paragraph>
+            <UploadPanel ed={ed} onDone={() => setLoaded(true)} />
+          </div>
+        </div>
+      </div>
+    );
+
   return (
     <div className="app">
       <header className="topbar">
@@ -445,15 +507,7 @@ export default function Section3DPage() {
             <Button type="text" icon={<MenuOutlined />} onClick={() => setLeftOpen(true)} aria-label="結構清單" />
           </Tooltip>
         )}
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fff" strokeWidth="1.6">
-              <path d="M2 13h12M4 13V8a4 4 0 0 1 8 0v5" />
-            </svg>
-          </span>
-          <span className="brand-name">Section Editor</span>
-          <Tag bordered={false}>3D</Tag>
-        </div>
+        <Brand />
         <Divider type="vertical" />
         <Text type="secondary" ellipsis style={{ maxWidth: 260 }}>
           {ed.source ?? '內建範例'} · shape ({ed.vol.Z}, {ed.vol.Y}, {ed.vol.X}) uint8

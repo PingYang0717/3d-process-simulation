@@ -31,7 +31,7 @@ function PushRow({ ed }: { ed: Editor }) {
           />
         </label>
         <label className="field">
-          <span>幾格（負值往內縮）</span>
+          <span>幾格（負＝縮）</span>
           <InputNumber value={n} onChange={setN} step={1} precision={0} addonAfter="vx" style={{ width: '100%' }} onPressEnter={apply} />
         </label>
       </Flex>
@@ -39,7 +39,7 @@ function PushRow({ ed }: { ed: Editor }) {
         {steps < 0 ? `${dir.name}縮 ${-steps} 格` : `${dir.name}長 ${steps} 格`}（{(Math.abs(steps) * ed.nmPerVoxel).toFixed(1)} nm）
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        只推那一面（{dir.hint}）；套用後選取保留，可以一直按。
+        只推那一面；套用後選取保留，可以連續按。
       </Text>
     </Flex>
   );
@@ -56,7 +56,7 @@ function MoveRow({ ed }: { ed: Editor }) {
   const d: Vec3 = [Math.round(v[0] ?? 0), Math.round(v[1] ?? 0), Math.round(v[2] ?? 0)];
   const any = d.some(Boolean);
   const apply = () => ed.translate(d);
-  const labels = ['x（右為正）', 'y（往上填負數）', 'z（後為正）'];
+  const labels = ['x', 'y（上為負）', 'z'];
   return (
     <Flex vertical gap={10}>
       <Flex gap={10}>
@@ -77,7 +77,7 @@ function MoveRow({ ed }: { ed: Editor }) {
           : ''}
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        單位 voxel。方向鍵也可以：一次 1 格，<kbd>Shift</kbd> 一次 10 格，<kbd>PgUp</kbd>／<kbd>PgDn</kbd> 走 z。
+        x 右為正、y 上為負、z 後為正。方向鍵 1 格、<kbd>Shift</kbd> 10 格，<kbd>PgUp</kbd>／<kbd>PgDn</kbd> 走 z。
       </Text>
     </Flex>
   );
@@ -162,7 +162,7 @@ export function Inspector({ ed }: { ed: Editor }) {
   if (!sel.length)
     return (
       <Flex vertical gap={20} style={{ paddingTop: 8 }}>
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="還沒選取任何結構" />
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="還沒選取結構" />
         <ol className="steps">
           <li>
             <b>選取</b>　在 3D 或切面點一塊，或點左邊清單。<kbd>Shift</kbd>＋點可以多選，例如兩根 poly。
@@ -257,23 +257,12 @@ export function Inspector({ ed }: { ed: Editor }) {
               ]}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              單位 voxel；橘色小字是和原始相比的變化，滑到數字上看 nm
+              單位 voxel；橘色＝和原始的差。滑到數字上看 nm。
             </Text>
           </>
         )}
       </Section>
-      {ed.isBase && (
-        <Alert
-          type="warning"
-          showIcon
-          message="原始模型是唯讀的"
-          description={
-            <>
-              要改的話切到某個 split，或 <Typography.Link onClick={() => ed.addSplit()}>新增一個 split</Typography.Link>。
-            </>
-          }
-        />
-      )}
+      {ed.isBase && <Alert type="info" showIcon message="直接調整會自動建立 Split 1；原始本身不會變。" />}
       <Section title="要改哪裡">
         <ZRangeRow ed={ed} />
       </Section>

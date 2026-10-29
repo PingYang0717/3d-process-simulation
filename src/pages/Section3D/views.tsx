@@ -11,6 +11,7 @@ import {
   LineBasicMaterial,
   LineSegments,
   Mesh,
+  MeshBasicMaterial,
   MeshLambertMaterial,
   PerspectiveCamera,
   Plane,
@@ -21,7 +22,7 @@ import {
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { type Axis, type BBox, type Material, type Vec3, type Volume, type ZRange, buildFaces, hexToRgb, idx } from '../../volume/volume';
+import { type Axis, type BBox, type Material, type Vec3, type Volume, type ZRange, VOID, buildFaces, hexToRgb, idx } from '../../volume/volume';
 import { type SelectMode, selectModeOf } from './editor';
 
 const SEL_RGB: Vec3 = [22, 119, 255];
@@ -39,6 +40,8 @@ interface Ctx {
   faceVoxel?: Int32Array;
   selFill?: Mesh<BufferGeometry, MeshLambertMaterial>;
   selBox?: LineSegments;
+  voidMesh?: Mesh<BufferGeometry, MeshBasicMaterial>;
+  voidEdges?: LineSegments<EdgesGeometry, LineBasicMaterial>;
   cross?: LineSegments;
 }
 
@@ -50,6 +53,7 @@ const dispose = (scene: Scene, obj?: Mesh | LineSegments) => {
 
 /**
  * 3D：暴露面網格（vertex color）、改過的體素混紅、選取半透明網格＋bbox 線框、橘色十字、剖開。
+ * xray：VOID 另畫一層、關掉深度測試，所以藏在結構裡的空洞也看得到；translucent：材質半透明。
  * 體素 y 向下，所以網格 scale y = −1 再平移，讓畫面上方 = y 索引小。
  */
 export function View3D({
@@ -65,6 +69,8 @@ export function View3D({
   onMenu,
   floatRef,
   handle,
+  xray = false,
+  translucent = false,
 }: {
   vol: Volume;
   materials: Material[];
@@ -78,6 +84,8 @@ export function View3D({
   onMenu: (voxel: number | null, x: number, y: number) => void;
   floatRef: RefObject<HTMLDivElement>;
   handle: MutableRefObject<View3DHandle | null>;
+  xray?: boolean;
+  translucent?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<Ctx | null>(null);
@@ -202,13 +210,71 @@ export function View3D({
       c.mesh.material.dispose();
       dispose(c.scene, c.mesh);
     }
-    const mesh = new Mesh(g, new MeshLambertMaterial({ vertexColors: true, side: DoubleSide, clippingPlanes: prevClip }));
+    const mesh = new Mesh(
+      g,
+      new MeshLambertMaterial({
+        vertexColors: true,
+        side: DoubleSide,
+        clippingPlanes: prevClip,
+        transparent: translucent,
+        opacity: translucent ? 0.3 : 1,
+        depthWrite: !translucent,
+      }),
+    );
     mesh.scale.set(1, -1, 1);
     mesh.position.y = vol.Y;
     c.scene.add(mesh);
     c.mesh = mesh;
     c.faceVoxel = f.faceVoxel;
-  }, [vol, materials, hidden, diffMask]);
+  }, [vol, materials, hidden, diffMask, translucent]);
+
+  // 空洞透視：VOID 永遠畫在最上面
+  useEffect(() => {
+    const c = ctxRef.current;
+    if (!c) return;
+    if (c.voidMesh) {
+      c.voidMesh.material.dispose();
+      dispose(c.scene, c.voidMesh);
+      c.voidMesh = undefined;
+    }
+    if (c.voidEdges) {
+      c.voidEdges.material.dispose();
+      dispose(c.scene, c.voidEdges);
+      c.voidEdges = undefined;
+    }
+    if (!xray || hidden.has(VOID)) return;
+    const mask = new Uint8Array(vol.data.length);
+    let n = 0;
+    for (let i = 0; i < mask.length; i++)
+      if (vol.data[i] === VOID) {
+        mask[i] = 1;
+        n++;
+      }
+    if (!n) return;
+    const f = buildFaces(vol, () => [17, 17, 17], mask);
+    const g = new BufferGeometry();
+    g.setAttribute('position', new BufferAttribute(f.positions, 3));
+    g.setAttribute('normal', new BufferAttribute(f.normals, 3));
+    const clip = c.mesh?.material.clippingPlanes ?? [];
+    const voidMesh = new Mesh(
+      g,
+      new MeshBasicMaterial({ color: 0x262626, transparent: true, opacity: 0.8, depthTest: false, side: DoubleSide, clippingPlanes: clip }),
+    );
+    voidMesh.scale.set(1, -1, 1);
+    voidMesh.position.y = vol.Y;
+    voidMesh.renderOrder = 3;
+    c.scene.add(voidMesh);
+    c.voidMesh = voidMesh;
+    const edges = new LineSegments(
+      new EdgesGeometry(g, 30),
+      new LineBasicMaterial({ color: 0xff7875, depthTest: false, transparent: true, opacity: 0.75, clippingPlanes: clip }),
+    );
+    edges.scale.set(1, -1, 1);
+    edges.position.y = vol.Y;
+    edges.renderOrder = 4;
+    c.scene.add(edges);
+    c.voidEdges = edges;
+  }, [vol, hidden, xray]);
 
   // 選取：半透明網格（只含 affMask）＋ bbox 線框
   useEffect(() => {
@@ -250,7 +316,9 @@ export function View3D({
     const planes = clipZ === null ? [] : [new Plane(new Vector3(0, 0, -1), clipZ + 1)];
     c.mesh.material.clippingPlanes = planes;
     if (c.selFill) c.selFill.material.clippingPlanes = planes;
-  }, [clipZ, vol, selMask, materials, hidden, diffMask]);
+    if (c.voidMesh) c.voidMesh.material.clippingPlanes = planes;
+    if (c.voidEdges) c.voidEdges.material.clippingPlanes = planes;
+  }, [clipZ, vol, selMask, materials, hidden, diffMask, xray, translucent]);
 
   // 十字
   useEffect(() => {

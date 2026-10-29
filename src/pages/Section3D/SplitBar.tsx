@@ -31,9 +31,6 @@ export function SplitBar({
 
   return (
     <div className="splitbar">
-      <Text strong style={{ fontSize: 12, marginRight: 4 }}>
-        Split
-      </Text>
       <div className="split-tabs" role="tablist">
         {tabs.map((t) => {
           const on = t.id === ed.activeId;
@@ -61,7 +58,6 @@ export function SplitBar({
                         icon: <DeleteOutlined />,
                         label: '刪除',
                         danger: true,
-                        disabled: ed.splits.length <= 1,
                         onClick: () => ed.removeSplit(s.id),
                       },
                     ],
@@ -96,14 +92,23 @@ export function SplitBar({
           新增
         </Button>
       </Dropdown>
+      {!ed.splits.length && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          還沒有 split：直接在原始上改會自動建立 Split 1，或按「新增」
+        </Text>
+      )}
       <span className="grow" />
-      <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-        <kbd>[</kbd>
-        <kbd>]</kbd> 切換
-      </Text>
-      <Button size="small" type={compare ? 'primary' : 'default'} icon={<AppstoreOutlined />} onClick={() => setCompare(!compare)}>
-        並排比較
-      </Button>
+      {ed.splits.length > 0 && (
+        <>
+          <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+            <kbd>[</kbd>
+            <kbd>]</kbd> 切換
+          </Text>
+          <Button size="small" type={compare ? 'primary' : 'default'} icon={<AppstoreOutlined />} onClick={() => setCompare(!compare)}>
+            並排比較
+          </Button>
+        </>
+      )}
       <Modal title="重新命名" open={!!renaming} onCancel={() => setRenaming(null)} onOk={finishRename} okText="確定" width={360} destroyOnClose>
         <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} onPressEnter={finishRename} />
       </Modal>

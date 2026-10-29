@@ -48,7 +48,7 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
             onDone();
           }}
         >
-          載入範例（3 根 fin × 3 根 poly）
+          用範例試試看（3 根 fin × 3 根 poly，Poly-Si 3 裡有 bamboo defect）
         </Button>
       </Flex>
     </Flex>

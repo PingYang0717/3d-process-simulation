@@ -58,7 +58,7 @@ export const MATERIALS: Material[] = [
   { id: 5, name: 'TiN', color: '#8e9aaf' },
   { id: 6, name: 'Poly-Si', color: '#e8604c' },
   { id: 7, name: 'SiN', color: '#c9b6e8' },
-  { id: VOID, name: 'VOID', color: '#111111' },
+  { id: VOID, name: 'VOID（空洞）', color: '#1f1f1f' },
 ];
 
 export const isVoid = (id: number) => id === VOID;
@@ -81,7 +81,7 @@ export const coordOf = (v: Volume, i: number): Vec3 => {
 const inside = (v: Volume, x: number, y: number, z: number) =>
   x >= 0 && y >= 0 && z >= 0 && x < v.X && y < v.Y && z < v.Z;
 
-/** 範例：3 根 fin × 3 根 poly gate，160×96×128。 */
+/** 範例：3 根 fin × 3 根 poly gate，160×96×128；Poly-Si 3 裡有 3 片 bamboo defect（VOID）。 */
 export function demoVolume(): Volume {
   const X = 160;
   const Y = 96;
@@ -134,6 +134,9 @@ export function demoVolume(): Volume {
           if (d <= 2) data[at(x, y, z)] = 4;
           else if (d <= 4) data[at(x, y, z)] = 5;
         }
+  for (const z of [96, 101, 106])
+    for (let y = 24; y < 56; y++)
+      for (let x = 24; x < 136; x++) if (data[at(x, y, z)] === 6) data[at(x, y, z)] = VOID;
   return { X, Y, Z, data };
 }
 
@@ -291,6 +294,34 @@ const shiftMask = (vol: Volume, mask: Uint8Array, d: Vec3) => {
 };
 
 /**
+ * 每條沿 d 軸的線上，只留 mask 在 d 方向最外側的那一格（真正的外表面）。
+ * 結構內部的空洞邊界不算，所以推面不會長進 void、也不會從 void 往外蝕。
+ */
+const outerFace = (vol: Volume, mask: Uint8Array, d: Vec3) => {
+  const { X, Y, Z } = vol;
+  const out = new Uint8Array(mask.length);
+  const axis = d[0] ? 0 : d[1] ? 1 : 2;
+  const sign = d[0] + d[1] + d[2];
+  const len = axis === 0 ? X : axis === 1 ? Y : Z;
+  // (a, b) 走過垂直於該軸的平面，t 沿軸
+  const at =
+    axis === 0
+      ? (a: number, b: number, t: number) => (b * Y + a) * X + t
+      : axis === 1
+        ? (a: number, b: number, t: number) => (b * Y + t) * X + a
+        : (a: number, b: number, t: number) => (t * Y + b) * X + a;
+  const A = axis === 0 ? Y : X;
+  const B = axis === 2 ? Y : Z;
+  for (let b = 0; b < B; b++)
+    for (let a = 0; a < A; a++) {
+      let hit = -1;
+      for (let t = 0; t < len; t++) if (mask[at(a, b, t)] && (sign > 0 || hit < 0)) hit = t;
+      if (hit >= 0) out[at(a, b, hit)] = 1;
+    }
+  return out;
+};
+
+/**
  * 從 (x, y, z) 起沿 step 收集前方薄層的體素（遇到 Air、stopMat 或厚於 LINER_MAX 的材質就停）。
  */
 const collectLiners = (vol: Volume, start: Vec3, step: Vec3, stopMat: number) => {
@@ -340,7 +371,7 @@ export function growMask(
     const out = new Uint8Array(cur.data);
     const d: Vec3 = n > 0 ? dir : [-dir[0], -dir[1], -dir[2]];
     if (n > 0) {
-      const front = shiftMask(cur, m, d);
+      const front = shiftMask(cur, outerFace(cur, m, d), d);
       for (let z = zRange[0]; z <= zRange[1]; z++)
         for (let y = 0; y < Y; y++)
           for (let x = 0; x < X; x++) {
@@ -363,14 +394,14 @@ export function growMask(
       m = new Uint8Array(m);
       for (let i = 0; i < m.length; i++) if (front[i]) m[i] = 1;
     } else {
-      // d 指向要退的方向（dir 的反向）；「前排」= mask 中沿 dir 再走一格就出 mask 的體素
-      const inner = shiftMask(cur, m, d);
+      // d 指向要退的方向（dir 的反向）；要退掉的是 dir 方向最外側那一層
       const back: Vec3 = [-d[0], -d[1], -d[2]];
+      const face = outerFace(cur, m, back);
       for (let z = zRange[0]; z <= zRange[1]; z++)
         for (let y = 0; y < Y; y++)
           for (let x = 0; x < X; x++) {
             const i = (z * Y + y) * X + x;
-            if (!m[i] || inner[i]) continue;
+            if (!face[i]) continue;
             const mat = cur.data[i];
             let pulled = false;
             if (follow) {

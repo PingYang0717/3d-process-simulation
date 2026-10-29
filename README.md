@@ -13,7 +13,9 @@ npm test           # 逐體素測試（vitest）
 npm run build      # 型別檢查 + 打包
 ```
 
-沒有陣列時會載入內建範例（3 根 fin × 3 根 poly，160×96×128）。
+打開後先上傳 `.npy`，或用內建範例（3 根 fin × 3 根 poly，160×96×128，Poly-Si 3 裡有 bamboo defect）。
+
+「原始」永遠唯讀：直接在原始上調整會自動建立 Split 1，原始陣列不變。推面（長高／縮短）只推結構在那個方向最外側的表面，內部空洞不會被填、也不會往外蝕。
 
 ## 檔案
 
@@ -24,7 +26,7 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/editor.ts` | `applyOp`／`replay`／`opText`／`sweepOps`（純函式）與 `useEditor`：splits、選取、z 範圍、commit／undo／redo、鍵盤 |
 | `src/pages/Section3D/views.tsx` | `View3D`（three.js、射線點選、選取網格、剖開、小標籤）、`SliceView`（ImageData、十字、z 框） |
 | `src/pages/Section3D/*.tsx` | Inspector、ChangesTab、SplitsTab、SplitBar、SweepModal、CompareView、StructureList、SettingsDrawer、UploadPanel、HelpDrawer、index（版面） |
-| `src/ui/` | Swatch、StatTile、download |
+| `src/ui/` | Swatch、StatTile、download、theme（antd 主題） |
 
 面板不直接碰 Volume；所有改體素的路徑都經過 `useEditor` 的 `commit`，所以每一步都有 Op 記錄、都能復原、都能在別的 split 重播。
 

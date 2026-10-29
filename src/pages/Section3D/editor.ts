@@ -144,10 +144,9 @@ export function useEditor() {
     const vol = demoVolume();
     return { vol, L: initialLabeled(vol, matNameOf(MATERIALS)) };
   });
-  const [splits, setSplits] = useState<Split[]>(() => [
-    { id: 's1', name: 'Split 1', cur: orig, ops: [], hist: [], future: [] },
-  ]);
-  const [activeId, setActiveId] = useState('s1');
+  // 一開始只有「原始」；第一次在原始上調整會自動建立 Split 1
+  const [splits, setSplits] = useState<Split[]>([]);
+  const [activeId, setActiveId] = useState(BASE_ID);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<Vec3>([80, 50, 64]);
@@ -158,7 +157,7 @@ export function useEditor() {
   const [last, setLast] = useState<{ text: string; at: number } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const keySeq = useRef(1000);
-  const splitSeq = useRef(2);
+  const splitSeq = useRef(1);
   const newKey = useCallback(() => `c${keySeq.current++}`, []);
   const newSplitId = () => `s${splitSeq.current++}`;
 
@@ -233,7 +232,14 @@ export function useEditor() {
   const commit = useCallback(
     (op: Op) => {
       if (!active) {
-        setLast({ text: '「原始」不能改：請切到某個 split，或按「＋」新增一個', at: Date.now() });
+        // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始
+        const next = applyOp(orig, op, ctx);
+        const id = newSplitId();
+        const name = `Split ${splits.length + 1}`;
+        setSplits((all) => [...all, { id, name, cur: next, ops: [op], hist: [{ snap: orig, ops: [] }], future: [] }]);
+        setActiveId(id);
+        keepSel(next);
+        setLast({ text: `原始保持不變，已自動建立 ${name}：${describe(op, orig.L)}`, at: Date.now() });
         return;
       }
       const next = applyOp(active.cur, op, ctx);
@@ -253,7 +259,7 @@ export function useEditor() {
       keepSel(next);
       setLast({ text: describe(op, active.cur.L), at: Date.now() });
     },
-    [active, ctx, describe],
+    [active, orig, splits.length, ctx, describe],
   );
 
   const undo = useCallback(() => {
@@ -327,15 +333,14 @@ export function useEditor() {
 
   const removeSplit = useCallback(
     (id: string) => {
-      if (splits.length <= 1) return;
       const rest = splits.filter((s) => s.id !== id);
       setSplits(rest);
-      if (activeId === id) setActiveId(rest[0].id);
+      if (activeId === id) setActiveId(rest[0]?.id ?? BASE_ID);
     },
     [splits, activeId],
   );
 
-  /** 一次產生多個 split；若唯一的 split 還沒改過，會被取代。 */
+  /** 一次產生多個 split，接在現有的後面。 */
   const addSweep = useCallback(
     (kind: SweepKind, values: number[], unit: 'nm' | 'vx', nameOf: (v: number) => string, extend: boolean) => {
       if (!sel.size) return [];
@@ -347,7 +352,7 @@ export function useEditor() {
         const all = [...prefix, op];
         return { id: newSplitId(), name: nameOf(values[i]), cur: replay(orig, all, ctx), ops: all, hist: [], future: [] };
       });
-      setSplits((all) => [...(all.length === 1 && !all[0].ops.length && !extend ? [] : all), ...made]);
+      setSplits((all) => [...all, ...made]);
       setActiveId(made[0].id);
       setLast({ text: `已產生 ${made.length} 個 split`, at: Date.now() });
       return made.map((s) => s.id);
@@ -431,9 +436,9 @@ export function useEditor() {
     setMaterials(mats);
     const state = { vol: v, L: initialLabeled(v, matNameOf(mats)) };
     setOrig(state);
-    splitSeq.current = 2;
-    setSplits([{ id: 's1', name: 'Split 1', cur: state, ops: [], hist: [], future: [] }]);
-    setActiveId('s1');
+    splitSeq.current = 1;
+    setSplits([]);
+    setActiveId(BASE_ID);
     setSel(new Set());
     setHidden(new Set());
     setLast(null);

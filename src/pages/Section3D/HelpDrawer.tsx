@@ -1,0 +1,64 @@
+import { Drawer, Typography } from 'antd';
+
+const HELP: [string, [string, string][]][] = [
+  [
+    'Split（同一個模型、多種情境）',
+    [
+      ['是什麼', '每個 split 都從同一個原始模型出發，各自記錄做了哪些步驟；左上角的 Split 列切換，[ ] 鍵也可以。'],
+      ['一次產生 1／2／3 nm', '先選好結構，按 Split 列的「＋ 新增 → 同一個操作、不同數值」，填 1, 2, 3 就會產生三個 split。'],
+      ['並排看', 'Split 列右邊的「並排比較」：每個 split 一張切面，紅框是和原始不同的地方，下面列出選取結構的尺寸和做過的步驟。'],
+      ['匯出', '右上角「匯出」可以只匯出目前這個，或全部打包成 zip（每個 split 一個 .npy ＋ manifest.json）。'],
+    ],
+  ],
+  [
+    '選取',
+    [
+      ['選一個', '在 3D 點一塊、在切面點一下，或點左邊清單。'],
+      ['選兩根 poly', '點第一根，Shift＋點第二根；右欄會列出每一根的尺寸，之後的調整都一起套用。'],
+      ['選整組', '點左邊清單的材質名稱。Ctrl+A 全選、Esc 取消。'],
+      ['只改一段', '右欄「要改哪裡」切到「只改其中一段（z）」，填 z 從幾到幾。'],
+    ],
+  ],
+  [
+    '調整',
+    [
+      ['一直往上微調', '選好後按右欄「長高／縮短」套用（預設往上 1），或 3D 上方工具列的「長高」；選取不會消失，可以連續按。'],
+      ['移動', '方向鍵（Shift 一次 10，PgUp／PgDn 走 z），或右欄「移動」輸入 x／y／z。'],
+      ['換材質', '右欄「材質」下拉，或 3D 上方的材質下拉。「設為 VOID」做空洞。'],
+      ['襯層', '設定裡「推面時外層薄層一起推」預設開：HfO₂／TiN 跟著位移而不是被蓋掉。'],
+    ],
+  ],
+  [
+    '畫面',
+    [
+      ['3D', '拖拉轉視角、滾輪縮放、右鍵拖平移；「重設視角」回到預設。右鍵點一下開選取選單。'],
+      ['切面', '三個切面跟著橘色十字；在切面上滾輪換切片。'],
+      ['剖開', '3D 右上角「剖開」只畫到目前 z 切面，看得到 gate 裡面。'],
+      ['隱藏材質', '左欄材質旁的眼睛。'],
+      ['看原始', '按住 3D 上方「看原始」或鍵盤 B。'],
+      ['復原', 'Ctrl+Z／Ctrl+Y。'],
+    ],
+  ],
+];
+
+export function HelpDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return (
+    <Drawer title="怎麼操作" open={open} onClose={onClose} width={400}>
+      <div className="help">
+        {HELP.map(([title, items]) => (
+          <section key={title}>
+            <Typography.Title level={5}>{title}</Typography.Title>
+            <dl>
+              {items.map(([k, v]) => (
+                <div key={k}>
+                  <dt>{k}</dt>
+                  <dd>{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        ))}
+      </div>
+    </Drawer>
+  );
+}

@@ -621,7 +621,9 @@ M3
 
 ### M4 相對式套用（總量 M，可選）
 
-- [ ] M　gesture 欄位、每片重描與重做、退回與報告
+- [x] M　gesture 欄位、每片重描與重做、退回與報告：`ProfileOp.gestures`、`slice/relative.ts`、報告 `fallback`
+
+狀態：完成（`relative.test.ts`：每片多的格數相同、blocked 0、沒有退回；對照絕對座標時偏移段不同；故意對不到時全部退回並回報）。manifest 裡每個 Op 另附 `report`（填／推／被擋／略過／改動格數），重播時忽略。
 
 驗收：人工做一條在 z 方向偏移 1 格的 fin，`profile` 推斜邊往外 3 掃過整根，每片都剛好多 3 格、blocked 0。
 

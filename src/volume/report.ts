@@ -10,7 +10,7 @@ export interface SliceReport {
 }
 export interface OpReport {
   axis: Axis;
-  total: { filled: number; pushed: number; removed: number; blocked: number; skippedSlices: number };
+  total: { filled: number; pushed: number; removed: number; blocked: number; skippedSlices: number; fallbackSlices: number };
   blockedBy: Record<number, number>;
   /** 有被擋的片（沿 scope 的軸），由小到大。 */
   slices: SliceReport[];
@@ -34,7 +34,7 @@ export function summarize(r: Report, input: Op | LegacyOp, dims: Pick<Volume, 'X
   }
   return {
     axis,
-    total: { filled: r.filled, pushed: r.pushed, removed: r.removed, blocked: r.blocked, skippedSlices: r.skipped.length },
+    total: { filled: r.filled, pushed: r.pushed, removed: r.removed, blocked: r.blocked, skippedSlices: r.skipped.length, fallbackSlices: new Set(r.fallback).size },
     blockedBy: r.blockedBy,
     slices: [...per.entries()].sort((p, q) => p[0] - q[0]).map(([at, blocked]) => ({ at, blocked })),
     cells: r.blockedAt.slice(0, BLOCKED_CAP),

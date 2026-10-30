@@ -3,7 +3,8 @@ import type { Axis, Backfill, Vec3 } from '../volume/volume';
 import type { Op } from '../volume/ops';
 import type { Scope } from '../volume/scope';
 import { uvTo3D } from '../volume/scope';
-import { encodeRle } from '../volume/profile';
+import { encodeRle } from '../volume/rle';
+import { recordGesture } from './relative';
 import { type Ring, type XY, ringPolygon } from './trace';
 import { deltaOf, editRing, rasterize } from './raster';
 
@@ -246,7 +247,9 @@ export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, sh
     h.kind === 'node'
       ? `${shift ? '單點' : '節點'}${uvWord(Math.round(delta[0]), Math.round(delta[1]))}移 (${Math.round(delta[0])}, ${Math.round(delta[1])})`
       : `${shift ? '單段' : '邊'}往${edgeAmount(r, h, delta, shift) > 0 ? '外' : '內'} ${Math.abs(edgeAmount(r, h, delta, shift))} vx（${(Math.abs(edgeAmount(r, h, delta, shift)) * g.nm).toFixed(1)} nm）`;
-  return { kind: 'profile', keys, scope: g.scope, at: g.at, perKey: { [h.key]: perKey }, follow: g.follow, backfill: g.backfill, text };
+  // 相對式（§7.8）：記下手勢本身，每一片找同一個把手重做
+  const rel = recordGesture(rings.get(h.key)!, h, delta, h.kind === 'edge' ? edgeAmount(r, h, delta, shift) : 0, shift);
+  return { kind: 'profile', keys, scope: g.scope, at: g.at, perKey: { [h.key]: perKey }, follow: g.follow, backfill: g.backfill, text, ...(rel ? { gestures: { [h.key]: rel } } : {}) };
 }
 
 /** 一個結構的環（第 ring 個改了 disp）→ 這一片要加、要拿的格子（RLE）。沒有改到回傳 null。 */

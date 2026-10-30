@@ -19,8 +19,10 @@ export interface Report {
   blockedAt: number[];
   /** 沒有這個結構而略過的片（profile 用；整個陣列的索引）。 */
   skipped: number[];
+  /** 相對式套用對不到把手、退回絕對座標的片（profile 用）。 */
+  fallback: number[];
 }
-export const newReport = (): Report => ({ filled: 0, pushed: 0, removed: 0, blocked: 0, blockedBy: {}, blockedAt: [], skipped: [] });
+export const newReport = (): Report => ({ filled: 0, pushed: 0, removed: 0, blocked: 0, blockedBy: {}, blockedAt: [], skipped: [], fallback: [] });
 export function mergeReport(a: Report, b: Report): Report {
   const blockedBy = { ...a.blockedBy };
   for (const [k, v] of Object.entries(b.blockedBy)) blockedBy[+k] = (blockedBy[+k] ?? 0) + v;
@@ -32,6 +34,7 @@ export function mergeReport(a: Report, b: Report): Report {
     blockedBy,
     blockedAt: [...a.blockedAt, ...b.blockedAt],
     skipped: [...a.skipped, ...b.skipped],
+    fallback: [...a.fallback, ...b.fallback],
   };
 }
 

@@ -386,7 +386,7 @@ export function useEditor() {
   const resultText = (r: StepReport & { changed?: number }) =>
     `${r.changed !== undefined ? ` · ${r.changed.toLocaleString()} 格` : ''}${r.total.blocked ? ` · ${blockedText(r)}` : ''}${
       r.total.skippedSlices ? ` · ${r.total.skippedSlices} 片沒有這個結構，略過` : ''
-    }`;
+    }${r.total.fallbackSlices ? ` · ${r.total.fallbackSlices} 片對不到同一個${r.op.kind === 'profile' && Object.values(r.op.gestures ?? {})[0]?.kind === 'node' ? '節點' : '邊'}，用參考片的位置` : ''}`;
 
   const keepSel = (s: EditState) => setSel((prev) => new Set([...prev].filter((k) => s.L.comps.some((c) => c.key === k))));
 
@@ -451,6 +451,9 @@ export function useEditor() {
       return;
     }
     const next = r.next;
+    // 寫進 manifest 的結果摘要（重播時忽略，§11）
+    const t = rep.total;
+    op = { ...op, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed: rep.changed } } as unknown as Op;
     const entry: HistEntry = { step: r.step, ops: active ? active.ops : [], version: sidOf(from) };
     if (!active) {
       // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始

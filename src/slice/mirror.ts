@@ -2,9 +2,10 @@
 // 對其他結構找對應的節點／邊（座標正規化到各自外框的 [0,1]²），一起做成一個 Op。
 // 保險：只對同材質、外框長寬比相差 ≤ 20%、面積相差 ≤ 30% 的結構配對；配不到的不動並回報。
 import type { Op } from '../volume/ops';
-import type { Rle2D } from '../volume/profile';
+import type { Rle2D } from '../volume/rle';
 import type { Ring, XY } from './trace';
 import { type GestureCtx, type Handle, dragDisp, edgeAmount, gestureToOp, groupNormal, profileDelta, smoothEdgeGroup } from './gestures';
+import { type RelGesture, recordGesture } from './relative';
 
 export const NODE_TOL = 0.12;
 export const EDGE_TOL = 0.2;
@@ -110,14 +111,19 @@ export function mirroredOp(
     return { op: { ...main, keys: [main.keys[0], ...pairs.map(([k]) => k)] }, missed };
   // 混在一起：每個結構各自一份 profile
   const perKey: Record<string, { add: Rle2D; remove: Rle2D }> = {};
+  const gestures: Record<string, RelGesture> = {};
   for (const [, c] of [[h.key, h] as [string, Handle], ...pairs]) {
     const r = rings.get(c.key)![c.ring];
-    const pd = profileDelta(rings.get(c.key)!, c.ring, dragDisp(r, c, c === h ? delta : deltaFor(c), shift), (u, v) => g.inside(c.key, u, v));
-    if (pd) perKey[c.key] = pd;
-    else missed.push(c.key);
+    const dl = c === h ? delta : deltaFor(c);
+    const pd = profileDelta(rings.get(c.key)!, c.ring, dragDisp(r, c, dl, shift), (u, v) => g.inside(c.key, u, v));
+    if (pd) {
+      perKey[c.key] = pd;
+      const rel = recordGesture(rings.get(c.key)!, c, dl, c.kind === 'edge' ? amt : 0, shift);
+      if (rel) gestures[c.key] = rel;
+    } else missed.push(c.key);
   }
   const keys = Object.keys(perKey);
   if (!keys.length) return { op: null, missed };
   const text = main.kind === 'profile' ? main.text : h.kind === 'edge' ? `邊往${amt > 0 ? '外' : '內'} ${Math.abs(amt)} vx` : '剖面調整';
-  return { op: { kind: 'profile', keys, scope: g.scope, at: g.at, perKey, follow: g.follow, backfill: g.backfill, text: `${text}（對應 ${keys.length} 個）` }, missed };
+  return { op: { kind: 'profile', keys, scope: g.scope, at: g.at, perKey, follow: g.follow, backfill: g.backfill, text: `${text}（對應 ${keys.length} 個）`, gestures }, missed };
 }

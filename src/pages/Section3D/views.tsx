@@ -29,6 +29,8 @@ import {
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
+import { Group } from 'three';
+import type { ChunkItem } from '../../volume/worker';
 import {
   type Axis,
   type BBox,
@@ -94,7 +96,12 @@ interface Ctx {
   scene: Scene;
   camera: PerspectiveCamera;
   controls: OrbitControls;
+  /** 主網格的材質與座標轉換（幾何是空的）；真正畫的是 parts（每個 chunk 一個 Mesh，§8.4）。 */
   mesh: Mesh<BufferGeometry, MeshLambertMaterial>;
+  parts: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>;
+  partGroup: Group;
+  /** 目前畫的是哪個版本、哪種畫法（下一次只要改到的 chunk）。 */
+  shown: { sid: number; key: string } | null;
   ghostMesh: Mesh<BufferGeometry, MeshLambertMaterial>;
   changedEdges: LineSegments<BufferGeometry, LineBasicMaterial>;
   selFill: Mesh<BufferGeometry, MeshLambertMaterial>;
@@ -207,6 +214,28 @@ const withHole = <M extends MeshLambertMaterial>(m: M, hole: Ctx['hole']) => {
   };
   m.customProgramCacheKey = () => 'hole';
   return m;
+};
+
+/** 換 chunk 網格：full = 全部換掉；否則只換 items 裡的（quads = 0 的拿掉）。每個 chunk 自己一棵 BVH。 */
+const setParts = (c: Ctx, items: ChunkItem[], full: boolean) => {
+  const drop = (k: number) => {
+    const p = c.parts.get(k);
+    if (!p) return;
+    c.partGroup.remove(p);
+    p.geometry.dispose();
+    c.parts.delete(k);
+  };
+  if (full) for (const k of [...c.parts.keys()]) drop(k);
+  for (const { k, m } of items) {
+    drop(k);
+    if (!m.quads) continue;
+    const g = toGeometry(m);
+    g.boundsTree = new MeshBVH(g);
+    const part = new Mesh(g, c.mesh.material);
+    part.raycast = acceleratedRaycast;
+    c.partGroup.add(part);
+    c.parts.set(k, part);
+  }
 };
 
 /** 收掉即時預覽：預覽網格藏起來、主網格不再挖洞。 */
@@ -391,6 +420,13 @@ export function View3D({
   /** hover 到的結構名稱，貼在游標旁。 */
   const [hoverTag, setHoverTag] = useState<{ text: string; x: number; y: number } | null>(null);
   const [meshing, setMeshing] = useState(false);
+  /** 還要畫幾格（0 = 靜止不畫）；kick() 之後至少再畫兩格。 */
+  const dirty = useRef(3);
+  const kick = () => {
+    dirty.current = Math.max(dirty.current, 2);
+  };
+  // 每次 React 更新（換狀態、選取、剖面、預覽…）都可能改了場景
+  useEffect(kick);
   const meshingRef = useRef(false);
   meshingRef.current = meshing;
   const busyRef = useRef(busy);
@@ -446,12 +482,12 @@ export function View3D({
     const probe = new Raycaster();
     /** 從 pos 看 target 會不會先被別的面擋住（對準選取用）。 */
     const occluded = (pos: Vector3, target: Vector3, radius: number) => {
-      if (!mesh.geometry.attributes.position) return false;
+      if (!parts.size) return false;
       const dir = target.clone().sub(pos);
       const dist = dir.length();
       probe.set(pos, dir.normalize());
       probe.firstHitOnly = true;
-      const h = probe.intersectObject(mesh, false)[0];
+      const h = probe.intersectObjects([...parts.values()], false)[0];
       return !!h && h.distance < dist - radius;
     };
     const setView = (preset: ViewPreset) => {
@@ -507,6 +543,11 @@ export function View3D({
     const mesh = voxelSpace(new Mesh(new BufferGeometry(), withHole(new MeshLambertMaterial(mainParams), hole)));
     // 點選與滑過提示走 BVH（three-mesh-bvh），不必每次掃過全部三角形
     mesh.raycast = acceleratedRaycast;
+    const parts = new Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>();
+    const partGroup = new Group();
+    partGroup.scale.set(1, -1, 1);
+    partGroup.position.y = vol.Y;
+    scene.add(partGroup);
     const previewMesh = voxelSpace(new Mesh(new BufferGeometry(), new MeshLambertMaterial(mainParams)));
     previewMesh.visible = false;
     const ghostMesh = voxelSpace(
@@ -558,7 +599,7 @@ export function View3D({
     const capEdges = new LineSegments(new EdgesGeometry(cap.geometry), new LineBasicMaterial({ color: 0xd46b08 }));
     capEdges.visible = false;
     scene.add(capEdges);
-    ctxRef.current = { renderer, scene, camera, controls, mesh, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
+    ctxRef.current = { renderer, scene, camera, controls, mesh, parts, partGroup, shown: null, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
     // 按下要在 OrbitControls（掛在 canvas 上）之前決定是不是筆刷：capture 階段先跑，筆刷就先把 controls 關掉，
     // OrbitControls 連這一下都不會記到。之前是 React 的 onPointerDown 事後才關，OrbitControls 已經記了一個指標、
     // 又因為指標被我們捕捉而收不到放開，之後滾輪縮放就一直沒反應（視角像被鎖住）。
@@ -569,8 +610,8 @@ export function View3D({
       flashTimer.forEach(clearTimeout);
       flashTimer = [];
       const m = selBox.material;
-      const on = () => m.color.setHex(BRUSH_COLOR);
-      const off = () => m.color.setHex(0x1677ff);
+      const on = () => (m.color.setHex(BRUSH_COLOR), kick());
+      const off = () => (m.color.setHex(0x1677ff), kick());
       if (reducedMotion()) return;
       [0, 300, 600].forEach((t) => {
         flashTimer.push(setTimeout(on, t));
@@ -579,7 +620,9 @@ export function View3D({
     };
 
     const recolor = (mask: Uint8Array, color: Vec3) => {
-      const g = mesh.geometry;
+      for (const part of parts.values()) recolorGeometry(part.geometry, mask, color);
+    };
+    const recolorGeometry = (g: BufferGeometry, mask: Uint8Array, color: Vec3) => {
       const pos = g.attributes.position;
       const nor = g.attributes.normal;
       const col = g.attributes.color;
@@ -603,6 +646,7 @@ export function View3D({
         }
       }
       col.needsUpdate = true;
+      kick();
     };
     handle.current = { setView, recolor, flash };
 
@@ -610,6 +654,7 @@ export function View3D({
       const w = host.clientWidth;
       const h = host.clientHeight;
       if (!w || !h) return;
+      kick();
       renderer.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
@@ -625,6 +670,11 @@ export function View3D({
       ['z', new Vector3(0, 0, 1)],
     ];
     let raf = 0;
+    // 只在有變化時才畫（鏡頭動、動畫、滑鼠事件、React 更新、Worker 結果到了）：
+    // 靜止時不佔主執行緒，Worker 結果回來能馬上處理
+    controls.addEventListener('change', kick);
+    const kickEvents = ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown'] as const;
+    kickEvents.forEach((ev) => host.addEventListener(ev, kick, { passive: true }));
     const tick = () => {
       if (anim) {
         const k = Math.min(1, (performance.now() - anim.start) / anim.ms);
@@ -632,8 +682,15 @@ export function View3D({
         camera.position.lerpVectors(anim.p0, anim.p1, e);
         controls.target.lerpVectors(anim.t0, anim.t1, e);
         if (k >= 1) anim = null;
+        kick();
       }
-      controls.update();
+      // 阻尼還在動時 update 會回 true
+      if (controls.update()) kick();
+      if (dirty.current <= 0) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      dirty.current--;
       renderer.render(scene, camera);
       const tag = floatRef.current;
       const b = bboxRef.current;
@@ -684,6 +741,8 @@ export function View3D({
     tick();
     return () => {
       cancelAnimationFrame(raf);
+      controls.removeEventListener('change', kick);
+      kickEvents.forEach((ev) => host.removeEventListener(ev, kick));
       flashTimer.forEach(clearTimeout);
       ro.disconnect();
       host.removeEventListener('pointerdown', onDown, { capture: true });
@@ -701,27 +760,22 @@ export function View3D({
     };
   }, [vol.X, vol.Y, vol.Z]);
 
-  // 主網格（Worker greedy mesh）；差異模式另外要一層半透明的「沒改」；只採用最新一次請求的結果
+  // 主網格（Worker greedy mesh，切 chunk）：一步之後只換改到的 chunk（§8.4）；差異模式另外要一層半透明的「沒改」。
+  // 只採用最新一次請求的結果
   const meshSeq = useRef(0);
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
     const seq = ++meshSeq.current;
     setMeshing(true);
-    const base = [sidOf(state), [...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
-    const swap = (m: MeshData) => {
-      const g = toGeometry(m);
-      if (m.quads) g.boundsTree = new MeshBVH(g);
-      c.mesh.geometry.dispose();
-      c.mesh.geometry = g;
-      // 正式網格到了，預覽收掉
-      hidePreview(c);
-    };
+    const look = [[...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
     const req =
       mode === 'diff'
-        ? cached(`diff|${base}`, () => call('diffMesh', { sid: ensure(state), hidden: hiddenTable(hidden), palette: palette(materials) })).then((r) => {
+        ? cached(`diff|${sidOf(state)}|${look}`, () => call('diffMesh', { sid: ensure(state), hidden: hiddenTable(hidden), palette: palette(materials) })).then((r) => {
             if (seq !== meshSeq.current || !ctxRef.current) return;
-            swap(r.changed);
+            setParts(c, [{ k: -1, m: r.changed }], true);
+            c.shown = null;
+            hidePreview(c);
             const g = toGeometry(r.ghost);
             if (r.ghost.quads) g.boundsTree = new MeshBVH(g);
             c.ghostMesh.geometry.dispose();
@@ -729,18 +783,27 @@ export function View3D({
             c.ghostMesh.visible = true;
             // 改動很大時描邊太貴（EdgesGeometry 是 O(n log n)），就只靠實色
             c.changedEdges.geometry.dispose();
-            c.changedEdges.geometry = r.changed.quads > 0 && r.changed.quads < 60000 ? new EdgesGeometry(c.mesh.geometry, 1) : new BufferGeometry();
+            const part = c.parts.get(-1);
+            c.changedEdges.geometry = part && r.changed.quads < 60000 ? new EdgesGeometry(part.geometry, 1) : new BufferGeometry();
             c.changedEdges.visible = true;
           })
-        : cached(`main|${base}|${showDiff}`, () =>
-            call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials) }),
-          ).then((m) => {
-            if (seq !== meshSeq.current || !ctxRef.current) return;
-            swap(m);
-            c.ghostMesh.visible = false;
-            c.changedEdges.visible = false;
-          });
-    req.then(() => setMeshing(false)).catch(() => setMeshing(false));
+        : (() => {
+            const key = `${look}|${showDiff}`;
+            const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
+            const sid = ensure(state);
+            return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials), base }).then((r) => {
+              if (seq !== meshSeq.current || !ctxRef.current) return;
+              setParts(c, r.items, r.full);
+              c.shown = { sid, key };
+              // 量測用（scripts/e2e/perf.cjs）：最近一次換上正式網格的時間與換了幾個 chunk
+              (window as unknown as { __meshAt?: { t: number; n: number; full: boolean } }).__meshAt = { t: performance.now(), n: r.items.length, full: r.full };
+              // 正式網格到了，預覽收掉
+              hidePreview(c);
+              c.ghostMesh.visible = false;
+              c.changedEdges.visible = false;
+            });
+          })();
+    req.then(() => (setMeshing(false), kick())).catch(() => setMeshing(false));
   }, [state, materials, hidden, showDiff, mode]);
 
   useEffect(() => {
@@ -836,6 +899,7 @@ export function View3D({
       c.voidEdges.geometry = new EdgesGeometry(c.voidMesh.geometry, 30);
       // 沒有空洞時網格是空的
       c.voidMesh.visible = c.voidEdges.visible = m.quads > 0;
+      kick();
     });
   }, [state, hidden, xray]);
 
@@ -862,6 +926,7 @@ export function View3D({
       c.selFill.geometry.dispose();
       c.selFill.geometry = toGeometry(m);
       c.selFill.visible = true;
+      kick();
     });
   }, [state, selComps, scope, selBBox]);
 
@@ -949,7 +1014,7 @@ export function View3D({
   const pickables = () => {
     const c = ctxRef.current!;
     const out: Mesh[] = [];
-    if (c.mesh.geometry.attributes.position) out.push(c.mesh);
+    for (const p of c.parts.values()) out.push(p);
     if (c.ghostMesh.visible && c.ghostMesh.geometry.attributes.position) out.push(c.ghostMesh);
     return out;
   };
@@ -972,7 +1037,7 @@ export function View3D({
   };
   const hit = (clientX: number, clientY: number) => {
     const c = ctxRef.current;
-    if (!c || !c.mesh.geometry.attributes.position) return null;
+    if (!c || !c.parts.size) return null;
     const ray = rayAt(clientX, clientY);
     const cl = clipRef.current;
     const plane = clipPlane(cl);
@@ -994,7 +1059,7 @@ export function View3D({
   /** 沿射線由近到遠經過的結構（key 與各自第一個體素），最多 8 個；被擋住的也能選。 */
   const hitsAlong = (clientX: number, clientY: number): { key: string; p: number }[] => {
     const c = ctxRef.current;
-    if (!c || !c.mesh.geometry.attributes.position) return [];
+    if (!c || !c.parts.size) return [];
     const ray = rayAt(clientX, clientY);
     ray.firstHitOnly = false;
     const plane = clipPlane(clipRef.current);

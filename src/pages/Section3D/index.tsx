@@ -106,7 +106,8 @@ const voxelCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : `${(
  * 放開／按鈕套用只算一次，幾百毫秒也比等 Worker 幾秒好。超過就只畫橘色塊、等正式結果。
  */
 const LIVE_PREVIEW_CAP = 400_000;
-const COMMIT_PREVIEW_CAP = 6_000_000;
+// 正式結果現在只在外框裡算（§8.2），幾百毫秒就到；放開後的預覽只在範圍小時做（§7.5 第 2 級）
+const COMMIT_PREVIEW_CAP = 400_000;
 /** base = 預覽根據的狀態版本號。 */
 type PV = Preview & { base: number; committed: boolean };
 

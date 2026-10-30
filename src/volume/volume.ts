@@ -2,6 +2,9 @@
 // index = (z·Y + y)·X + x，對應 numpy C order 的 shape (Z, Y, X)。
 
 import { type Scope, axisIndex, scopeBox } from './scope';
+import { type Report, LINER_MAX, addCell, fillAt, moveCells, removeCell, shellOf } from './kernel';
+
+export { LINER_MAX, fillAt };
 
 export interface Volume {
   X: number;
@@ -320,6 +323,7 @@ export function levelMask(
   to: number,
   backfill: Backfill,
   follow = false,
+  report?: Report,
 ): Volume {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(vol.data);
@@ -351,61 +355,32 @@ export function levelMask(
       const mat = vol.data[at(a, b, outer)];
       const gap = (to - outer) * sign;
       if (gap > 0) {
-        // 補：從 outer 往 dir 走到 to；Air 直接填，薄襯層（follow）先往前推一格再填，厚的材質就停
+        // 補：從 outer 往 dir 走到 to；核心規則「加」（Air 填、薄襯層 follow 推開、厚的擋住就停）
         for (let k = 1; k <= gap; k++) {
           const t = outer + k * sign;
           if (t < 0 || t >= len) break;
-          const i = at(a, b, t);
           const c = coord(a, b, t);
           if (!inZ(c)) break;
-          if (out[i] !== AIR) {
-            if (!follow) break;
-            const liners = collectLiners(live, c, d, mat);
-            if (!liners.length) break;
-            for (let j = liners.length - 1; j >= 0; j--) {
-              const [lx, ly, lz] = coordOf(live, liners[j]);
-              const tx = lx + d[0];
-              const ty = ly + d[1];
-              const tz = lz + d[2];
-              if (inside(live, tx, ty, tz)) out[(tz * Y + ty) * X + tx] = out[liners[j]];
-            }
-          }
-          out[i] = mat;
+          if (!addCell(live, out, c[0], c[1], c[2], d, mat, follow, 'block', report)) break;
         }
       } else if (gap < 0) {
-        // 削：從 outer 往回退到 to+1；follow = 上面的襯層一格一格跟著退、最外面回填
+        // 削：從 outer 往回退到 to+1；核心規則「拿」（follow = 上面的襯層一格一格跟著退、最外面回填）
         for (let k = 0; k < -gap; k++) {
           const t = outer - k * sign;
           const i = at(a, b, t);
           const c = coord(a, b, t);
           if (!mask[i] || !inZ(c)) continue;
-          if (follow) {
-            const liners = collectLiners(live, [c[0] + d[0], c[1] + d[1], c[2] + d[2]], d, mat);
-            if (liners.length) {
-              let dst = i;
-              for (const j of liners) {
-                out[dst] = out[j];
-                dst = j;
-              }
-              out[dst] = fillAt(orig, dst, out[dst], backfill);
-              continue;
-            }
-          }
-          out[i] = fillAt(orig, i, vol.data[i], backfill);
+          removeCell(live, out, orig, c[0], c[1], c[2], d, vol.data[i], mat, backfill, follow, report);
         }
       }
     }
   return { X, Y, Z, data: out };
 }
 
-/** 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。 */
-export const fillAt = (orig: Volume, i: number, movedMat: number, backfill: Backfill) => {
-  if (backfill !== 'orig') return backfill;
-  const o = orig.data[i];
-  return o === movedMat ? AIR : o;
-};
-
-/** 整塊平移：先清空（回填）再寫入目標，搬到的地方蓋過去。 */
+/**
+ * 整塊平移（核心規則「搬」）：先清空（回填）再寫入目標，搬到的地方蓋過去。
+ * follow：外面的薄襯層（HfO₂／TiN 殼）一起搬；預設關（和以前相同）。
+ */
 export function translateMask(
   vol: Volume,
   orig: Volume,
@@ -413,29 +388,25 @@ export function translateMask(
   scope: Scope,
   d: Vec3,
   backfill: Backfill,
+  follow = false,
 ): Volume {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(vol.data);
-  const moved: number[] = [];
-  const mats: number[] = [];
+  const cells: number[] = [];
   const b = scopeBox(vol, scope);
   if (b)
-  for (let z = b.z0; z <= b.z1; z++)
-    for (let y = b.y0; y <= b.y1; y++)
-      for (let x = b.x0; x <= b.x1; x++) {
-        const i = (z * Y + y) * X + x;
-        if (!mask[i]) continue;
-        moved.push(i);
-        mats.push(vol.data[i]);
-        out[i] = fillAt(orig, i, vol.data[i], backfill);
-      }
-  moved.forEach((i, k) => {
-    const [x, y, z] = coordOf(vol, i);
-    const tx = x + d[0];
-    const ty = y + d[1];
-    const tz = z + d[2];
-    if (tx >= 0 && ty >= 0 && tz >= 0 && tx < X && ty < Y && tz < Z) out[(tz * Y + ty) * X + tx] = mats[k];
-  });
+    for (let z = b.z0; z <= b.z1; z++)
+      for (let y = b.y0; y <= b.y1; y++)
+        for (let x = b.x0; x <= b.x1; x++) {
+          const i = (z * Y + y) * X + x;
+          if (mask[i]) cells.push(i);
+        }
+  const sa = axisIndex(scope.axis);
+  const shell = follow ? shellOf(vol, cells, (i) => !!mask[i], (i) => {
+    const c = coordOf(vol, i);
+    return c[sa] >= scope.lo && c[sa] <= scope.hi;
+  }) : [];
+  moveCells(vol, orig, out, cells, d, backfill, shell);
   return { X, Y, Z, data: out };
 }
 
@@ -453,9 +424,6 @@ export function setMaskMaterial(vol: Volume, mask: Uint8Array, scope: Scope, mat
       }
   return { X, Y, Z, data: out };
 }
-
-/** 薄層判定：沿方向連續 ≤ 這麼多格才算襯層。 */
-export const LINER_MAX = 4;
 
 const shiftMask = (vol: Volume, mask: Uint8Array, d: Vec3) => {
   const { X, Y, Z } = vol;
@@ -502,35 +470,6 @@ const outerFace = (vol: Volume, mask: Uint8Array, d: Vec3) => {
 };
 
 /**
- * 從 (x, y, z) 起沿 step 收集前方薄層的體素（遇到 Air、stopMat 或厚於 LINER_MAX 的材質就停）。
- */
-const collectLiners = (vol: Volume, start: Vec3, step: Vec3, stopMat: number) => {
-  const { X, Y, data } = vol;
-  const cells: number[] = [];
-  let [x, y, z] = start;
-  while (inside(vol, x, y, z)) {
-    const m = data[(z * Y + y) * X + x];
-    if (m === AIR || m === stopMat) break;
-    let run = 0;
-    let [rx, ry, rz] = [x, y, z];
-    while (inside(vol, rx, ry, rz) && data[(rz * Y + ry) * X + rx] === m) {
-      run++;
-      rx += step[0];
-      ry += step[1];
-      rz += step[2];
-    }
-    if (run > LINER_MAX) break;
-    for (let k = 0; k < run; k++) {
-      cells.push((z * Y + y) * X + x);
-      x += step[0];
-      y += step[1];
-      z += step[2];
-    }
-  }
-  return cells;
-};
-
-/**
  * 推面：沿 dir 膨脹（n > 0）或侵蝕（n < 0）|n| 格，只推那一面。
  * follow = 襯層跟著走：前方薄層整列前移一格；縮短時同一列退回一格。
  */
@@ -543,6 +482,7 @@ export function growMask(
   n: number,
   backfill: Backfill,
   follow: boolean,
+  report?: Report,
 ): Volume {
   let cur = vol;
   let m = new Uint8Array(mask);
@@ -560,18 +500,8 @@ export function growMask(
             const i = (z * Y + y) * X + x;
             if (!front[i] || m[i]) continue;
             const src = (z - d[2]) * X * Y + (y - d[1]) * X + (x - d[0]);
-            const mat = cur.data[src];
-            if (follow) {
-              const liners = collectLiners(cur, [x, y, z], d, mat);
-              for (let k = liners.length - 1; k >= 0; k--) {
-                const [lx, ly, lz] = coordOf(cur, liners[k]);
-                const tx = lx + d[0];
-                const ty = ly + d[1];
-                const tz = lz + d[2];
-                if (inside(cur, tx, ty, tz)) out[(tz * Y + ty) * X + tx] = cur.data[liners[k]];
-              }
-            }
-            out[i] = mat;
+            // 核心規則「加」；推面一直是蓋過去（overwrite），和以前相同
+            addCell(cur, out, x, y, z, d, cur.data[src], follow, 'overwrite', report);
           }
       m = new Uint8Array(m);
       for (let i = 0; i < m.length; i++) if (front[i]) m[i] = 1;
@@ -585,20 +515,8 @@ export function growMask(
             const i = (z * Y + y) * X + x;
             if (!face[i]) continue;
             const mat = cur.data[i];
-            let pulled = false;
-            if (follow) {
-              const liners = collectLiners(cur, [x + back[0], y + back[1], z + back[2]], back, mat);
-              if (liners.length) {
-                let to = i;
-                for (const j of liners) {
-                  out[to] = cur.data[j];
-                  to = j;
-                }
-                out[to] = fillAt(orig, to, cur.data[to], backfill);
-                pulled = true;
-              }
-            }
-            if (!pulled) out[i] = fillAt(orig, i, mat, backfill);
+            // 核心規則「拿」
+            removeCell(cur, out, orig, x, y, z, back, mat, mat, backfill, follow, report);
             m[i] = 0;
           }
     }
@@ -895,11 +813,13 @@ export function relabel(
   matName: (id: number) => string,
   newKey: () => string,
 ): Labeled {
-  const { X, Y, Z } = next;
+  return relabelCore(prevVol, prev, (i) => movedTo(next, i, movedMask, shift), next, matName, newKey).L;
+}
+
+/** 和上一步不同的體素外框（整個陣列掃一次）；沒有不同回傳 null。 */
+export function changedBox(a: Uint8Array, b: Uint8Array, dims: { X: number; Y: number; Z: number }): BBox | null {
+  const { X, Y, Z } = dims;
   const N = X * Y * Z;
-  const a = prevVol.data;
-  const b = next.data;
-  // 1. 改到的外框
   let rx0 = X;
   let rx1 = -1;
   let ry0 = Y;
@@ -918,14 +838,57 @@ export function relabel(
     if (z < rz0) rz0 = z;
     if (z > rz1) rz1 = z;
   }
-  if (rx1 < 0) return prev;
-  // 2. 碰到外框（多留 1 格）的舊結構；S = R ∪ 它們的外框
+  return rx1 < 0 ? null : { x0: rx0, x1: rx1, y0: ry0, y1: ry1, z0: rz0, z1: rz1 };
+}
+
+/** 沒被重算、但換了編號的結構（補洞用）：box 裡 labels == from 的改成 to。 */
+export interface LabelMove {
+  from: number;
+  to: number;
+  box: BBox;
+}
+export interface RelabelInfo {
+  L: Labeled;
+  /** 重新標記的範圍（改到的外框 ∪ 被重算結構的外框）。null = 沒改。 */
+  S: BBox | null;
+  /** S 外面只有這幾個結構換了編號（其他結構的編號不變）。 */
+  moves: LabelMove[];
+}
+
+/**
+ * relabel 的本體：moved(i) = 舊的第 i 格搬到哪（沒搬就是 i，出界 −1）；
+ * R = 已知的改動外框（Worker 只在外框裡算時直接給，不必掃整個陣列）。
+ */
+export function relabelCore(
+  prevVol: Volume,
+  prev: Labeled,
+  moved: (i: number) => number,
+  next: Volume,
+  matName: (id: number) => string,
+  newKey: () => string,
+  R?: BBox | null,
+): RelabelInfo {
+  const { X, Y, Z } = next;
+  const b = next.data;
+  // 1. 改到的外框
+  const box = R === undefined ? changedBox(prevVol.data, b, next) : R;
+  if (!box) return { L: prev, S: null, moves: [] };
+  const { x0: rx0, x1: rx1, y0: ry0, y1: ry1, z0: rz0, z1: rz1 } = box;
+  // 2. 在改到的外框（多留 1 格）裡有體素的舊結構才可能改變（沒碰到的結構，體素和鄰居都沒變）；
+  //    S = R ∪ 它們的外框
   const touched = new Uint8Array(prev.comps.length);
+  for (let z = Math.max(0, rz0 - 1); z <= Math.min(Z - 1, rz1 + 1); z++)
+    for (let y = Math.max(0, ry0 - 1); y <= Math.min(Y - 1, ry1 + 1); y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + Math.max(0, rx0 - 1), e = row + Math.min(X - 1, rx1 + 1); i <= e; i++) {
+        const l = prev.labels[i];
+        if (l >= 0) touched[l] = 1;
+      }
+    }
   const S: BBox = { x0: rx0, x1: rx1, y0: ry0, y1: ry1, z0: rz0, z1: rz1 };
   prev.comps.forEach((c, k) => {
+    if (!touched[k]) return;
     const bb = c.bbox;
-    if (bb.x0 > rx1 + 1 || bb.x1 < rx0 - 1 || bb.y0 > ry1 + 1 || bb.y1 < ry0 - 1 || bb.z0 > rz1 + 1 || bb.z1 < rz0 - 1) return;
-    touched[k] = 1;
     S.x0 = Math.min(S.x0, bb.x0);
     S.x1 = Math.max(S.x1, bb.x1);
     S.y0 = Math.min(S.y0, bb.y0);
@@ -935,7 +898,7 @@ export function relabel(
   });
   // 3. 清掉這些結構的標記，在 S 裡重新 flood fill；新結構暫用編號 nOld 起
   const nOld = prev.comps.length;
-  const labels = new Int32Array(prev.labels);
+  const labels = prev.labels.slice();
   for (let z = S.z0; z <= S.z1; z++)
     for (let y = S.y0; y <= S.y1; y++) {
       const row = (z * Y + y) * X;
@@ -966,7 +929,7 @@ export function relabel(
       for (let i = row + S.x0; i <= row + S.x1; i++) {
         const o = prev.labels[i];
         if (o < 0 || !touched[o]) continue;
-        const j = movedTo(next, i, movedMask, shift);
+        const j = moved(i);
         if (j < 0 || labels[j] < nOld) continue;
         tally[(labels[j] - nOld) * T + tOf[o]]++;
       }
@@ -976,21 +939,263 @@ export function relabel(
     if (c) votes.set(Math.floor(k / T) * nOld + tList[k % T], c);
   });
   const named = nameByVotes(prev, fresh, votes, matName, newKey);
-  // 5. 編號壓緊：沒碰到的舊結構在前、新結構在後
-  const remap = new Int32Array(nOld + fresh.length);
-  const comps: Comp[] = [];
-  prev.comps.forEach((c, k) => {
-    if (!touched[k]) {
-      remap[k] = comps.length;
+  // 5. 編號：沒碰到的結構編號不變（S 外面的 labels 不用動）；新結構先補被重算結構留下的空位，多的接在後面；
+  //    空位比新結構多時，把最後面的結構搬進空位（只改它外框裡的 labels），陣列保持連續
+  const comps = prev.comps.slice();
+  const slots = tList; // 被重算結構的編號，由小到大
+  const freshIdx = new Int32Array(fresh.length);
+  named.forEach((c, j) => {
+    if (j < slots.length) {
+      comps[slots[j]] = c;
+      freshIdx[j] = slots[j];
+    } else {
+      freshIdx[j] = comps.length;
       comps.push(c);
     }
   });
-  named.forEach((c, k) => {
-    remap[nOld + k] = comps.length;
-    comps.push(c);
+  const holes = new Set(slots.slice(named.length));
+  const moves: LabelMove[] = [];
+  let n = comps.length;
+  for (const h of slots.slice(named.length)) {
+    while (n > 0 && holes.has(n - 1)) n--;
+    if (h >= n) continue;
+    comps[h] = comps[n - 1];
+    moves.push({ from: n - 1, to: h, box: comps[h].bbox });
+    holes.delete(h);
+    n--;
+  }
+  while (n > 0 && holes.has(n - 1)) n--;
+  comps.length = n;
+  for (let z = S.z0; z <= S.z1; z++)
+    for (let y = S.y0; y <= S.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + S.x0; i <= row + S.x1; i++) if (labels[i] >= nOld) labels[i] = freshIdx[labels[i] - nOld];
+    }
+  for (const mv of moves) moveLabel(labels, next, mv.box, mv.from, mv.to);
+  return { L: { labels, comps }, S, moves };
+}
+
+/**
+ * 已知改動外框 R 時的 relabel（Worker 每一步走這條）：
+ * - 在 R（多留 1 格）裡有體素的舊結構才可能改變；其中「掉了體素」的才可能斷開，要重新 flood fill；
+ *   只長出體素或只是鄰居變了的，整塊照舊（不必再走一遍），新長出的體素用 union-find 接到它身上。
+ * - 名稱與 key 和 relabelFull 用同一套投票（nameByVotes），所以結果相同。
+ * - 編號：整塊照舊的結構編號不變；新結構補掉了體素的結構留下的空位，再不夠才接在後面，
+ *   空位多了就把最後面的結構搬進來（moves）。S 外面只有 moves 會改 labels。
+ */
+export function relabelFast(
+  prevVol: Volume,
+  prev: Labeled,
+  moved: (i: number) => number,
+  next: Volume,
+  matName: (id: number) => string,
+  newKey: () => string,
+  R: BBox | null,
+): RelabelInfo {
+  if (!R) return { L: prev, S: null, moves: [] };
+  const { X, Y, Z } = next;
+  const a = prevVol.data;
+  const b = next.data;
+  const nOld = prev.comps.length;
+  const P = prev.labels;
+  // 1. 碰到的結構，以及掉了體素的（R 裡原本屬於它、現在材質不同）
+  const touched = new Uint8Array(nOld);
+  const lost = new Uint8Array(nOld);
+  const ex = { x0: Math.max(0, R.x0 - 1), x1: Math.min(X - 1, R.x1 + 1), y0: Math.max(0, R.y0 - 1), y1: Math.min(Y - 1, R.y1 + 1), z0: Math.max(0, R.z0 - 1), z1: Math.min(Z - 1, R.z1 + 1) };
+  for (let z = ex.z0; z <= ex.z1; z++)
+    for (let y = ex.y0; y <= ex.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + ex.x0; i <= row + ex.x1; i++) {
+        const l = P[i];
+        if (l < 0) continue;
+        touched[l] = 1;
+        if (a[i] !== b[i]) lost[l] = 1;
+      }
+    }
+  // 平移：已選結構整塊搬走，算掉了體素（moved 指到別處）
+  // （moved(i) !== i 的只會是已選結構的體素，它們在 R 裡一定有改動，上面已標 lost）
+  const S: BBox = { ...R };
+  const grow = (bb: BBox) => {
+    S.x0 = Math.min(S.x0, bb.x0);
+    S.x1 = Math.max(S.x1, bb.x1);
+    S.y0 = Math.min(S.y0, bb.y0);
+    S.y1 = Math.max(S.y1, bb.y1);
+    S.z0 = Math.min(S.z0, bb.z0);
+    S.z1 = Math.max(S.z1, bb.z1);
+  };
+  for (let k = 0; k < nOld; k++) if (lost[k]) grow(prev.comps[k].bbox);
+  const F: BBox = { ...S }; // 要重新 flood fill 的範圍
+  // 2. 清掉：掉了體素的結構（F 裡）、R 裡改過的格子
+  const labels = P.slice();
+  for (let z = F.z0; z <= F.z1; z++)
+    for (let y = F.y0; y <= F.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + F.x0; i <= row + F.x1; i++) {
+        const l = labels[i];
+        if (l >= 0 && lost[l]) labels[i] = -1;
+      }
+    }
+  for (let z = R.z0; z <= R.z1; z++)
+    for (let y = R.y0; y <= R.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + R.x0; i <= row + R.x1; i++) if (a[i] !== b[i]) labels[i] = -1;
+    }
+  // 3. flood fill 清掉的格子：新片段編號 nOld 起
+  const fresh: RawComp[] = [];
+  const st: Stack = { buf: new Int32Array(1 << 16) };
+  for (let z = F.z0; z <= F.z1; z++)
+    for (let y = F.y0; y <= F.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + F.x0; i <= row + F.x1; i++) if (labels[i] < 0 && b[i] !== AIR) fresh.push(floodFill(next, labels, i, nOld + fresh.length, st));
+    }
+  // 4. union-find：新片段碰到同材質、整塊照舊的結構就接上（只看 F 裡新片段的格子的鄰居）
+  const parent = new Int32Array(nOld + fresh.length);
+  for (let k = 0; k < parent.length; k++) parent[k] = k;
+  const find = (k: number): number => {
+    while (parent[k] !== k) {
+      parent[k] = parent[parent[k]];
+      k = parent[k];
+    }
+    return k;
+  };
+  const unite = (p: number, q: number) => {
+    const rp = find(p);
+    const rq = find(q);
+    if (rp !== rq) parent[Math.max(rp, rq)] = Math.min(rp, rq);
+  };
+  const plane = X * Y;
+  if (fresh.length)
+    for (let z = F.z0; z <= F.z1; z++)
+      for (let y = F.y0; y <= F.y1; y++) {
+        const row = (z * Y + y) * X;
+        for (let x = F.x0; x <= F.x1; x++) {
+          const i = row + x;
+          const l = labels[i];
+          if (l < nOld) continue;
+          const m = b[i];
+          let o: number;
+          if (x > 0 && (o = labels[i - 1]) >= 0 && o < nOld && b[i - 1] === m) unite(l, o);
+          if (x < X - 1 && (o = labels[i + 1]) >= 0 && o < nOld && b[i + 1] === m) unite(l, o);
+          if (y > 0 && (o = labels[i - X]) >= 0 && o < nOld && b[i - X] === m) unite(l, o);
+          if (y < Y - 1 && (o = labels[i + X]) >= 0 && o < nOld && b[i + X] === m) unite(l, o);
+          if (z > 0 && (o = labels[i - plane]) >= 0 && o < nOld && b[i - plane] === m) unite(l, o);
+          if (z < Z - 1 && (o = labels[i + plane]) >= 0 && o < nOld && b[i + plane] === m) unite(l, o);
+        }
+      }
+  // 5. 每一類（根）＝一個結果結構：整塊照舊的結構（沒掉體素、touched 或接到新片段）＋新片段
+  const classOf = new Map<number, number>(); // 根 → 結果編號
+  const members: { gs: number[]; fs: number[] }[] = [];
+  const add = (k: number) => {
+    const r = find(k);
+    let c = classOf.get(r);
+    if (c === undefined) {
+      c = members.length;
+      classOf.set(r, c);
+      members.push({ gs: [], fs: [] });
+    }
+    if (k < nOld) members[c].gs.push(k);
+    else members[c].fs.push(k - nOld);
+  };
+  for (let k = 0; k < nOld; k++) if (touched[k] && !lost[k]) add(k);
+  for (let j = 0; j < fresh.length; j++) add(nOld + j);
+  const raw: RawComp[] = members.map(({ gs, fs }) => {
+    const parts = [...gs.map((k) => prev.comps[k] as RawComp), ...fs.map((j) => fresh[j])];
+    const bb = { ...parts[0].bbox };
+    let count = 0;
+    for (const p of parts) {
+      count += p.count;
+      bb.x0 = Math.min(bb.x0, p.bbox.x0);
+      bb.x1 = Math.max(bb.x1, p.bbox.x1);
+      bb.y0 = Math.min(bb.y0, p.bbox.y0);
+      bb.y1 = Math.max(bb.y1, p.bbox.y1);
+      bb.z0 = Math.min(bb.z0, p.bbox.z0);
+      bb.z1 = Math.max(bb.z1, p.bbox.z1);
+    }
+    return { mat: parts[0].mat, count, bbox: bb, seed: parts[0].seed };
   });
-  for (let i = 0; i < N; i++) if (labels[i] >= 0) labels[i] = remap[labels[i]];
-  return { labels, comps };
+  // 6. 投票：整塊照舊的結構把全部體素投給自己那一類；掉了體素的照位移數它的體素落在哪一類
+  const votes = new Map<number, number>();
+  members.forEach(({ gs }, c) => gs.forEach((k) => votes.set(c * nOld + k, prev.comps[k].count)));
+  // 編號（舊結構 0..nOld−1、新片段 nOld..）→ 結果類別；−1 = 不在任何類（沒碰到的舊結構、掉了體素的舊結構）
+  const cls = new Int32Array(nOld + fresh.length).fill(-1);
+  for (let k = 0; k < cls.length; k++) if (k >= nOld || (touched[k] && !lost[k])) cls[k] = classOf.get(find(k))!;
+  const resOf = (l: number) => (l < 0 ? -1 : cls[l]);
+  for (let z = F.z0; z <= F.z1; z++)
+    for (let y = F.y0; y <= F.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + F.x0; i <= row + F.x1; i++) {
+        const o = P[i];
+        if (o < 0 || !lost[o]) continue;
+        const j = moved(i);
+        if (j < 0) continue;
+        const c = resOf(labels[j]);
+        if (c < 0) continue;
+        const k = c * nOld + o;
+        votes.set(k, (votes.get(k) ?? 0) + 1);
+      }
+    }
+  const named = nameByVotes(prev, raw, votes, matName, newKey);
+  // 7. 編號：有整塊照舊結構的類用其中最小的編號；其他照舊結構併進來（它的外框併進 S，labels 在 S 裡重寫）
+  const comps = prev.comps.slice();
+  const target = new Int32Array(members.length).fill(-1);
+  const freed: number[] = [];
+  members.forEach(({ gs }, c) => {
+    if (!gs.length) return;
+    const t = Math.min(...gs);
+    target[c] = t;
+    comps[t] = named[c];
+    for (const g of gs)
+      if (g !== t) {
+        freed.push(g);
+        grow(prev.comps[g].bbox);
+      }
+  });
+  for (let k = 0; k < nOld; k++) if (lost[k]) freed.push(k);
+  freed.sort((p, q) => p - q);
+  let fi = 0;
+  members.forEach((_, c) => {
+    if (target[c] >= 0) return;
+    if (fi < freed.length) target[c] = freed[fi++];
+    else target[c] = comps.length, comps.push(named[c]);
+    comps[target[c]] = named[c];
+  });
+  // 寫回 S：新片段、被併掉的照舊結構
+  const mergedAway = new Int32Array(nOld).fill(-1);
+  members.forEach(({ gs }, c) => gs.forEach((g) => g !== target[c] && (mergedAway[g] = target[c])));
+  for (let z = S.z0; z <= S.z1; z++)
+    for (let y = S.y0; y <= S.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + S.x0; i <= row + S.x1; i++) {
+        const l = labels[i];
+        if (l >= nOld) labels[i] = target[cls[l]];
+        else if (l >= 0 && mergedAway[l] >= 0) labels[i] = mergedAway[l];
+      }
+    }
+  // 8. 空位壓緊：把最後面的結構搬進空位（只改它外框裡的 labels）
+  const holes = new Set(freed.slice(fi));
+  const moves: LabelMove[] = [];
+  let n = comps.length;
+  for (const h of freed.slice(fi)) {
+    while (n > 0 && holes.has(n - 1)) n--;
+    if (h >= n) continue;
+    comps[h] = comps[n - 1];
+    moves.push({ from: n - 1, to: h, box: comps[h].bbox });
+    holes.delete(h);
+    n--;
+  }
+  while (n > 0 && holes.has(n - 1)) n--;
+  comps.length = n;
+  for (const mv of moves) moveLabel(labels, next, mv.box, mv.from, mv.to);
+  return { L: { labels, comps }, S, moves };
+}
+
+/** box 裡 labels == from 的改成 to。 */
+export function moveLabel(labels: Int32Array, d: { X: number; Y: number }, b: BBox, from: number, to: number) {
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++) {
+      const row = (z * d.Y + y) * d.X;
+      for (let i = row + b.x0; i <= row + b.x1; i++) if (labels[i] === from) labels[i] = to;
+    }
 }
 
 /** 一組結構 key 的體素 mask；沒選取回傳 null。 */

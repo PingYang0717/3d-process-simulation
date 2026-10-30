@@ -573,12 +573,14 @@ M3
 ### M1 Worker 區域性運算與 chunk 網格（總量 L）
 
 - [x] S　8.1 版本號（單獨 PR，不改行為）：`EditState.version`、`client.ts` 以版本號當 sid、diff／count／網格快取改用版本號；`worker.test.ts`
-- [ ] M　7.2 核心 ＋ 三個函式改寫（對照舊實作的測試）
-- [ ] M　8.2 `apply` 只在外框裡算、回補丁、relabel 吃外框
-- [ ] S　8.3 補丁式復原、HISTORY_LIMIT 50
-- [ ] M　8.4 chunk 網格（Worker 快取、主執行緒多 Mesh、BVH、raycast）
-- [ ] S　8.5 diff／counts 差量
-- [ ] S　`scripts/bench.ts`、e2e 量測
+- [x] M　7.2 核心 ＋ 三個函式改寫（對照舊實作的測試）：`kernel.ts`、`ref/legacy.ts`、`kernel.test.ts`；translate 多了帶殼（follow）
+- [x] M　8.2 `apply` 只在外框裡算、回補丁、relabel 吃外框：`apply.ts`、`patch.ts`、`relabelFast`（只重 flood fill 掉了體素的結構，其他用 union-find）
+- [x] S　8.3 補丁式復原、HISTORY_LIMIT 50（Worker `derive`）
+- [x] M　8.4 chunk 網格（Worker 快取、主執行緒多 Mesh、BVH、raycast）：`chunks.ts`、Worker `chunks`；另外 3D 改成有變化才重畫
+- [x] S　8.5 diff／counts 差量
+- [x] S　`scripts/bench.ts`、`scripts/e2e/perf.cjs`（量測結果見 README「大陣列的效能」）
+
+狀態：工作項目都完成，§12 M1 測試（kernel／patch(apply)／chunks／worker）全過。速度目標在雲端容器沒有達到：Worker 核心 ×2（1,570 萬）約 200～250 ms，端到端受 headless 軟體 WebGL 拖累約 1.1～1.6 s（數字見 README）。排隊（§7.6）也在這一輪做了。
 
 驗收：300×300×200 上長高 1 格放開到 3D 更新完 < 200 ms（e2e 量）；復原 10 步記憶體不隨陣列大小成長（Chrome 記憶體面板）；§12 M1 測試全過。
 

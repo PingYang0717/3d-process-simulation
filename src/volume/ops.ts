@@ -28,7 +28,8 @@ export const radiusOf = (l: Local) => (l.radius === null ? Infinity : l.radius);
 /** scope：只有這個範圍裡的體素可以被改（推面時新格子落在 scope 外就不寫）。 */
 export type Op =
   | { kind: 'push'; keys: string[]; scope: Scope; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local }
-  | { kind: 'translate'; keys: string[]; scope: Scope; d: Vec3; backfill: Backfill }
+  /** follow：外面的薄襯層（殼）一起搬；省略＝不帶（舊 Op）。 */
+  | { kind: 'translate'; keys: string[]; scope: Scope; d: Vec3; backfill: Backfill; follow?: boolean }
   | { kind: 'material'; keys: string[]; scope: Scope; m: number }
   /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）；follow = 襯層跟推（同 push）。 */
   | { kind: 'level'; keys: string[]; scope: Scope; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean };
@@ -75,7 +76,7 @@ export function applyOp(s: EditState, input: Op | LegacyOp, ctx: OpContext): Edi
     const l = op.local;
     vol = levelMask(s.vol, ctx.orig, mask, op.scope, op.dir, l.center, radiusOf(l), l.shape ?? 'round', op.to, op.backfill, !!op.follow);
   } else if (op.kind === 'translate') {
-    vol = translateMask(s.vol, ctx.orig, mask, op.scope, op.d, op.backfill);
+    vol = translateMask(s.vol, ctx.orig, mask, op.scope, op.d, op.backfill, !!op.follow);
     shift = op.d;
   } else vol = setMaskMaterial(s.vol, mask, op.scope, op.m);
   return { vol, L: relabel(s.vol, s.L, mask, shift, vol, ctx.matName, ctx.newKey) };

@@ -4,6 +4,7 @@ import {
   type Axis,
   type Backfill,
   type BBox,
+  type Comp,
   type Labeled,
   type Material,
   type Vec3,
@@ -66,14 +67,21 @@ export interface Brush {
 }
 /** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
-import { call, ensure, loadOrig, replayIn, retain, sidOf } from '../../volume/client';
+import { applyIn, call, deriveIn, ensure, loadOrig, replayIn, retain, sidOf } from '../../volume/client';
+import { type Step, applyStep } from '../../volume/patch';
+import { type OpReport, blockedPhrase, summarize } from '../../volume/report';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
 
-export interface Snapshot {
-  snap: EditState;
+/**
+ * 復原／重做堆疊的一格（§8.3）：補丁＋另一邊的 ops 與版本號。不存整個陣列。
+ * hist 裡的 step 往回套（back）回到 version；future 裡的往前套（fwd）。
+ */
+export interface HistEntry {
+  step: Step;
   ops: Op[];
+  version: number;
 }
 
 export interface Split {
@@ -81,8 +89,13 @@ export interface Split {
   name: string;
   ops: Op[];
   cur: EditState;
-  hist: Snapshot[];
-  future: Snapshot[];
+  hist: HistEntry[];
+  future: HistEntry[];
+}
+
+/** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。 */
+export interface StepReport extends OpReport {
+  op: Op;
 }
 
 /** 載入來源；.vti 的 Spacing／Origin／陣列名匯出時原封不動寫回。 */
@@ -102,8 +115,10 @@ export interface Diff {
 }
 
 export const BASE_ID = 'base';
-/** 每個 split 留幾步 Undo（大陣列一步就是幾十 MB）。 */
-const HISTORY_LIMIT = 10;
+/** 每個 split 留幾步 Undo（存的是補丁，只有改到的外框那麼大）。 */
+const HISTORY_LIMIT = 50;
+/** Worker 忙的時候最多排幾步；再多就拒絕並提示。 */
+export const QUEUE_MAX = 3;
 const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] }, version: 0 };
 
 // diff 與各材質體積依版本號快取：同一個狀態不重算；不在記憶體裡的版本由 pruneCaches 丟掉
@@ -144,8 +159,25 @@ export function useEditor() {
   const [meta, setMeta] = useState<Meta>({ format: 'demo' });
   const [origState, setOrig] = useState<EditState | null>(null);
   // 一開始只有「原始」；第一次在原始上調整會自動建立 Split 1
-  const [splits, setSplits] = useState<Split[]>([]);
-  const [activeId, setActiveId] = useState(BASE_ID);
+  const [splits, setSplitsState] = useState<Split[]>([]);
+  const [activeId, setActiveIdState] = useState(BASE_ID);
+  // 排隊中的步驟要接在前一步的結果後面，所以 split 清單另外放一份在 ref（每次改都同步更新）
+  const splitsRef = useRef<Split[]>([]);
+  const activeRef = useRef(BASE_ID);
+  const setSplits = useCallback((v: Split[] | ((all: Split[]) => Split[])) => {
+    const next = typeof v === 'function' ? v(splitsRef.current) : v;
+    splitsRef.current = next;
+    setSplitsState(next);
+  }, []);
+  const setActiveId = useCallback((id: string) => {
+    activeRef.current = id;
+    setActiveIdState(id);
+  }, []);
+  /** 最近一步的報告（被擋的片、格子）。 */
+  const [report, setReport] = useState<StepReport | null>(null);
+  /** 排隊等 Worker 的步驟數（不含正在算的那一步）。 */
+  const [queued, setQueued] = useState(0);
+  const queue = useRef<Op[]>([]);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<Vec3>([0, 0, 0]);
@@ -258,7 +290,10 @@ export function useEditor() {
     if (!origState) return;
     retain([origState, ...splits.map((s) => s.cur)]);
     const alive = new Set<number>([sidOf(origState)]);
-    for (const s of splits) for (const x of [s.cur, ...s.hist.map((h) => h.snap), ...s.future.map((h) => h.snap)]) alive.add(sidOf(x));
+    for (const s of splits) {
+      alive.add(sidOf(s.cur));
+      for (const h of [...s.hist, ...s.future]) alive.add(h.version);
+    }
     pruneCaches(alive);
   }, [origState, splits]);
 
@@ -313,6 +348,23 @@ export function useEditor() {
     [vol, nmPerVoxel, matName],
   );
 
+  const origRef = useRef(origState);
+  origRef.current = origState;
+  /** 這一步真正改了幾格（補丁裡前後不同的格數）。 */
+  const changedCount = (st: Step) => {
+    if (!st.data) return 0;
+    let n = 0;
+    const { before, after } = st.data;
+    for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) n++;
+    return n;
+  };
+  const blockedText = (r: OpReport) => blockedPhrase(r, matName);
+  /** 訊息後半：「· 1,152 格 · 4 片有 12 格被 Poly-Si 擋住 · 3 片沒有這個結構，略過」。 */
+  const resultText = (r: StepReport & { changed?: number }) =>
+    `${r.changed !== undefined ? ` · ${r.changed.toLocaleString()} 格` : ''}${r.total.blocked ? ` · ${blockedText(r)}` : ''}${
+      r.total.skippedSlices ? ` · ${r.total.skippedSlices} 片沒有這個結構，略過` : ''
+    }`;
+
   const keepSel = (s: EditState) => setSel((prev) => new Set([...prev].filter((k) => s.L.comps.some((c) => c.key === k))));
 
   /** 在 Worker 裡從 from 重播 ops（含 relabel）；busy 橫條顯示 label。失敗回 null 並提示，不會卡在計算中。 */
@@ -343,81 +395,152 @@ export function useEditor() {
     [orig, matNames, diffOf, message],
   );
 
-  /** 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。 */
+  /** 一步送 Worker（只在外框裡算），主執行緒用補丁做出新版本。失敗回 null。 */
+  const applyOne = async (from: EditState, op: Op) => {
+    try {
+      const r = await applyIn(from, { op, matNames, keyCounter: keySeq.current });
+      keySeq.current = r.keyCounter;
+      if (!r.step.data) return { next: null, step: r.step, report: r.report };
+      const out = applyStep(from, r.step, 'fwd');
+      const next: EditState = { ...out, version: r.version };
+      // 先排 diff 與計數，讓「改動」數字比重畫 3D 早出來
+      diffOf(next);
+      countOf(next);
+      return { next, step: r.step, report: r.report };
+    } catch (e) {
+      message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
+      return null;
+    }
+  };
+
+  /** 排隊中的一步：接在目前 split 最新的結果後面（從 ref 讀，不用 render 時的舊值）。 */
+  const commitOne = async (op: Op) => {
+    const o = origRef.current;
+    if (!o) return;
+    const active = splitsRef.current.find((x) => x.id === activeRef.current) ?? null;
+    const from = active ? active.cur : o;
+    const r = await applyOne(from, op);
+    if (!r) return;
+    const rep: StepReport & { changed: number } = { ...summarize(r.report, op, from.vol), op, changed: changedCount(r.step) };
+    setReport(rep);
+    if (!r.next) {
+      setLast({ text: `${describe(op, from.L)} · 沒有改到任何體素${rep.total.blocked ? `（${blockedText(rep)}）` : ''}`, at: Date.now() });
+      return;
+    }
+    const next = r.next;
+    const entry: HistEntry = { step: r.step, ops: active ? active.ops : [], version: sidOf(from) };
+    if (!active) {
+      // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始
+      const id = newSplitId();
+      const name = `Split ${splitsRef.current.length + 1}`;
+      setSplits((all) => [...all, { id, name, cur: next, ops: [op], hist: [entry], future: [] }]);
+      setActiveId(id);
+      keepSel(next);
+      setLast({ text: `原始保持不變，已自動建立 ${name}：${describe(op, o.L)}${resultText(rep)}`, at: Date.now() });
+      return;
+    }
+    setSplits((all) =>
+      all.map((x) => (x.id === active.id ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)),
+    );
+    keepSel(next);
+    setLast({ text: `${describe(op, from.L)}${resultText(rep)}`, at: Date.now() });
+  };
+
+  const drain = async () => {
+    running.current = true;
+    setBusy('計算中…');
+    try {
+      while (queue.current.length) {
+        await commitOne(queue.current[0]);
+        queue.current.shift();
+        setQueued(Math.max(0, queue.current.length - 1));
+      }
+    } finally {
+      running.current = false;
+      setBusy(null);
+      setQueued(0);
+      if (undoAfter.current) {
+        undoAfter.current = false;
+        undoRef.current();
+      }
+    }
+  };
+
+  /**
+   * 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。
+   * Worker 忙的時候排隊（最多 QUEUE_MAX 步），依序接在前一步的結果後面；超過就拒絕並提示。
+   */
   const commit = useCallback(
-    async (op: Op) => {
-      if (!origState || running.current) return;
-      previewHook.current?.(op);
-      if (!active) {
-        // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始
-        const next = await run(orig, [op], '計算中…');
-        if (!next) return;
-        const id = newSplitId();
-        const name = `Split ${splits.length + 1}`;
-        setSplits((all) => [...all, { id, name, cur: next, ops: [op], hist: [{ snap: orig, ops: [] }], future: [] }]);
-        setActiveId(id);
-        keepSel(next);
-        setLast({ text: `原始保持不變，已自動建立 ${name}：${describe(op, orig.L)}`, at: Date.now() });
+    (op: Op) => {
+      if (!origRef.current) return;
+      if (queue.current.length > QUEUE_MAX) {
+        message.warning({ key: 'queue', content: '還在算前面的步驟，請稍等' });
         return;
       }
-      const next = await run(active.cur, [op], '計算中…');
-      if (!next) return;
-      setSplits((all) =>
-        all.map((s) =>
-          s.id === active.id
-            ? {
-                ...s,
-                cur: next,
-                ops: [...s.ops, op],
-                hist: [...s.hist.slice(-HISTORY_LIMIT), { snap: s.cur, ops: s.ops }],
-                future: [],
-              }
-            : s,
-        ),
-      );
-      keepSel(next);
-      setLast({ text: describe(op, active.cur.L), at: Date.now() });
+      if (!running.current) previewHook.current?.(op);
+      queue.current.push(op);
+      setQueued(Math.max(0, queue.current.length - 1));
+      if (!running.current) void drain();
     },
-    [origState, active, orig, splits.length, run, describe],
+    // drain／commitOne 每次 render 都是新的閉包，但只讀 ref，所以不必放進依賴
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [message],
   );
 
+  /** 排隊中按復原：先清掉還沒開始的步驟，正在算的那一步做完再復原它。 */
+  const undoAfter = useRef(false);
+  const undoRef = useRef<() => void>(() => {});
   const undo = useCallback(() => {
-    if (!active || !active.hist.length || running.current) return;
-    const h = active.hist[active.hist.length - 1];
+    if (running.current) {
+      const dropped = queue.current.length - 1;
+      queue.current.length = Math.min(queue.current.length, 1);
+      setQueued(0);
+      undoAfter.current = true;
+      message.info({ key: 'queue', content: dropped > 0 ? `已清掉排隊的 ${dropped} 步，正在算的那一步完成後復原` : '這一步完成後復原' });
+      return;
+    }
+    const act = splitsRef.current.find((x) => x.id === activeRef.current);
+    const o = origRef.current;
+    if (!act || !act.hist.length || !o) return;
+    const h = act.hist[act.hist.length - 1];
+    const prev: EditState = h.version === sidOf(o) ? o : { ...applyStep(act.cur, h.step, 'back'), version: h.version };
+    void deriveIn(act.cur, h.version, h.step, 'back');
     setSplits((all) =>
-      all.map((s) =>
-        s.id === active.id
-          ? {
-              ...s,
-              cur: h.snap,
-              ops: h.ops,
-              hist: s.hist.slice(0, -1),
-              future: [{ snap: s.cur, ops: s.ops }, ...s.future],
-            }
-          : s,
+      all.map((x) =>
+        x.id === act.id
+          ? { ...x, cur: prev, ops: h.ops, hist: x.hist.slice(0, -1), future: [{ step: h.step, ops: x.ops, version: sidOf(x.cur) }, ...x.future] }
+          : x,
       ),
     );
-    keepSel(h.snap);
+    keepSel(prev);
+    setReport(null);
     setLast(null);
-  }, [active]);
+  }, [message, setSplits]);
+  undoRef.current = undo;
 
   const redo = useCallback(() => {
-    if (!active || !active.future.length || running.current) return;
-    const f = active.future[0];
+    if (running.current) return;
+    const act = splitsRef.current.find((x) => x.id === activeRef.current);
+    if (!act || !act.future.length) return;
+    const f = act.future[0];
+    const next: EditState = { ...applyStep(act.cur, f.step, 'fwd'), version: f.version };
+    void deriveIn(act.cur, f.version, f.step, 'fwd');
     setSplits((all) =>
-      all.map((s) =>
-        s.id === active.id
-          ? { ...s, cur: f.snap, ops: f.ops, hist: [...s.hist, { snap: s.cur, ops: s.ops }], future: s.future.slice(1) }
-          : s,
+      all.map((x) =>
+        x.id === act.id
+          ? { ...x, cur: next, ops: f.ops, hist: [...x.hist, { step: f.step, ops: x.ops, version: sidOf(x.cur) }].slice(-HISTORY_LIMIT), future: x.future.slice(1) }
+          : x,
       ),
     );
-    keepSel(f.snap);
+    keepSel(next);
+    setReport(null);
     setLast(null);
-  }, [active]);
+  }, [setSplits]);
 
   const resetAll = useCallback(() => {
     if (!active || running.current) return;
     setSplits((all) => all.map((s) => (s.id === active.id ? { ...s, cur: orig, ops: [], hist: [], future: [] } : s)));
+    setReport(null);
     setLast(null);
   }, [active, orig]);
 
@@ -650,13 +773,16 @@ export function useEditor() {
         comps: l.comps.map((c) => (c.mat === id ? { ...c, label: name + c.label.slice(old.length) } : c)),
       });
       const fix = (s: EditState): EditState => ({ ...s, L: fixL(s.L) });
+      const fixComps = (comps: Comp[]) => fixL({ labels: new Int32Array(0), comps }).comps;
+      const fixEntry = (h: HistEntry): HistEntry =>
+        h.step.labels ? { ...h, step: { ...h.step, labels: { ...h.step.labels, compsBefore: fixComps(h.step.labels.compsBefore), compsAfter: fixComps(h.step.labels.compsAfter) } } } : h;
       setOrig((o) => o && fix(o));
       setSplits((all) =>
         all.map((s) => ({
           ...s,
           cur: fix(s.cur),
-          hist: s.hist.map((h) => ({ ...h, snap: fix(h.snap) })),
-          future: s.future.map((h) => ({ ...h, snap: fix(h.snap) })),
+          hist: s.hist.map(fixEntry),
+          future: s.future.map(fixEntry),
         })),
       );
     },
@@ -792,6 +918,9 @@ export function useEditor() {
     stepCursor,
     cursorIndex,
     voxelCoord,
+    report,
+    setReport,
+    queued,
     scope,
     scopeMode,
     setScopeMode,

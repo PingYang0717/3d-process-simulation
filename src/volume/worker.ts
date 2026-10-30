@@ -4,6 +4,23 @@
 import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, greedyMesh, labelComponents } from './volume';
 import { type Scope, clipBox } from './scope';
 import { type Op, replay } from './ops';
+import { applyOpLocal } from './apply';
+import { type Step, applyStep } from './patch';
+import type { Report } from './kernel';
+import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
+
+/** 一步的結果裡要 transfer 回主執行緒的陣列。 */
+const stepBuffers = (st: Step): Transferable[] => {
+  const out: Transferable[] = [];
+  if (st.data) out.push(st.data.before.buffer, st.data.after.buffer);
+  if (st.labels) out.push(st.labels.before.buffer, st.labels.after.buffer);
+  return out;
+};
+/** chunk 網格：k = chunk 編號，m.quads = 0 表示這個 chunk 現在是空的（主執行緒拿掉）。 */
+export interface ChunkItem {
+  k: number;
+  m: MeshData;
+}
 
 /** 網格只畫一部分：選取（結構編號 ∩ z 範圍，box = 它們的外框）或某個材質（空洞層）。 */
 export type Only = { comps: number[]; scope: Scope; box: BBox } | { mat: number };
@@ -41,6 +58,21 @@ export interface Requests {
     res: { changed: MeshData; ghost: MeshData };
   };
   diff: { req: { sid: number }; res: { mask: Uint8Array; count: number } };
+  /** 一步操作：只在外框裡算（§8.2），結果存成 to，回傳補丁（主執行緒拿它做出新版本）。 */
+  apply: {
+    req: { from: number; to: number; comps: Comp[]; op: Op; matNames: Record<number, string>; keyCounter: number };
+    res: { step: Step; keyCounter: number; report: Report };
+  };
+  /** 復原／重做：從 from 套補丁（往前或往回）做出 to（§8.3）。 */
+  derive: { req: { from: number; to: number; step: Step; dir: 'fwd' | 'back' }; res: null };
+  /**
+   * chunk 網格（§8.4）：key＝畫法（隱藏、顏色、標紅）；base＝主執行緒現在畫的版本（同一個 key）。
+   * base 是 sid 的上一步時只回改到的 chunk（full = false），否則回全部（full = true）。
+   */
+  chunks: {
+    req: { sid: number; key: string; hidden: Uint8Array; diff: boolean; palette: Float32Array; base?: number };
+    res: { full: boolean; items: ChunkItem[] };
+  };
   count: { req: { sid: number }; res: number[] };
 }
 export type Kind = keyof Requests;
@@ -51,7 +83,50 @@ interface State {
 }
 const store = new Map<number, State>();
 const diffs = new Map<number, { mask: Uint8Array; count: number }>();
+const counts = new Map<number, Float64Array>();
+/** 每個版本從哪一版、改了哪個外框來的（chunk 網格只重算改到的地方）。 */
+const parents = new Map<number, { from: number; box: BBox | null }>();
+/** chunk 網格快取：`${sid}|${key}` → chunk 編號 → 網格（只存非空的）；最近用的 4 組。 */
+const chunkCache = new Map<string, Map<number, MeshData>>();
+const CHUNK_CACHE = 4;
 let origSid = 0;
+
+/** 新版本 to 的 diff 與材質計數：上一版有算過就只在改到的外框裡更新（§8.5）。 */
+function carryStats(from: number, to: number, box: BBox | null) {
+  const a = get(from).vol;
+  const b = get(to).vol;
+  const o = get(origSid).vol.data;
+  const d = diffs.get(from);
+  const c = counts.get(from);
+  if (!box) {
+    if (d) diffs.set(to, d);
+    if (c) counts.set(to, c);
+    return;
+  }
+  const { X, Y } = b;
+  if (d) {
+    const mask = d.mask.slice();
+    let count = d.count;
+    for (let z = box.z0; z <= box.z1; z++)
+      for (let y = box.y0; y <= box.y1; y++)
+        for (let i = (z * Y + y) * X + box.x0, e = i + box.x1 - box.x0; i <= e; i++) {
+          const now = b.data[i] !== o[i] ? 1 : 0;
+          count += now - mask[i];
+          mask[i] = now;
+        }
+    diffs.set(to, { mask, count });
+  }
+  if (c) {
+    const out = c.slice();
+    for (let z = box.z0; z <= box.z1; z++)
+      for (let y = box.y0; y <= box.y1; y++)
+        for (let i = (z * Y + y) * X + box.x0, e = i + box.x1 - box.x0; i <= e; i++) {
+          out[a.data[i]]--;
+          out[b.data[i]]++;
+        }
+    counts.set(to, out);
+  }
+}
 
 const get = (sid: number) => {
   const s = store.get(sid);
@@ -126,9 +201,14 @@ const handlers: { [K in Kind]: Handler<K> } = {
   load: ({ sid, vol }) => {
     store.clear();
     diffs.clear();
+    counts.clear();
+    parents.clear();
+    chunkCache.clear();
     const { labels, raw } = labelComponents(vol);
     store.set(sid, { vol, labels });
     origSid = sid;
+    // 原始和自己沒有不同：之後每一步的 diff 都從這裡在外框裡更新
+    diffs.set(sid, { mask: new Uint8Array(vol.data.length), count: 0 });
     const out = labels.slice();
     return [{ labels: out, raw }, [out.buffer]];
   },
@@ -140,7 +220,91 @@ const handlers: { [K in Kind]: Handler<K> } = {
     const keep = new Set([...sids, origSid]);
     for (const k of store.keys()) if (!keep.has(k)) store.delete(k);
     for (const k of diffs.keys()) if (!keep.has(k)) diffs.delete(k);
+    for (const k of counts.keys()) if (!keep.has(k)) counts.delete(k);
     return [null, []];
+  },
+  apply: ({ from, to, comps, op, matNames, keyCounter }) => {
+    const src = get(from);
+    let seq = keyCounter;
+    const r = applyOpLocal({ vol: src.vol, L: { labels: src.labels, comps } }, op, {
+      orig: get(origSid).vol,
+      matName: (id) => matNames[id] ?? `材質 ${id}`,
+      newKey: () => `c${seq++}`,
+    });
+    store.set(to, { vol: r.state.vol, labels: r.state.L.labels });
+    parents.set(to, { from, box: r.step.data?.box ?? null });
+    carryStats(from, to, r.step.data?.box ?? null);
+    return [{ step: r.step, keyCounter: seq, report: r.report }, stepBuffers(r.step)];
+  },
+  derive: ({ from, to, step, dir }) => {
+    if (!store.has(to)) {
+      const src = get(from);
+      const out = applyStep({ vol: src.vol, L: { labels: src.labels, comps: [] } }, step, dir);
+      store.set(to, { vol: out.vol, labels: out.L.labels });
+      carryStats(from, to, step.data?.box ?? null);
+    }
+    parents.set(to, { from, box: step.data?.box ?? null });
+    return [null, []];
+  },
+  chunks: ({ sid, key, hidden, diff, palette, base }) => {
+    const { vol } = get(sid);
+    const g = gridOf(vol);
+    const d = diff && sid !== origSid ? diffOf(sid).mask : null;
+    const data = vol.data;
+    const code = (i: number) => {
+      const m = data[i];
+      return m && !hidden[m] ? (d?.[i] ? m | DIFF_BIT : m) : 0;
+    };
+    const color = (c: number): [number, number, number] => {
+      const id = c & 255;
+      const r = palette[id * 3];
+      const gg = palette[id * 3 + 1];
+      const b = palette[id * 3 + 2];
+      return c & DIFF_BIT ? [r * 0.35 + 0.65, gg * 0.35 + 0.2, b * 0.35 + 0.2] : [r, gg, b];
+    };
+    const ck = `${sid}|${key}`;
+    const par = parents.get(sid);
+    let map = chunkCache.get(ck);
+    let dirty: number[] | null = null;
+    if (par) dirty = par.box ? chunksTouching(vol, g, par.box) : [];
+    if (!map) {
+      const pmap = par ? chunkCache.get(`${par.from}|${key}`) : undefined;
+      if (pmap && dirty) {
+        map = new Map(pmap);
+        for (const k of dirty) {
+          const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
+          if (m.quads) map.set(k, m);
+          else map.delete(k);
+        }
+      } else {
+        map = new Map();
+        for (let k = 0; k < chunkCount(g); k++) {
+          const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
+          if (m.quads) map.set(k, m);
+        }
+      }
+    }
+    chunkCache.delete(ck);
+    chunkCache.set(ck, map);
+    while (chunkCache.size > CHUNK_CACHE) chunkCache.delete(chunkCache.keys().next().value!);
+    const copy = (k: number): ChunkItem => {
+      const m = map!.get(k);
+      return m
+        ? { k, m: { positions: m.positions.slice(), normals: m.normals.slice(), colors: m.colors.slice(), quads: m.quads } }
+        : { k, m: emptyMesh() };
+    };
+    let full = true;
+    let items: ChunkItem[];
+    if (base === sid) {
+      full = false;
+      items = [];
+    } else if (par && base === par.from && dirty) {
+      full = false;
+      items = dirty.map(copy);
+    } else items = [...map.keys()].map(copy);
+    const transfer: Transferable[] = [];
+    for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
+    return [{ full, items }, transfer];
   },
   replay: ({ from, to, comps, ops, matNames, keyCounter }) => {
     const src = get(from);
@@ -219,9 +383,13 @@ const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: d.count }, [mask.buffer]];
   },
   count: ({ sid }) => {
-    const data = get(sid).vol.data;
-    const out = new Float64Array(256);
-    for (let i = 0; i < data.length; i++) out[data[i]]++;
+    let out = counts.get(sid);
+    if (!out) {
+      const data = get(sid).vol.data;
+      out = new Float64Array(256);
+      for (let i = 0; i < data.length; i++) out[data[i]]++;
+      counts.set(sid, out);
+    }
     return [Array.from(out), []];
   },
 };

@@ -15,6 +15,7 @@ import {
 } from './volume';
 import { type EditState, type LegacyOp, type Op, radiusOf, upgradeOp } from './ops';
 import { axisIndex } from './scope';
+import type { Report } from './kernel';
 
 export interface Preview {
   /** 裁切範圍（含端點，整個陣列的座標）。 */
@@ -109,6 +110,12 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
     return clampBox(fromLoHi(l, h), s.vol);
   }
   if (op.kind === 'translate') {
+    // 帶殼：殼最多在結構外 LINER_MARGIN 格
+    if (op.follow)
+      for (let k = 0; k < 3; k++) {
+        l[k] -= LINER_MARGIN;
+        h[k] += LINER_MARGIN;
+      }
     for (let k = 0; k < 3; k++) {
       l[k] = Math.min(l[k], l[k] + op.d[k]);
       h[k] = Math.max(h[k], h[k] + op.d[k]);
@@ -122,7 +129,7 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
  * 在裁切範圍內算這一步的結果；範圍超過 cap 個體素就回傳 null（留給 Worker）。
  * 範圍內逐體素和 applyOp 的結果相同；範圍外這一步本來就不會改到。
  */
-export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity): Preview | null {
+export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity, report?: Report): Preview | null {
   const op = upgradeOp(input);
   const box = previewBox(s, op);
   if (!box || boxVoxels(box) > cap) return null;
@@ -136,12 +143,12 @@ export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap 
   let out: Volume;
   if (op.kind === 'push') {
     const m = op.local ? localMask(vol, mask, op.dir, shift(op.local.center), radiusOf(op.local), op.local.shape ?? 'round') : mask;
-    out = growMask(vol, o, m, zr, op.dir, op.n, op.backfill, op.follow);
+    out = growMask(vol, o, m, zr, op.dir, op.n, op.backfill, op.follow, report);
   } else if (op.kind === 'level') {
     const a = op.dir[0] ? 0 : op.dir[1] ? 1 : 2;
     const to = op.to - [box.x0, box.y0, box.z0][a];
-    out = levelMask(vol, o, mask, zr, op.dir, shift(op.local.center), radiusOf(op.local), op.local.shape ?? 'round', to, op.backfill, !!op.follow);
-  } else if (op.kind === 'translate') out = translateMask(vol, o, mask, zr, op.d, op.backfill);
+    out = levelMask(vol, o, mask, zr, op.dir, shift(op.local.center), radiusOf(op.local), op.local.shape ?? 'round', to, op.backfill, !!op.follow, report);
+  } else if (op.kind === 'translate') out = translateMask(vol, o, mask, zr, op.d, op.backfill, !!op.follow);
   else out = setMaskMaterial(vol, mask, zr, op.m);
   return { box, data: out.data };
 }

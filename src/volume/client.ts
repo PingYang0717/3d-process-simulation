@@ -1,6 +1,7 @@
 // 主執行緒呼叫 Worker：call('mesh', {...}) → Promise；並記得哪些狀態已經常駐在 Worker。
 import type { Kind, Requests } from './worker';
 import type { EditState } from './ops';
+import type { Step } from './patch';
 
 let worker: Worker | null = null;
 let seq = 0;
@@ -101,4 +102,25 @@ export function retain(states: EditState[]) {
   const keep = new Set(states.map(sidOf));
   for (const id of resident) if (!keep.has(id)) resident.delete(id);
   call('retain', { sids: [...keep, ...inflight] });
+}
+
+/** 一步操作在 Worker 裡只算外框（§8.2）：結果留在 Worker（新版本號），回傳補丁與報告。 */
+export async function applyIn(from: EditState, req: Omit<Requests['apply']['req'], 'from' | 'to' | 'comps'>) {
+  const fromId = ensure(from);
+  const to = newVersion();
+  inflight.add(to);
+  try {
+    const r = await call('apply', { ...req, from: fromId, to, comps: from.L.comps });
+    resident.add(to);
+    return { ...r, version: to };
+  } finally {
+    inflight.delete(to);
+  }
+}
+
+/** 復原／重做：Worker 從 from 套補丁做出 to（to 通常是以前的版本號，內容相同）。 */
+export function deriveIn(from: EditState, to: number, step: Step, dir: 'fwd' | 'back') {
+  const fromId = ensure(from);
+  resident.add(to);
+  return call('derive', { from: fromId, to, step, dir });
 }

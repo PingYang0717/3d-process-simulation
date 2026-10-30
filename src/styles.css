@@ -356,3 +356,10 @@ span.group-caret { display: inline-block; width: 22px; flex: none; }
 /* 跟著位移的襯層：一列 */
 .change-item.carried { background: #fafbfc; }
 .load-progress { padding: 12px 14px; border: 1px solid #eef0f3; border-radius: 8px; background: #fafbfc; }
+
+/* ---- 第一輪低優先 ---- */
+.split-tab:focus-visible, .cmp-card .pane-head:focus-visible { outline: 2px solid #1677ff; outline-offset: -2px; }
+/* 色塊點擊區放大到 24px */
+.group-head .ant-color-picker-trigger, .group-head .swatch-hit { padding: 5px; margin: -5px; display: inline-flex; border-radius: 6px; }
+.group-head .swatch-hit:hover { background: rgba(0,0,0,.06); }
+@media (prefers-reduced-motion: reduce) { .busy-dot { animation: none; opacity: 1; } * { scroll-behavior: auto !important; } }

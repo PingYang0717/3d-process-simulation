@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { App } from 'antd';
 import {
   type Backfill,
   type Labeled,
@@ -89,6 +90,7 @@ export interface MenuState {
 }
 
 export function useEditor() {
+  const { message } = App.useApp();
   const [materials, setMaterials] = useState<Material[]>([]);
   const [meta, setMeta] = useState<Meta>({ format: 'demo' });
   const [origState, setOrig] = useState<EditState | null>(null);
@@ -221,9 +223,9 @@ export function useEditor() {
 
   const keepSel = (s: EditState) => setSel((prev) => new Set([...prev].filter((k) => s.L.comps.some((c) => c.key === k))));
 
-  /** 在 Worker 裡從 from 重播 ops（含 relabel）；busy 橫條顯示 label。 */
+  /** 在 Worker 裡從 from 重播 ops（含 relabel）；busy 橫條顯示 label。失敗回 null 並提示，不會卡在計算中。 */
   const run = useCallback(
-    async (from: EditState, ops: Op[], label: string): Promise<EditState> => {
+    async (from: EditState, ops: Op[], label: string): Promise<EditState | null> => {
       setBusy(label);
       running.current = true;
       try {
@@ -234,12 +236,15 @@ export function useEditor() {
         diffOf(next);
         countOf(next);
         return next;
+      } catch (e) {
+        message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
+        return null;
       } finally {
         setBusy(null);
         running.current = false;
       }
     },
-    [orig, matNames, diffOf],
+    [orig, matNames, diffOf, message],
   );
 
   /** 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。 */
@@ -249,6 +254,7 @@ export function useEditor() {
       if (!active) {
         // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始
         const next = await run(orig, [op], '計算中…');
+        if (!next) return;
         const id = newSplitId();
         const name = `Split ${splits.length + 1}`;
         setSplits((all) => [...all, { id, name, cur: next, ops: [op], hist: [{ snap: orig, ops: [] }], future: [] }]);
@@ -258,6 +264,7 @@ export function useEditor() {
         return;
       }
       const next = await run(active.cur, [op], '計算中…');
+      if (!next) return;
       setSplits((all) =>
         all.map((s) =>
           s.id === active.id
@@ -323,6 +330,7 @@ export function useEditor() {
     async (name?: string, ops: Op[] = []) => {
       if (running.current) return;
       const state = ops.length ? await run(orig, ops, '重播中…') : orig;
+      if (!state) return;
       const id = newSplitId();
       setSplits((all) => [...all, { id, name: name ?? `Split ${all.length + 1}`, cur: state, ops, hist: [], future: [] }]);
       setActiveId(id);
@@ -368,8 +376,10 @@ export function useEditor() {
       const made: Split[] = [];
       for (let i = 0; i < ops.length; i++) {
         const cur = await run(from, [ops[i]], `產生 ${nameOf(values[i])}…`);
+        if (!cur) break;
         made.push({ id: newSplitId(), name: nameOf(values[i]), cur, ops: [...prefix, ops[i]], hist: [], future: [] });
       }
+      if (!made.length) return [];
       setSplits((all) => [...all, ...made]);
       setActiveId(made[0].id);
       setLast({ text: `已產生 ${made.length} 個 split`, at: Date.now() });
@@ -559,8 +569,9 @@ export function useEditor() {
         return;
       }
       if (e.key === 'Escape') {
-        setMenu(null);
-        clearSel();
+        // 一層一層退：先關選單，再取消選取
+        if (menu) setMenu(null);
+        else clearSel();
         return;
       }
       if (e.key === '[' || e.key === ']') {
@@ -590,7 +601,7 @@ export function useEditor() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId]);
+  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId, menu]);
 
   return {
     ready,

@@ -77,7 +77,7 @@ export function StructureList({ ed, width }: { ed: Editor; width: number }) {
                       disabledAlpha
                       onChangeComplete={(c) => ed.setMaterialColor(mat.id, c.toHexString())}
                     >
-                      <span>
+                      <span className="swatch-hit">
                         <Swatch fill={mat.color} size={14} />
                       </span>
                     </ColorPicker>

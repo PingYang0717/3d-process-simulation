@@ -68,7 +68,15 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
             : undefined;
           return (
             <div key={card.id} className={'pane cmp-card' + (card.id === ed.activeId ? ' on' : '')}>
-              <div className="pane-head" onClick={() => ed.setActiveId(card.id)} style={{ cursor: 'pointer' }}>
+              <div
+                className="pane-head"
+                role="button"
+                tabIndex={0}
+                aria-label={`切到 ${card.name}`}
+                onClick={() => ed.setActiveId(card.id)}
+                onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), ed.setActiveId(card.id))}
+                style={{ cursor: 'pointer' }}
+              >
                 <Text strong style={{ fontSize: 13 }}>
                   {card.name}
                 </Text>

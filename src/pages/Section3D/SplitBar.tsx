@@ -51,7 +51,14 @@ export function SplitBar({
               className={'split-tab' + (on ? ' on' : '') + (t.id === BASE_ID ? ' base' : '')}
               onClick={() => ed.setActiveId(t.id)}
               onDoubleClick={() => s && startRename(s)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  ed.setActiveId(t.id);
+                } else if (e.key === 'F2' && s) startRename(s);
+              }}
               role="tab"
+              tabIndex={0}
               aria-selected={on}
             >
               <span className="split-name">{t.name}</span>

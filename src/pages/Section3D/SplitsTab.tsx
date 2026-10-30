@@ -1,9 +1,8 @@
-import { useMemo } from 'react';
 import { Alert, Button, Flex, Table, Typography } from 'antd';
 import { DownloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { bboxDims } from '../../volume/volume';
 import { signed } from '../../ui/format';
-import type { Editor } from './editor';
+import { type Editor, useSplitDiffs } from './editor';
 
 const { Text } = Typography;
 
@@ -12,11 +11,11 @@ export function SplitsTab({ ed, onExportAll, onSweep }: { ed: Editor; onExportAl
   const focus = ed.selComps[0];
   const was = focus ? ed.origByKey.get(focus.key) : undefined;
   const base = was ? bboxDims(was.bbox) : null;
-  const diffCounts = useMemo(() => new Map(ed.splits.map((s) => [s.id, ed.diffOf(s.cur.vol).count])), [ed.splits, ed.diffOf]);
+  const diffs = useSplitDiffs(ed);
   const rows = ed.splits.map((s) => {
     const c = focus ? s.cur.L.comps.find((x) => x.key === focus.key) : undefined;
     const d = c ? bboxDims(c.bbox) : null;
-    return { key: s.id, name: s.name, h: d?.h, w: d?.w, diff: diffCounts.get(s.id) ?? 0 };
+    return { key: s.id, name: s.name, h: d?.h, w: d?.w, diff: diffs.get(s.id)?.count };
   });
   const dim = (k: 'h' | 'w') => (_: unknown, r: (typeof rows)[number]) => {
     const v = r[k];
@@ -51,7 +50,7 @@ export function SplitsTab({ ed, onExportAll, onSweep }: { ed: Editor; onExportAl
           { title: 'Split', dataIndex: 'name', key: 'name', ellipsis: true },
           { title: '高 H', key: 'h', align: 'right', width: 54, render: dim('h') },
           { title: '寬 W', key: 'w', align: 'right', width: 54, render: dim('w') },
-          { title: '改動 vx', dataIndex: 'diff', key: 'diff', align: 'right', width: 76, render: (v: number) => v.toLocaleString() },
+          { title: '改動 vx', dataIndex: 'diff', key: 'diff', align: 'right', width: 76, render: (v?: number) => (v === undefined ? '…' : v.toLocaleString()) },
         ]}
       />
       <Text type="secondary" style={{ fontSize: 12 }}>
@@ -64,7 +63,7 @@ export function SplitsTab({ ed, onExportAll, onSweep }: { ed: Editor; onExportAl
         全部匯出（zip）
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        zip 裡每個 split 一個 .npy（同 shape、同 dtype），加一份 manifest.json 記錄每個 split 做了哪些操作。
+        zip 裡每個 split 一個 .vti（同 Extent、同 Spacing、同 Origin），加一份 manifest.json 記錄每個 split 做了哪些操作。
       </Text>
     </Flex>
   );

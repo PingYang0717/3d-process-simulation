@@ -22,7 +22,7 @@ function Row({ label, sub, children }: { label: string; sub?: string; children: 
   );
 }
 
-/** 不常動的東西：襯層跟著推、回填、標紅、nm 比例、重新載入。 */
+/** 不常動的東西：襯層跟著推、局部凸起半徑、回填、標紅、nm 比例、重新載入。 */
 export function SettingsDrawer({
   ed,
   open,
@@ -44,6 +44,16 @@ export function SettingsDrawer({
         <Section title="編輯方式">
           <Row label="推面時，外層薄層一起推" sub="HfO₂／TiN 這類襯層跟著位移，不會被蓋掉">
             <Switch checked={ed.follow} onChange={ed.setFollow} />
+          </Row>
+          <Row label="Alt＋拖拉的局部凸起半徑" sub="只推離拖拉點這個半徑內的面">
+            <InputNumber
+              min={1}
+              max={200}
+              value={ed.bumpRadius}
+              onChange={(v) => v && ed.setBumpRadius(v)}
+              addonAfter="vx"
+              style={{ width: 120 }}
+            />
           </Row>
           <Row label="搬走／縮短後空出來的地方填" sub="「原本的內容」讓往上再往下、長高再縮短都能回到原點">
             <Select
@@ -75,7 +85,7 @@ export function SettingsDrawer({
             onLoad();
           }}
         >
-          重新載入 .npy…
+          重新載入 .vti／.npy…
         </Button>
       </Flex>
     </Drawer>

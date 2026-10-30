@@ -49,6 +49,7 @@ export type Backfill = 'orig' | number;
 export const AIR = 0;
 export const VOID = 254;
 
+/** 內建範例的名稱表；載入檔案時不用它（見 materialsFor）。 */
 export const MATERIALS: Material[] = [
   { id: 0, name: 'Air', color: '#ffffff' },
   { id: 1, name: 'Si (p)', color: '#ddd8cb' },
@@ -81,145 +82,212 @@ export const coordOf = (v: Volume, i: number): Vec3 => {
 const inside = (v: Volume, x: number, y: number, z: number) =>
   x >= 0 && y >= 0 && z >= 0 && x < v.X && y < v.Y && z < v.Z;
 
-/** 範例：3 根 fin × 3 根 poly gate，160×96×128；Poly-Si 3 裡有 3 片 bamboo defect（VOID）。 */
-export function demoVolume(): Volume {
-  const X = 160;
-  const Y = 96;
-  const Z = 128;
+/**
+ * 範例：3 根 fin × 3 根 poly gate，160×96×128；Poly-Si 3 裡有 3 片 1 voxel 厚的 bamboo defect（VOID）。
+ * scale 把每一軸放大幾倍（×3 = 480×288×384，約 5,300 萬 voxels），用來看大陣列的速度。
+ */
+export function demoVolume(scale = 1): Volume {
+  const s = scale;
+  const X = 160 * s;
+  const Y = 96 * s;
+  const Z = 128 * s;
   const data = new Uint8Array(X * Y * Z);
   const at = (x: number, y: number, z: number) => (z * Y + y) * X + x;
   const box = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, m: number) => {
     for (let z = Math.max(0, z0); z < Math.min(Z, z1); z++)
-      for (let y = Math.max(0, y0); y < Math.min(Y, y1); y++)
-        for (let x = Math.max(0, x0); x < Math.min(X, x1); x++) data[at(x, y, z)] = m;
+      for (let y = Math.max(0, y0); y < Math.min(Y, y1); y++) data.fill(m, at(Math.max(0, x0), y, z), at(Math.min(X, x1), y, z));
   };
-  const finCenters = [40, 80, 120];
-  const finW = 12;
-  const finTop = 30;
-  const stiTop = 60;
-  const subTop = 70;
+  const finCenters = [40 * s, 80 * s, 120 * s];
+  const finW = 12 * s;
+  const finTop = 30 * s;
+  const stiTop = 60 * s;
+  const subTop = 70 * s;
+  const liner = 4 * s;
   const gates: [number, number][] = [
-    [14, 38],
-    [52, 76],
-    [90, 114],
+    [14 * s, 38 * s],
+    [52 * s, 76 * s],
+    [90 * s, 114 * s],
   ];
   box(0, X, subTop, Y, 0, Z, 1);
   box(0, X, stiTop, subTop, 0, Z, 2);
-  // fin 截面：頂角切掉 2 格
-  const isFin = (x: number, y: number) =>
-    finCenters.some((c) => {
-      const l = c - finW / 2;
-      const r = c + finW / 2;
-      if (x < l || x >= r || y < finTop || y >= subTop) return false;
-      return Math.min(x - l, r - 1 - x) + (y - finTop) >= 2;
-    });
+  // fin 截面（與 z 無關，先算成 2D）：頂角切掉 2 格
+  const fin = new Uint8Array(X * Y);
+  for (let y = finTop; y < subTop; y++)
+    for (let x = 0; x < X; x++)
+      fin[y * X + x] = finCenters.some((c) => {
+        const l = c - finW / 2;
+        const r = c + finW / 2;
+        return x >= l && x < r && Math.min(x - l, r - 1 - x) + (y - finTop) >= 2 * s;
+      })
+        ? 1
+        : 0;
+  // 到 fin 的距離（Chebyshev，≤ liner 才算）；fin 本身與太遠的記 255
+  const dist = new Uint8Array(X * Y).fill(255);
+  for (let y = finTop - liner; y < stiTop; y++)
+    for (let x = 0; x < X; x++) {
+      if (fin[y * X + x]) continue;
+      let d = 255;
+      for (let dy = -liner; dy <= liner && d > 0; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= Y) continue;
+        for (let dx = -liner; dx <= liner; dx++) {
+          const xx = x + dx;
+          if (xx >= 0 && xx < X && fin[yy * X + xx]) d = Math.min(d, Math.max(Math.abs(dx), Math.abs(dy)));
+        }
+      }
+      dist[y * X + x] = d;
+    }
   for (const [z0, z1] of gates) {
-    box(8, 152, 18, stiTop, z0, z1, 6);
-    box(8, 152, 14, 18, z0, z1, 7);
+    box(8 * s, X - 8 * s, 18 * s, stiTop, z0, z1, 6);
+    box(8 * s, X - 8 * s, 14 * s, 18 * s, z0, z1, 7);
   }
   for (let z = 0; z < Z; z++)
-    for (let y = finTop; y < subTop; y++) for (let x = 0; x < X; x++) if (isFin(x, y)) data[at(x, y, z)] = 3;
-  const distToFin = (x: number, y: number) => {
-    let d = 99;
-    for (let dy = -4; dy <= 4; dy++)
-      for (let dx = -4; dx <= 4; dx++) if (isFin(x + dx, y + dy)) d = Math.min(d, Math.max(Math.abs(dx), Math.abs(dy)));
-    return d;
-  };
+    for (let y = finTop; y < subTop; y++) for (let x = 0; x < X; x++) if (fin[y * X + x]) data[at(x, y, z)] = 3;
   for (const [z0, z1] of gates)
     for (let z = z0; z < z1; z++)
-      for (let y = finTop - 4; y < stiTop; y++)
+      for (let y = finTop - liner; y < stiTop; y++)
         for (let x = 0; x < X; x++) {
-          if (isFin(x, y)) continue;
-          const d = distToFin(x, y);
-          if (d <= 2) data[at(x, y, z)] = 4;
-          else if (d <= 4) data[at(x, y, z)] = 5;
+          const d = dist[y * X + x];
+          if (d <= 2 * s) data[at(x, y, z)] = 4;
+          else if (d <= liner) data[at(x, y, z)] = 5;
         }
-  for (const z of [96, 101, 106])
-    for (let y = 24; y < 56; y++)
-      for (let x = 24; x < 136; x++) if (data[at(x, y, z)] === 6) data[at(x, y, z)] = VOID;
+  for (const z of [96 * s, 101 * s, 106 * s])
+    for (let y = 24 * s; y < 56 * s; y++)
+      for (let x = 24 * s; x < X - 24 * s; x++) if (data[at(x, y, z)] === 6) data[at(x, y, z)] = VOID;
   return { X, Y, Z, data };
 }
 
-export interface Faces {
+export interface MeshData {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
-  /** 每個三角形屬於哪個體素（兩個三角形一個四邊形），供射線點選。 */
-  faceVoxel: Int32Array;
-  count: number;
+  quads: number;
 }
 
-const NEIGHBORS: Vec3[] = [
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 1, 0],
-  [0, -1, 0],
-  [0, 0, 1],
-  [0, 0, -1],
-];
+/** 每個體素的網格代碼：0 = 不畫；同代碼、同朝向、相鄰的面才合併。 */
+export const DIFF_BIT = 256;
 
 /**
- * 只產生暴露面：鄰居材質不同（或被隱藏）才畫。
- * 給 mask 時改成只畫 mask 的外殼（選取顯示用）。
+ * Greedy meshing：每個軸、每一片，把「這一格 vs 下一格」不同的面標出來，
+ * 同代碼、同朝向、相鄰的面合併成最大矩形。座標是體素座標（角落 = 整數）。
+ * 兩種非 0 代碼相鄰時兩面都畫（各自朝外）。
  */
-export function buildFaces(vol: Volume, colorOf: (mat: number) => Vec3 | null, mask?: Uint8Array | null): Faces {
-  const { X, Y, Z, data } = vol;
+export function greedyMesh(
+  X: number,
+  Y: number,
+  Z: number,
+  codes: Uint16Array,
+  colorOf: (code: number) => [number, number, number],
+): MeshData {
+  const dims = [X, Y, Z];
   const pos: number[] = [];
   const nor: number[] = [];
   const col: number[] = [];
-  const fv: number[] = [];
-  const quad = (x: number, y: number, z: number, n: Vec3, c: Vec3, voxel: number) => {
-    const cx = x + 0.5;
-    const cy = y + 0.5;
-    const cz = z + 0.5;
-    const [nx, ny, nz] = n;
-    const u: Vec3 = nx ? [0, 1, 0] : [1, 0, 0];
-    const w: Vec3 = nz ? [0, 1, 0] : [0, 0, 1];
-    const fx = cx + nx * 0.5;
-    const fy = cy + ny * 0.5;
-    const fz = cz + nz * 0.5;
-    const corner = (a: number, b: number): Vec3 => [
-      fx + u[0] * a * 0.5 + w[0] * b * 0.5,
-      fy + u[1] * a * 0.5 + w[1] * b * 0.5,
-      fz + u[2] * a * 0.5 + w[2] * b * 0.5,
-    ];
-    const p0 = corner(-1, -1);
-    const p1 = corner(1, -1);
-    const p2 = corner(1, 1);
-    const p3 = corner(-1, 1);
-    const tris = nx + ny + nz > 0 ? [p0, p1, p2, p0, p2, p3] : [p0, p2, p1, p0, p3, p2];
-    for (const p of tris) {
-      pos.push(p[0], p[1], p[2]);
-      nor.push(nx, ny, nz);
-      col.push(c[0] / 255, c[1] / 255, c[2] / 255);
+  let quads = 0;
+  const get = (x: number, y: number, z: number) =>
+    x < 0 || y < 0 || z < 0 || x >= X || y >= Y || z >= Z ? 0 : codes[(z * Y + y) * X + x];
+  const BOTH = 1 << 30;
+  const mask = new Int32Array(Math.max(X * Y, Y * Z, X * Z));
+  for (let d = 0; d < 3; d++) {
+    const u = (d + 1) % 3;
+    const v = (d + 2) % 3;
+    const q = [0, 0, 0];
+    q[d] = 1;
+    const x = [0, 0, 0];
+    for (x[d] = -1; x[d] < dims[d]; ) {
+      // 這一片的面：正值 = 朝 +d 的面、負值 = 朝 −d、BOTH = 兩面都有
+      let n = 0;
+      for (x[v] = 0; x[v] < dims[v]; x[v]++)
+        for (x[u] = 0; x[u] < dims[u]; x[u]++) {
+          const a = get(x[0], x[1], x[2]);
+          const b = get(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
+          mask[n++] = a === b ? 0 : a && !b ? a : !a && b ? -b : BOTH | (a << 15) | b;
+        }
+      x[d]++;
+      n = 0;
+      for (let j = 0; j < dims[v]; j++)
+        for (let i = 0; i < dims[u]; ) {
+          const c = mask[n];
+          if (!c) {
+            i++;
+            n++;
+            continue;
+          }
+          let w = 1;
+          while (i + w < dims[u] && mask[n + w] === c) w++;
+          let h = 1;
+          grow: for (; j + h < dims[v]; h++)
+            for (let k = 0; k < w; k++) if (mask[n + k + h * dims[u]] !== c) break grow;
+          // 負值的二補數也帶著 bit 30，所以先看正負再看 BOTH
+          const faces: [number, number][] =
+            c > 0 && c & BOTH
+              ? [
+                  [(c >> 15) & 0x7fff, 1],
+                  [c & 0x7fff, -1],
+                ]
+              : c > 0
+                ? [[c, 1]]
+                : [[-c, -1]];
+          x[u] = i;
+          x[v] = j;
+          const du = [0, 0, 0];
+          const dv = [0, 0, 0];
+          du[u] = w;
+          dv[v] = h;
+          const p0 = [x[0], x[1], x[2]];
+          const p1 = [x[0] + du[0], x[1] + du[1], x[2] + du[2]];
+          const p2 = [x[0] + du[0] + dv[0], x[1] + du[1] + dv[1], x[2] + du[2] + dv[2]];
+          const p3 = [x[0] + dv[0], x[1] + dv[1], x[2] + dv[2]];
+          for (const [code, sign] of faces) {
+            const rgb = colorOf(code);
+            const tris = sign > 0 ? [p0, p1, p2, p0, p2, p3] : [p0, p2, p1, p0, p3, p2];
+            const nn = [0, 0, 0];
+            nn[d] = sign;
+            for (const p of tris) {
+              pos.push(p[0], p[1], p[2]);
+              nor.push(nn[0], nn[1], nn[2]);
+              col.push(rgb[0], rgb[1], rgb[2]);
+            }
+            quads++;
+          }
+          for (let l = 0; l < h; l++) for (let k = 0; k < w; k++) mask[n + k + l * dims[u]] = 0;
+          i += w;
+          n += w;
+        }
     }
-    fv.push(voxel, voxel);
-  };
+  }
+  return { positions: new Float32Array(pos), normals: new Float32Array(nor), colors: new Float32Array(col), quads };
+}
+
+/**
+ * 射線命中點（體素座標）＋面法線 → 被點到的體素：從命中點往法線反方向退半格。
+ * 回傳 index，出界回傳 −1。
+ */
+export function voxelFromHit(vol: Volume, point: Vec3, normal: Vec3) {
+  const x = Math.floor(point[0] - normal[0] * 0.5);
+  const y = Math.floor(point[1] - normal[1] * 0.5);
+  const z = Math.floor(point[2] - normal[2] * 0.5);
+  return inside(vol, x, y, z) ? (z * vol.Y + y) * vol.X + x : -1;
+}
+
+/**
+ * 局部凸起：只留下沿 dir 軸、離 center 在半徑 r 以內的那些列（垂直於 dir 的平面上量距離）。
+ */
+export function localMask(vol: Volume, mask: Uint8Array, dir: Vec3, center: Vec3, r: number) {
+  const { X, Y, Z } = vol;
+  const out = new Uint8Array(mask.length);
+  const axis = dir[0] ? 0 : dir[1] ? 1 : 2;
+  const r2 = r * r;
   for (let z = 0; z < Z; z++)
     for (let y = 0; y < Y; y++)
       for (let x = 0; x < X; x++) {
         const i = (z * Y + y) * X + x;
-        const m = data[i];
-        if (mask ? !mask[i] : m === AIR) continue;
-        const c = mask ? ([31, 94, 255] as Vec3) : colorOf(m);
-        if (!c) continue;
-        for (const n of NEIGHBORS) {
-          const nx = x + n[0];
-          const ny = y + n[1];
-          const nz = z + n[2];
-          const out = nx < 0 || ny < 0 || nz < 0 || nx >= X || ny >= Y || nz >= Z;
-          const j = out ? -1 : (nz * Y + ny) * X + nx;
-          const exposed = mask ? out || !mask[j] : (out ? AIR : data[j]) !== m;
-          if (exposed) quad(x, y, z, n, c, i);
-        }
+        if (!mask[i]) continue;
+        const a = axis === 0 ? y - center[1] : x - center[0];
+        const b = axis === 2 ? y - center[1] : z - center[2];
+        if (a * a + b * b <= r2) out[i] = 1;
       }
-  return {
-    positions: new Float32Array(pos),
-    normals: new Float32Array(nor),
-    colors: new Float32Array(col),
-    faceVoxel: new Int32Array(fv),
-    count: pos.length / 3,
-  };
+  return out;
 }
 
 /** 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。 */
@@ -431,6 +499,13 @@ export function materialCounts(vol: Volume) {
   return counts;
 }
 
+/** 每個編號幾個體素（長度 256）。 */
+export function countArray(data: Uint8Array) {
+  const out = new Float64Array(256);
+  for (let i = 0; i < data.length; i++) out[data[i]]++;
+  return Array.from(out);
+}
+
 /** 逐體素比對原始。 */
 export function diffMask(vol: Volume, orig: Volume) {
   const mask = new Uint8Array(vol.data.length);
@@ -494,54 +569,84 @@ export function decodeNpy(buf: ArrayBuffer): Volume {
   return { X, Y, Z, data };
 }
 
-/** 6 鄰接 flood fill（stack），順便算 bbox、count、seed。 */
+/** 6 鄰接 flood fill（Int32Array 堆疊），順便算 bbox、count、seed。 */
 export function labelComponents(vol: Volume): { labels: Int32Array; raw: RawComp[] } {
   const { X, Y, Z, data } = vol;
-  const labels = new Int32Array(X * Y * Z).fill(-1);
+  const N = X * Y * Z;
+  const plane = X * Y;
+  const labels = new Int32Array(N).fill(-1);
   const raw: RawComp[] = [];
-  const stack: number[] = [];
-  for (let s = 0; s < data.length; s++) {
+  let stack = new Int32Array(1 << 16);
+  for (let s = 0; s < N; s++) {
     if (labels[s] >= 0 || data[s] === AIR) continue;
     const mat = data[s];
     const id = raw.length;
     let count = 0;
-    const bbox: BBox = { x0: X, x1: -1, y0: Y, y1: -1, z0: Z, z1: -1 };
-    stack.push(s);
+    let x0 = X;
+    let x1 = -1;
+    let y0 = Y;
+    let y1 = -1;
+    let z0 = Z;
+    let z1 = -1;
+    let top = 0;
+    stack[top++] = s;
     labels[s] = id;
-    while (stack.length) {
-      const i = stack.pop()!;
+    while (top) {
+      const i = stack[--top];
       count++;
       const x = i % X;
       const y = ((i - x) / X) % Y;
-      const z = (i - x - y * X) / (X * Y);
-      if (x < bbox.x0) bbox.x0 = x;
-      if (x > bbox.x1) bbox.x1 = x;
-      if (y < bbox.y0) bbox.y0 = y;
-      if (y > bbox.y1) bbox.y1 = y;
-      if (z < bbox.z0) bbox.z0 = z;
-      if (z > bbox.z1) bbox.z1 = z;
-      const nb = [
-        x > 0 ? i - 1 : -1,
-        x < X - 1 ? i + 1 : -1,
-        y > 0 ? i - X : -1,
-        y < Y - 1 ? i + X : -1,
-        z > 0 ? i - X * Y : -1,
-        z < Z - 1 ? i + X * Y : -1,
-      ];
-      for (const j of nb)
-        if (j >= 0 && labels[j] < 0 && data[j] === mat) {
-          labels[j] = id;
-          stack.push(j);
-        }
+      const z = (i - x - y * X) / plane;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+      if (z < z0) z0 = z;
+      if (z > z1) z1 = z;
+      if (top + 6 >= stack.length) {
+        const bigger = new Int32Array(stack.length * 2);
+        bigger.set(stack);
+        stack = bigger;
+      }
+      // 六個鄰居直接展開（大陣列時比共用一個 closure 快約兩成）
+      let j = i - 1;
+      if (x > 0 && labels[j] < 0 && data[j] === mat) {
+        labels[j] = id;
+        stack[top++] = j;
+      }
+      j = i + 1;
+      if (x < X - 1 && labels[j] < 0 && data[j] === mat) {
+        labels[j] = id;
+        stack[top++] = j;
+      }
+      j = i - X;
+      if (y > 0 && labels[j] < 0 && data[j] === mat) {
+        labels[j] = id;
+        stack[top++] = j;
+      }
+      j = i + X;
+      if (y < Y - 1 && labels[j] < 0 && data[j] === mat) {
+        labels[j] = id;
+        stack[top++] = j;
+      }
+      j = i - plane;
+      if (z > 0 && labels[j] < 0 && data[j] === mat) {
+        labels[j] = id;
+        stack[top++] = j;
+      }
+      j = i + plane;
+      if (z < Z - 1 && labels[j] < 0 && data[j] === mat) {
+        labels[j] = id;
+        stack[top++] = j;
+      }
     }
-    raw.push({ mat, count, bbox, seed: s });
+    raw.push({ mat, count, bbox: { x0, x1, y0, y1, z0, z1 }, seed: s });
   }
   return { labels, raw };
 }
 
-/** 第一次標記：依材質、x、z 排序編號，例如「Poly-Si 2」。 */
-export function initialLabeled(vol: Volume, matName: (id: number) => string): Labeled {
-  const { labels, raw } = labelComponents(vol);
+/** 第一次命名：依材質、x、z 排序編號，例如「Poly-Si 2」。 */
+export function nameComponents(raw: RawComp[], matName: (id: number) => string): Comp[] {
   const order = raw
     .map((_, i) => i)
     .sort((a, b) => raw[a].mat - raw[b].mat || raw[a].bbox.x0 - raw[b].bbox.x0 || raw[a].bbox.z0 - raw[b].bbox.z0);
@@ -553,7 +658,12 @@ export function initialLabeled(vol: Volume, matName: (id: number) => string): La
     perMat.set(r.mat, n);
     comps[i] = { ...r, key: `c${i}`, label: `${matName(r.mat)} ${n}` };
   }
-  return { labels, comps };
+  return comps;
+}
+
+export function initialLabeled(vol: Volume, matName: (id: number) => string): Labeled {
+  const { labels, raw } = labelComponents(vol);
+  return { labels, comps: nameComponents(raw, matName) };
 }
 
 const labelNumber = (label: string) => parseInt(label.split(' ').pop() ?? '0', 10) || 0;
@@ -691,30 +801,41 @@ export function sliceHasAny(mask: Uint8Array, vol: Volume, axis: Axis, at: numbe
   return false;
 }
 
-/** 編號沒有內建色票時的自動配色。 */
-export function hslHex(h: number, s: number, l: number) {
-  h /= 360;
-  s /= 100;
-  l /= 100;
-  const f = (n: number) => {
-    const k = (n + h * 12) % 12;
-    const a = s * Math.min(l, 1 - l);
-    const c = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
-    return Math.round(c * 255)
-      .toString(16)
-      .padStart(2, '0');
-  };
-  return `#${f(0)}${f(8)}${f(4)}`;
-}
+/** 16 色可分辨調色盤：載入檔案後依編號順序輪流取。 */
+export const PALETTE = [
+  '#e8604c',
+  '#5b8def',
+  '#52b788',
+  '#f4a261',
+  '#9d7bd8',
+  '#4cc9f0',
+  '#f06595',
+  '#b5b35c',
+  '#8e9aaf',
+  '#f3b9a1',
+  '#7fc8a9',
+  '#c9b6e8',
+  '#ddd8cb',
+  '#9fd3e8',
+  '#ffb703',
+  '#2a9d8f',
+];
 
-/** 依陣列裡出現的編號建立材質表；保證有 Air 與 VOID。 */
-export function materialsFor(vol: Volume): Material[] {
-  let mats = [...new Set(vol.data)]
+/**
+ * 檔案沒有材質名稱與顏色的標準欄位，所以一律「材質 n」、顏色從調色盤輪流取；
+ * 0 當空、254 當空洞，兩者一定在表裡。名稱與顏色之後在左欄改。
+ */
+export function materialsFor(ids: Iterable<number>): Material[] {
+  let k = 0;
+  return [...new Set([...ids, AIR, VOID])]
     .sort((a, b) => a - b)
-    .map((id) => MATERIALS.find((m) => m.id === id) ?? { id, name: `材質 ${id}`, color: hslHex((id * 47) % 360, 55, 70) });
-  if (!mats.some((m) => m.id === VOID)) mats = [...mats, MATERIALS[MATERIALS.length - 1]];
-  if (!mats.some((m) => m.id === AIR)) mats = [MATERIALS[0], ...mats];
-  return mats;
+    .map((id) =>
+      id === AIR
+        ? { id, name: '0（空／Air）', color: '#ffffff' }
+        : id === VOID
+          ? { id, name: 'VOID（空洞）', color: '#1f1f1f' }
+          : { id, name: `材質 ${id}`, color: PALETTE[k++ % PALETTE.length] },
+    );
 }
 
 export const bboxDims = (b: BBox) => ({

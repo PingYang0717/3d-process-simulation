@@ -9,6 +9,7 @@ import {
   DoubleSide,
   EdgesGeometry,
   LineBasicMaterial,
+  LineDashedMaterial,
   LineSegments,
   Mesh,
   MeshBasicMaterial,
@@ -22,7 +23,21 @@ import {
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { type Axis, type BBox, type Material, type Vec3, type Volume, type ZRange, VOID, buildFaces, hexToRgb, idx } from '../../volume/volume';
+import {
+  type Axis,
+  type BBox,
+  type Material,
+  type MeshData,
+  type Vec3,
+  type Volume,
+  type ZRange,
+  VOID,
+  directionName,
+  hexToRgb,
+  idx,
+  voxelFromHit,
+} from '../../volume/volume';
+import { call } from '../../volume/client';
 import { type SelectMode, selectModeOf } from './editor';
 
 const SEL_RGB: Vec3 = [22, 119, 255];
@@ -36,24 +51,57 @@ interface Ctx {
   scene: Scene;
   camera: PerspectiveCamera;
   controls: OrbitControls;
-  mesh?: Mesh<BufferGeometry, MeshLambertMaterial>;
-  faceVoxel?: Int32Array;
-  selFill?: Mesh<BufferGeometry, MeshLambertMaterial>;
-  selBox?: LineSegments;
-  voidMesh?: Mesh<BufferGeometry, MeshBasicMaterial>;
-  voidEdges?: LineSegments<EdgesGeometry, LineBasicMaterial>;
-  cross?: LineSegments;
+  mesh: Mesh<BufferGeometry, MeshLambertMaterial>;
+  selFill: Mesh<BufferGeometry, MeshLambertMaterial>;
+  voidMesh: Mesh<BufferGeometry, MeshBasicMaterial>;
+  voidEdges: LineSegments<EdgesGeometry, LineBasicMaterial>;
+  selBox: LineSegments;
+  ghost: LineSegments<BufferGeometry, LineDashedMaterial>;
+  cross: LineSegments;
 }
 
-const dispose = (scene: Scene, obj?: Mesh | LineSegments) => {
-  if (!obj) return;
-  scene.remove(obj);
-  obj.geometry.dispose();
+/** 拖拉中的面：p = 按下的體素、dir = 面的外法線（體素座標）、(vx, vy) = 法線 1 格投影到螢幕的位移。 */
+interface Drag {
+  p: number;
+  dir: Vec3;
+  sx: number;
+  sy: number;
+  vx: number;
+  vy: number;
+  n: number;
+  local: boolean;
+  move: boolean;
+  hitVoxel: Vec3;
+}
+
+const palette = (materials: Material[]) => {
+  const out = new Float32Array(768);
+  materials.forEach((m) => {
+    const [r, g, b] = hexToRgb(m.color);
+    out.set([r / 255, g / 255, b / 255], m.id * 3);
+  });
+  return out;
 };
+const hiddenTable = (hidden: Set<number>) => {
+  const out = new Uint8Array(256);
+  hidden.forEach((m) => (out[m] = 1));
+  return out;
+};
+const toGeometry = (m: MeshData) => {
+  const g = new BufferGeometry();
+  g.setAttribute('position', new BufferAttribute(m.positions, 3));
+  g.setAttribute('normal', new BufferAttribute(m.normals, 3));
+  g.setAttribute('color', new BufferAttribute(m.colors, 3));
+  g.computeBoundingSphere();
+  return g;
+};
+const boxEdges = (b: BBox) => new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1));
 
 /**
- * 3D：暴露面網格（vertex color）、改過的體素混紅、選取半透明網格＋bbox 線框、橘色十字、剖開。
- * xray：VOID 另畫一層、關掉深度測試，所以藏在結構裡的空洞也看得到；translucent：材質半透明。
+ * 3D：Worker 做 greedy mesh（同材質同朝向的面合併成大矩形），改過的體素混紅；
+ * 選取半透明網格＋bbox 線框、橘色十字、剖開。xray：VOID 另畫一層、關掉深度測試；translucent：材質半透明。
+ * 選好結構後按住它的面拖：位移投影到面法線換成 voxel 數，橘色虛線框預覽，放開才套用；
+ * Alt＋拖＝局部凸起，Ctrl＋拖＝整塊移動。
  * 體素 y 向下，所以網格 scale y = −1 再平移，讓畫面上方 = y 索引小。
  */
 export function View3D({
@@ -67,10 +115,14 @@ export function View3D({
   diffMask,
   onPick,
   onMenu,
+  onDrag,
+  onHover,
   floatRef,
   handle,
   xray = false,
   translucent = false,
+  bumpRadius,
+  busy,
 }: {
   vol: Volume;
   materials: Material[];
@@ -82,25 +134,35 @@ export function View3D({
   diffMask: Uint8Array | null;
   onPick: (voxel: number | null, mode: SelectMode) => void;
   onMenu: (voxel: number | null, x: number, y: number) => void;
+  onDrag: (kind: 'push' | 'move', dir: Vec3, n: number, local?: Vec3) => void;
+  onHover: (text: string | null) => void;
   floatRef: RefObject<HTMLDivElement>;
   handle: MutableRefObject<View3DHandle | null>;
   xray?: boolean;
   translucent?: boolean;
+  bumpRadius: number;
+  busy: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<Ctx | null>(null);
   const bboxRef = useRef(selBBox);
   bboxRef.current = selBBox;
+  const selRef = useRef(selMask);
+  selRef.current = selMask;
+  const dragRef = useRef<Drag | null>(null);
+  const downRef = useRef<{ x: number; y: number } | null>(null);
+  const [dragTip, setDragTip] = useState<{ dir: Vec3; n: number; local: boolean } | null>(null);
+  const [meshing, setMeshing] = useState(false);
 
   useEffect(() => {
     const host = hostRef.current!;
-    const renderer = new WebGLRenderer({ antialias: true });
+    const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
     renderer.localClippingEnabled = true;
     host.appendChild(renderer.domElement);
     const scene = new Scene();
-    scene.background = new Color('#f5f5f5');
-    const camera = new PerspectiveCamera(40, 1, 1, 4000);
+    scene.background = new Color('#f5f6f8');
+    const camera = new PerspectiveCamera(40, 1, 1, 1e5);
     camera.up.set(0, 1, 0);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -108,6 +170,8 @@ export function View3D({
     const resetView = () => {
       const r = 1.5 * Math.max(vol.X, vol.Y, vol.Z);
       camera.position.set(vol.X / 2 + 0.55 * r, vol.Y / 2 + 0.38 * r, vol.Z / 2 + 0.74 * r);
+      camera.far = r * 20;
+      camera.updateProjectionMatrix();
       controls.target.set(vol.X / 2, vol.Y / 2, vol.Z / 2);
       controls.update();
     };
@@ -120,13 +184,47 @@ export function View3D({
     const fill = new DirectionalLight(0xffffff, 0.3);
     fill.position.set(-1, -0.5, -1);
     scene.add(fill);
-    const frame = new LineSegments(
-      new EdgesGeometry(new BoxGeometry(vol.X, vol.Y, vol.Z)),
-      new LineBasicMaterial({ color: 0xbfbfbf }),
-    );
+    const frame = new LineSegments(new EdgesGeometry(new BoxGeometry(vol.X, vol.Y, vol.Z)), new LineBasicMaterial({ color: 0xc9cdd1 }));
     frame.position.set(vol.X / 2, vol.Y / 2, vol.Z / 2);
     scene.add(frame);
-    ctxRef.current = { renderer, scene, camera, controls };
+    // 體素座標的物件：翻 y
+    const voxelSpace = <T extends Mesh | LineSegments>(o: T, order = 0) => {
+      o.scale.set(1, -1, 1);
+      o.position.y = vol.Y;
+      o.renderOrder = order;
+      o.frustumCulled = false;
+      scene.add(o);
+      return o;
+    };
+    const mesh = voxelSpace(new Mesh(new BufferGeometry(), new MeshLambertMaterial({ vertexColors: true, side: DoubleSide })));
+    const selFill = voxelSpace(
+      new Mesh(new BufferGeometry(), new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.45, side: DoubleSide })),
+      2,
+    );
+    const voidMesh = voxelSpace(
+      new Mesh(
+        new BufferGeometry(),
+        new MeshBasicMaterial({ color: 0x262626, transparent: true, opacity: 0.8, depthTest: false, side: DoubleSide }),
+      ),
+      3,
+    );
+    const voidEdges = voxelSpace(
+      new LineSegments(
+        new EdgesGeometry(),
+        new LineBasicMaterial({ color: 0xff7875, depthTest: false, transparent: true, opacity: 0.75 }),
+      ),
+      4,
+    );
+    selFill.visible = voidMesh.visible = voidEdges.visible = false;
+    const selBox = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0x1677ff }));
+    selBox.visible = false;
+    scene.add(selBox);
+    const ghost = new LineSegments(new BufferGeometry(), new LineDashedMaterial({ color: 0xd46b08, dashSize: 3, gapSize: 2 }));
+    ghost.visible = false;
+    scene.add(ghost);
+    const cross = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0xd46b08 }));
+    scene.add(cross);
+    ctxRef.current = { renderer, scene, camera, controls, mesh, selFill, voidMesh, voidEdges, selBox, ghost, cross };
 
     const ro = new ResizeObserver(() => {
       const w = host.clientWidth;
@@ -176,157 +274,111 @@ export function View3D({
       cancelAnimationFrame(raf);
       ro.disconnect();
       controls.dispose();
+      scene.traverse((o) => {
+        if (o instanceof Mesh || o instanceof LineSegments) {
+          o.geometry.dispose();
+          o.material.dispose();
+        }
+      });
       renderer.dispose();
       host.removeChild(renderer.domElement);
       ctxRef.current = null;
     };
   }, [vol.X, vol.Y, vol.Z]);
 
-  // 主網格
+  // 主網格（Worker greedy mesh）；只採用最新一次請求的結果
+  const meshSeq = useRef(0);
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
-    const rgb = new Map<number, Vec3>();
-    materials.forEach((m) => rgb.set(m.id, hexToRgb(m.color)));
-    const f = buildFaces(vol, (m) => (m === 0 || hidden.has(m) ? null : (rgb.get(m) ?? [255, 0, 255])));
-    if (diffMask) {
-      for (let t = 0; t < f.faceVoxel.length; t++) {
-        if (!diffMask[f.faceVoxel[t]]) continue;
-        const base = t * 9;
-        for (let v = 0; v < 3; v++) {
-          const i = base + v * 3;
-          f.colors[i] = f.colors[i] * 0.35 + 0.65;
-          f.colors[i + 1] = f.colors[i + 1] * 0.35 + 0.3 * 0.65;
-          f.colors[i + 2] = f.colors[i + 2] * 0.35 + 0.3 * 0.65;
-        }
-      }
-    }
-    const g = new BufferGeometry();
-    g.setAttribute('position', new BufferAttribute(f.positions, 3));
-    g.setAttribute('normal', new BufferAttribute(f.normals, 3));
-    g.setAttribute('color', new BufferAttribute(f.colors, 3));
-    const prevClip = c.mesh?.material.clippingPlanes ?? [];
-    if (c.mesh) {
-      c.mesh.material.dispose();
-      dispose(c.scene, c.mesh);
-    }
-    const mesh = new Mesh(
-      g,
-      new MeshLambertMaterial({
-        vertexColors: true,
-        side: DoubleSide,
-        clippingPlanes: prevClip,
-        transparent: translucent,
-        opacity: translucent ? 0.3 : 1,
-        depthWrite: !translucent,
-      }),
-    );
-    mesh.scale.set(1, -1, 1);
-    mesh.position.y = vol.Y;
-    c.scene.add(mesh);
-    c.mesh = mesh;
-    c.faceVoxel = f.faceVoxel;
-  }, [vol, materials, hidden, diffMask, translucent]);
+    const seq = ++meshSeq.current;
+    setMeshing(true);
+    call('mesh', { vol, hidden: hiddenTable(hidden), diff: diffMask ?? undefined, palette: palette(materials) })
+      .then((m) => {
+        if (seq !== meshSeq.current || !ctxRef.current) return;
+        c.mesh.geometry.dispose();
+        c.mesh.geometry = toGeometry(m);
+        setMeshing(false);
+      })
+      .catch(() => setMeshing(false));
+  }, [vol, materials, hidden, diffMask]);
 
-  // 空洞透視：VOID 永遠畫在最上面
+  useEffect(() => {
+    const mat = ctxRef.current?.mesh.material;
+    if (!mat) return;
+    mat.transparent = translucent;
+    mat.opacity = translucent ? 0.3 : 1;
+    mat.depthWrite = !translucent;
+    mat.needsUpdate = true;
+  }, [translucent]);
+
+  // 空洞透視：VOID 永遠畫在最上面（深色面＋紅邊）
+  const voidSeq = useRef(0);
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
-    if (c.voidMesh) {
-      c.voidMesh.material.dispose();
-      dispose(c.scene, c.voidMesh);
-      c.voidMesh = undefined;
-    }
-    if (c.voidEdges) {
-      c.voidEdges.material.dispose();
-      dispose(c.scene, c.voidEdges);
-      c.voidEdges = undefined;
-    }
-    if (!xray || hidden.has(VOID)) return;
-    const mask = new Uint8Array(vol.data.length);
+    const seq = ++voidSeq.current;
+    const off = () => {
+      c.voidMesh.visible = c.voidEdges.visible = false;
+    };
+    if (!xray || hidden.has(VOID)) return off();
+    const only = new Uint8Array(vol.data.length);
     let n = 0;
-    for (let i = 0; i < mask.length; i++)
+    for (let i = 0; i < only.length; i++)
       if (vol.data[i] === VOID) {
-        mask[i] = 1;
+        only[i] = 1;
         n++;
       }
-    if (!n) return;
-    const f = buildFaces(vol, () => [17, 17, 17], mask);
-    const g = new BufferGeometry();
-    g.setAttribute('position', new BufferAttribute(f.positions, 3));
-    g.setAttribute('normal', new BufferAttribute(f.normals, 3));
-    const clip = c.mesh?.material.clippingPlanes ?? [];
-    const voidMesh = new Mesh(
-      g,
-      new MeshBasicMaterial({ color: 0x262626, transparent: true, opacity: 0.8, depthTest: false, side: DoubleSide, clippingPlanes: clip }),
-    );
-    voidMesh.scale.set(1, -1, 1);
-    voidMesh.position.y = vol.Y;
-    voidMesh.renderOrder = 3;
-    c.scene.add(voidMesh);
-    c.voidMesh = voidMesh;
-    const edges = new LineSegments(
-      new EdgesGeometry(g, 30),
-      new LineBasicMaterial({ color: 0xff7875, depthTest: false, transparent: true, opacity: 0.75, clippingPlanes: clip }),
-    );
-    edges.scale.set(1, -1, 1);
-    edges.position.y = vol.Y;
-    edges.renderOrder = 4;
-    c.scene.add(edges);
-    c.voidEdges = edges;
+    if (!n) return off();
+    call('mesh', { vol, hidden: hiddenTable(hidden), only, palette: palette(materials), tint: [0.15, 0.15, 0.15] }).then((m) => {
+      if (seq !== voidSeq.current || !ctxRef.current) return;
+      c.voidMesh.geometry.dispose();
+      c.voidMesh.geometry = toGeometry(m);
+      c.voidEdges.geometry.dispose();
+      c.voidEdges.geometry = new EdgesGeometry(c.voidMesh.geometry, 30);
+      c.voidMesh.visible = c.voidEdges.visible = true;
+    });
   }, [vol, hidden, xray]);
 
   // 選取：半透明網格（只含 affMask）＋ bbox 線框
+  const selSeq = useRef(0);
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
-    if (c.selFill) {
-      c.selFill.material.dispose();
-      dispose(c.scene, c.selFill);
-      c.selFill = undefined;
+    const seq = ++selSeq.current;
+    if (!selMask || !selBBox) {
+      c.selFill.visible = c.selBox.visible = false;
+      return;
     }
-    dispose(c.scene, c.selBox);
-    c.selBox = undefined;
-    if (!selMask || !selBBox) return;
-    const f = buildFaces(vol, () => SEL_RGB, selMask);
-    const g = new BufferGeometry();
-    g.setAttribute('position', new BufferAttribute(f.positions, 3));
-    g.setAttribute('normal', new BufferAttribute(f.normals, 3));
-    const fillMesh = new Mesh(g, new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.45, side: DoubleSide }));
-    fillMesh.scale.set(1, -1, 1);
-    fillMesh.position.y = vol.Y;
-    fillMesh.renderOrder = 2;
-    fillMesh.material.clippingPlanes = c.mesh?.material.clippingPlanes ?? [];
-    c.scene.add(fillMesh);
-    c.selFill = fillMesh;
     const b = selBBox;
-    const box = new LineSegments(
-      new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1)),
-      new LineBasicMaterial({ color: 0x1677ff }),
-    );
-    box.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
-    c.scene.add(box);
-    c.selBox = box;
+    c.selBox.geometry.dispose();
+    c.selBox.geometry = boxEdges(b);
+    c.selBox.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
+    c.selBox.visible = true;
+    const tint = SEL_RGB.map((v) => v / 255) as Vec3;
+    call('mesh', { vol, hidden: hiddenTable(hidden), only: selMask, palette: palette(materials), tint }).then((m) => {
+      if (seq !== selSeq.current || !ctxRef.current) return;
+      c.selFill.geometry.dispose();
+      c.selFill.geometry = toGeometry(m);
+      c.selFill.visible = true;
+    });
   }, [vol, selMask, selBBox]);
 
   // 剖開：只畫到 z ≤ clipZ
   useEffect(() => {
     const c = ctxRef.current;
-    if (!c?.mesh) return;
+    if (!c) return;
     const planes = clipZ === null ? [] : [new Plane(new Vector3(0, 0, -1), clipZ + 1)];
-    c.mesh.material.clippingPlanes = planes;
-    if (c.selFill) c.selFill.material.clippingPlanes = planes;
-    if (c.voidMesh) c.voidMesh.material.clippingPlanes = planes;
-    if (c.voidEdges) c.voidEdges.material.clippingPlanes = planes;
-  }, [clipZ, vol, selMask, materials, hidden, diffMask, xray, translucent]);
+    for (const o of [c.mesh, c.selFill, c.voidMesh, c.voidEdges]) o.material.clippingPlanes = planes;
+  }, [clipZ, vol.X, vol.Y, vol.Z]);
 
   // 十字
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
-    dispose(c.scene, c.cross);
     const [x, y, z] = cursor;
-    const g = new BufferGeometry().setFromPoints([
+    c.cross.geometry.dispose();
+    c.cross.geometry = new BufferGeometry().setFromPoints([
       new Vector3(0, vol.Y - y - 0.5, z + 0.5),
       new Vector3(vol.X, vol.Y - y - 0.5, z + 0.5),
       new Vector3(x + 0.5, 0, z + 0.5),
@@ -334,42 +386,159 @@ export function View3D({
       new Vector3(x + 0.5, vol.Y - y - 0.5, 0),
       new Vector3(x + 0.5, vol.Y - y - 0.5, vol.Z),
     ]);
-    const cross = new LineSegments(g, new LineBasicMaterial({ color: 0xd46b08 }));
-    c.scene.add(cross);
-    c.cross = cross;
-  }, [cursor, vol]);
+  }, [cursor, vol.X, vol.Y, vol.Z]);
 
-  const pick = (e: React.MouseEvent<HTMLDivElement>) => {
+  /**
+   * 射線命中 → 體素與它朝外的法線。面朝相機那一側是空的（不然射線會先打到它），
+   * 所以取法線指向相機的那個方向反推；兩側相鄰的面重疊時也不會選錯。
+   */
+  const hit = (clientX: number, clientY: number) => {
     const c = ctxRef.current;
-    if (!c?.mesh || !c.faceVoxel) return null;
-    const r = e.currentTarget.getBoundingClientRect();
-    const ndc = new Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    if (!c || !c.mesh.geometry.attributes.position) return null;
+    const r = hostRef.current!.getBoundingClientRect();
+    const ndc = new Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     const ray = new Raycaster();
     ray.setFromCamera(ndc, c.camera);
-    const hits = ray.intersectObject(c.mesh, false).filter((h) => clipZ === null || h.point.z <= clipZ + 1);
-    return hits.length && hits[0].faceIndex !== undefined && hits[0].faceIndex !== null ? c.faceVoxel[hits[0].faceIndex] : null;
+    const h = ray.intersectObject(c.mesh, false).find((h) => clipZ === null || h.point.z <= clipZ + 1);
+    if (!h?.face) return null;
+    const pt = c.mesh.worldToLocal(h.point.clone());
+    const eye = c.mesh.worldToLocal(c.camera.position.clone()).sub(pt);
+    const f = h.face.normal;
+    const facing = f.x * eye.x + f.y * eye.y + f.z * eye.z >= 0 ? 1 : -1;
+    const n: Vec3 = [f.x * facing, f.y * facing, f.z * facing];
+    const point: Vec3 = [pt.x, pt.y, pt.z];
+    const solid = (i: number) => i >= 0 && vol.data[i] !== 0 && !hidden.has(vol.data[i]);
+    const a = voxelFromHit(vol, point, n);
+    if (solid(a)) return { p: a, n, point };
+    const back: Vec3 = [-n[0], -n[1], -n[2]];
+    const b = voxelFromHit(vol, point, back);
+    return solid(b) ? { p: b, n: back, point } : null;
   };
-  const down = useRef<{ x: number; y: number } | null>(null);
+
+  /** 拖拉預覽：選取的外框沿 dir 伸縮 n 格，畫成橘色虛線。 */
+  const showGhost = (n: number, dir: Vec3) => {
+    const c = ctxRef.current;
+    const b = bboxRef.current;
+    if (!c || !b) return;
+    const g = { ...b };
+    const keys = [
+      ['x0', 'x1'],
+      ['y0', 'y1'],
+      ['z0', 'z1'],
+    ] as const;
+    keys.forEach(([lo, hi], a) => {
+      if (dir[a] > 0) g[hi] += n;
+      else if (dir[a] < 0) g[lo] -= n;
+    });
+    g.x1 = Math.max(g.x0, g.x1);
+    g.y1 = Math.max(g.y0, g.y1);
+    g.z1 = Math.max(g.z0, g.z1);
+    c.ghost.geometry.dispose();
+    c.ghost.geometry = boxEdges(g);
+    c.ghost.computeLineDistances();
+    c.ghost.position.set((g.x0 + g.x1 + 1) / 2, vol.Y - (g.y0 + g.y1 + 1) / 2, (g.z0 + g.z1 + 1) / 2);
+    c.ghost.visible = n !== 0;
+  };
+
+  const hoverAt = useRef(0);
 
   return (
     <div
       ref={hostRef}
       className="view3d"
       onPointerDown={(e) => {
-        down.current = { x: e.clientX, y: e.clientY };
+        const c = ctxRef.current;
+        if (!c || e.button !== 0) return;
+        downRef.current = { x: e.clientX, y: e.clientY };
+        if (busy) return;
+        const h = hit(e.clientX, e.clientY);
+        if (!h || !selRef.current?.[h.p]) return;
+        // 按在已選結構的面上：開始拖這個面（法線 1 格在螢幕上的位移當作量尺）
+        const r = hostRef.current!.getBoundingClientRect();
+        const screen = (v: Vector3) => {
+          const q = c.mesh.localToWorld(v).project(c.camera);
+          return [((q.x + 1) / 2) * r.width, ((1 - q.y) / 2) * r.height];
+        };
+        const a = screen(new Vector3(...h.point));
+        const b = screen(new Vector3(h.point[0] + h.n[0], h.point[1] + h.n[1], h.point[2] + h.n[2]));
+        const x = h.p % vol.X;
+        const y = ((h.p - x) / vol.X) % vol.Y;
+        const z = (h.p - x - y * vol.X) / (vol.X * vol.Y);
+        dragRef.current = {
+          p: h.p,
+          dir: h.n,
+          sx: e.clientX,
+          sy: e.clientY,
+          vx: b[0] - a[0],
+          vy: b[1] - a[1],
+          n: 0,
+          local: e.altKey,
+          move: e.ctrlKey || e.metaKey,
+          hitVoxel: [x, y, z],
+        };
+        c.controls.enabled = false;
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        const d = dragRef.current;
+        if (d) {
+          const len2 = d.vx * d.vx + d.vy * d.vy;
+          const n = len2 > 1e-6 ? Math.round(((e.clientX - d.sx) * d.vx + (e.clientY - d.sy) * d.vy) / len2) : 0;
+          if (n !== d.n) {
+            d.n = n;
+            showGhost(n, d.dir);
+            setDragTip({ dir: d.dir, n, local: d.local });
+          }
+          return;
+        }
+        if (downRef.current) return;
+        const now = performance.now();
+        if (now - hoverAt.current < 80) return;
+        hoverAt.current = now;
+        const h = hit(e.clientX, e.clientY);
+        const onSel = !!h && !!selRef.current?.[h.p];
+        hostRef.current!.style.cursor = onSel ? 'grab' : 'default';
+        onHover(
+          onSel
+            ? `拖拉這個面：${directionName(h.n)}推／拉；Alt＋拖＝只凸起半徑 ${bumpRadius} vx 的局部；Ctrl＋拖＝整塊移動`
+            : null,
+        );
       }}
       onPointerUp={(e) => {
-        if (!down.current || e.button !== 0) return;
-        const moved = Math.hypot(e.clientX - down.current.x, e.clientY - down.current.y);
-        down.current = null;
-        if (moved <= 4) onPick(pick(e), selectModeOf(e));
+        const c = ctxRef.current;
+        const d = dragRef.current;
+        const down = downRef.current;
+        dragRef.current = null;
+        downRef.current = null;
+        if (!c) return;
+        if (d) {
+          c.controls.enabled = true;
+          c.ghost.visible = false;
+          setDragTip(null);
+          hostRef.current!.style.cursor = 'default';
+          if (d.n !== 0) onDrag(d.move ? 'move' : 'push', d.dir, d.n, d.local ? d.hitVoxel : undefined);
+          else onPick(d.p, selectModeOf(e));
+          return;
+        }
+        if (!down || e.button !== 0 || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+        onPick(hit(e.clientX, e.clientY)?.p ?? null, selectModeOf(e));
       }}
+      onPointerLeave={() => onHover(null)}
       onContextMenu={(e) => {
         e.preventDefault();
         const r = e.currentTarget.getBoundingClientRect();
-        onMenu(pick(e), e.clientX - r.left, e.clientY - r.top);
+        onMenu(hit(e.clientX, e.clientY)?.p ?? null, e.clientX - r.left, e.clientY - r.top);
       }}
-    />
+    >
+      {dragTip && (
+        <div className="drag-tip">
+          {dragTip.local ? '局部' : ''}
+          {directionName(dragTip.dir)}
+          {dragTip.n > 0 ? '推' : '縮'} {Math.abs(dragTip.n)} vx
+        </div>
+      )}
+      {(meshing || busy) && <div className="mesh-busy">{busy ? '計算中…' : '更新 3D…'}</div>}
+    </div>
   );
 }
 

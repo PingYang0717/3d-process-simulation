@@ -19,7 +19,8 @@ import {
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { type Axis, encodeNpy, isVoid, unionBBox } from '../../volume/volume';
+import { type Axis, type Volume, encodeNpy, isVoid, unionBBox } from '../../volume/volume';
+import { encodeVti } from '../../volume/vti';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel, Swatch } from '../../ui/Swatch';
@@ -73,6 +74,8 @@ function Resizer({ onDrag }: { onDrag: (dx: number) => void }) {
   );
 }
 
+const voxelCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : `${(n / 1e3).toFixed(0)} K`);
+
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
 
 function Brand() {
@@ -92,7 +95,6 @@ function Brand() {
 export default function Section3DPage() {
   const ed = useEditor();
   const { message } = App.useApp();
-  const [loaded, setLoaded] = useState(false);
   const [leftW, setLeftW] = useState(240);
   const [rightW, setRightW] = useState(350);
   const narrow = useMedia('(max-width: 1199px)');
@@ -101,6 +103,7 @@ export default function Section3DPage() {
   const [rightOpen, setRightOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const [hover, setHover] = useState<string | null>(null);
   const [tab, setTab] = useState('props');
   const [clip, setClip] = useState(false);
   const [showDiff, setShowDiff] = useState(true);
@@ -142,25 +145,35 @@ export default function Section3DPage() {
   }, [ed.selComps, ed.zRange]);
   const diffShown = showDiff && ed.diff.count ? ed.diff.mask : null;
 
-  // ---- 匯出 ----
+  // ---- 匯出：.vti（同 Extent／Spacing／Origin）或 .npy ----
 
-  const stem = (ed.source ?? 'tcad').replace(/\.npy$/i, '');
-  const exportOne = () => {
-    const name = ed.isBase || !ed.active ? `${stem}.npy` : `${stem}__${safeName(ed.active.name)}.npy`;
-    download(encodeNpy(ed.vol), name);
+  type Fmt = 'vti' | 'npy';
+  const stem = (ed.meta.name ?? 'tcad').replace(/\.(npy|vti)$/i, '');
+  const spacing = ed.meta.spacing ?? [ed.nmPerVoxel, ed.nmPerVoxel, ed.nmPerVoxel];
+  const origin = ed.meta.origin ?? [0, 0, 0];
+  const encode = (v: Volume, fmt: Fmt) => (fmt === 'vti' ? encodeVti(v, spacing, origin, ed.meta.arrayName || 'material') : encodeNpy(v));
+  const exportOne = (fmt: Fmt = 'vti') => {
+    const name = ed.isBase || !ed.active ? `${stem}.${fmt}` : `${stem}__${safeName(ed.active.name)}.${fmt}`;
+    download(encode(ed.vol, fmt), name);
     message.success(`已匯出 ${name}`);
   };
-  const exportAll = () => {
-    const files = ed.splits.map((s) => ({ name: `${stem}__${safeName(s.name)}.npy`, data: encodeNpy(s.cur.vol) }));
+  const exportAll = async (fmt: Fmt = 'vti') => {
+    const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
+    const files = ed.splits.map((s) => ({ name: fileOf(s), data: encode(s.cur.vol, fmt) }));
+    const diffs = await Promise.all(ed.splits.map((s) => ed.diffOf(s.cur.vol)));
     const manifest = {
-      source: ed.source ?? 'demo',
+      source: ed.meta.name ?? 'demo',
+      format: fmt,
+      materials: ed.materials.map(({ id, name, color }) => ({ id, name, color })),
       shape: [ed.vol.Z, ed.vol.Y, ed.vol.X],
       dtype: 'uint8',
+      spacing,
+      origin,
       nmPerVoxel: ed.nmPerVoxel,
       splits: ed.splits.map((s, i) => ({
         name: s.name,
-        file: files[i].name,
-        changedVoxels: ed.diffOf(s.cur.vol).count,
+        file: fileOf(s),
+        changedVoxels: diffs[i].count,
         ops: s.ops.map((op) => ({ ...op, text: ed.opText(op, ed.orig.L) })),
       })),
     };
@@ -378,10 +391,17 @@ export default function Section3DPage() {
             const l = v !== null ? ed.L.labels[v] : -1;
             ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
           }}
+          onDrag={(kind, dir, n, local) => {
+            if (kind === 'move') ed.translate([dir[0] * n, dir[1] * n, dir[2] * n]);
+            else ed.push(dir, n, local ? { center: local, radius: ed.bumpRadius } : undefined);
+          }}
+          onHover={setHover}
           floatRef={tagRef}
           handle={view}
           xray={xray}
           translucent={translucent}
+          bumpRadius={ed.bumpRadius}
+          busy={!!ed.busy}
         />
         <div ref={tagRef} className="sel-tag" style={{ display: 'none' }}>
           {selName}
@@ -409,9 +429,10 @@ export default function Section3DPage() {
         <span>
           {hot
             ? ed.last!.text
-            : ed.sel.size
-              ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 方向鍵整塊移動，「長高／縮短」只推頂面`
-              : '點一塊結構開始；Shift 多選'}
+            : hover ||
+              (ed.sel.size
+                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 拖拉它的面可以推；方向鍵整塊移動`
+                : '點一塊結構開始；Shift 多選')}
         </span>
         <span className="grow" />
         <span>
@@ -447,7 +468,7 @@ export default function Section3DPage() {
             ),
             children: (
               <div className="insp-body">
-                <ChangesTab ed={ed} onExport={exportOne} />
+                <ChangesTab ed={ed} onExport={() => exportOne('vti')} />
               </div>
             ),
           },
@@ -461,7 +482,7 @@ export default function Section3DPage() {
             ),
             children: (
               <div className="insp-body">
-                <SplitsTab ed={ed} onExportAll={exportAll} onSweep={() => setSweepOpen(true)} />
+                <SplitsTab ed={ed} onExportAll={() => exportAll('vti')} onSweep={() => setSweepOpen(true)} />
               </div>
             ),
           },
@@ -479,7 +500,7 @@ export default function Section3DPage() {
     </>
   );
 
-  if (!loaded)
+  if (!ed.ready)
     return (
       <div className="app">
         <header className="topbar">
@@ -491,9 +512,9 @@ export default function Section3DPage() {
               開始編輯 3D 模型
             </Typography.Title>
             <Typography.Paragraph type="secondary" style={{ margin: '8px 0 24px' }}>
-              上傳 TCAD 輸出的材質陣列（.npy，uint8，shape (Z, Y, X)），系統會自動分出各個結構。原始陣列不會被改動；每一種情境是一個 split，匯出的陣列 shape 與 dtype 和原始相同。
+              上傳 TCAD 輸出的 .vti（VTK ImageData，材質編號放 CellData），系統會自動分出各個結構。原始陣列不會被改動；每一種情境是一個 split，匯出的陣列 shape 與 dtype 和原始相同。
             </Typography.Paragraph>
-            <UploadPanel ed={ed} onDone={() => setLoaded(true)} />
+            <UploadPanel ed={ed} onDone={() => {}} />
           </div>
         </div>
       </div>
@@ -509,19 +530,28 @@ export default function Section3DPage() {
         )}
         <Brand />
         <Divider type="vertical" />
-        <Text type="secondary" ellipsis style={{ maxWidth: 260 }}>
-          {ed.source ?? '內建範例'} · shape ({ed.vol.Z}, {ed.vol.Y}, {ed.vol.X}) uint8
+        <Text type="secondary" ellipsis style={{ maxWidth: 300 }}>
+          {ed.meta.name ?? '內建範例'} · {ed.vol.X}×{ed.vol.Y}×{ed.vol.Z}（{voxelCount(ed.vol.data.length)} voxels）
+          {ed.meta.spacing ? ` · spacing ${ed.meta.spacing.join('×')} ${ed.meta.unit === 'um' ? 'µm' : 'nm'}` : ''}
         </Text>
         <div className="grow" />
         <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
-          <span className="btn-text">上傳 .npy</span>
+          <span className="btn-text">上傳 .vti</span>
         </Button>
         <Dropdown
           trigger={['click']}
           menu={{
             items: [
-              { key: 'one', label: `匯出目前（${ed.isBase ? '原始' : ed.active?.name}）.npy`, onClick: exportOne },
-              { key: 'all', label: `全部 ${ed.splits.length} 個 split 匯出成 zip`, onClick: exportAll },
+              { key: 'one', label: `匯出目前（${ed.isBase ? '原始' : ed.active?.name}）.vti`, onClick: () => exportOne('vti') },
+              { key: 'one-npy', label: '匯出目前 .npy', onClick: () => exportOne('npy') },
+              { type: 'divider' },
+              {
+                key: 'all',
+                label: `全部 ${ed.splits.length} 個 split 打包 zip（.vti）`,
+                disabled: !ed.splits.length,
+                onClick: () => exportAll('vti'),
+              },
+              { key: 'all-npy', label: '全部打包 zip（.npy）', disabled: !ed.splits.length, onClick: () => exportAll('npy') },
             ],
           }}
         >
@@ -556,6 +586,12 @@ export default function Section3DPage() {
         )}
         <main className="stage">
           <SplitBar ed={ed} compare={compare} setCompare={setCompare} onSweep={() => setSweepOpen(true)} />
+          {ed.busy && (
+            <div className="busy-bar">
+              <span className="busy-dot" />
+              {ed.busy}
+            </div>
+          )}
           {compare ? (
             <CompareView ed={ed} axis={cmpAxis} setAxis={setCmpAxis} showDiff={showDiff} />
           ) : (
@@ -588,7 +624,7 @@ export default function Section3DPage() {
           </>
         )}
       </div>
-      <Modal title="上傳 .npy" open={uploadOpen} onCancel={() => setUploadOpen(false)} footer={null} width={640} destroyOnClose>
+      <Modal title="上傳 .vti / .npy" open={uploadOpen} onCancel={() => setUploadOpen(false)} footer={null} width={640} destroyOnClose>
         <UploadPanel ed={ed} onDone={() => setUploadOpen(false)} />
       </Modal>
       <SettingsDrawer

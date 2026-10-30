@@ -9,30 +9,15 @@ import {
   MATERIALS,
   coordOf,
   demoVolume,
-  diffMask,
-  directionName,
-  growMask,
   idx,
-  initialLabeled,
   maskOf,
-  materialCounts,
   materialsFor,
-  relabel,
-  setMaskMaterial,
-  translateMask,
+  nameComponents,
 } from '../../volume/volume';
+import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
+import { call } from '../../volume/client';
 
-// ---- 操作與 split（純函式，可單獨測試） ----
-
-export type Op =
-  | { kind: 'push'; keys: string[]; zRange: ZRange; dir: Vec3; n: number; follow: boolean; backfill: Backfill }
-  | { kind: 'translate'; keys: string[]; zRange: ZRange; d: Vec3; backfill: Backfill }
-  | { kind: 'material'; keys: string[]; zRange: ZRange; m: number };
-
-export interface EditState {
-  vol: Volume;
-  L: Labeled;
-}
+export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
 
 export interface Snapshot {
   snap: EditState;
@@ -48,82 +33,29 @@ export interface Split {
   future: Snapshot[];
 }
 
-export interface OpContext {
-  orig: Volume;
-  matName: (id: number) => string;
-  newKey: () => string;
+/** 載入來源；.vti 的 Spacing／Origin／陣列名匯出時原封不動寫回。 */
+export interface Meta {
+  name?: string;
+  format: 'demo' | 'npy' | 'vti';
+  spacing?: number[];
+  origin?: number[];
+  arrayName?: string;
+  arrays?: string[];
+  unit?: 'nm' | 'um';
+}
+
+export interface Diff {
+  mask: Uint8Array;
+  count: number;
 }
 
 export const BASE_ID = 'base';
-const HISTORY_LIMIT = 30;
+/** 每個 split 留幾步 Undo（大陣列一步就是幾十 MB）。 */
+const HISTORY_LIMIT = 10;
+const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] } };
 
-export const matNameOf = (materials: Material[]) => (id: number) =>
-  materials.find((m) => m.id === id)?.name ?? `材質 ${id}`;
-
-export function applyOp(s: EditState, op: Op, ctx: OpContext): EditState {
-  const mask = maskOf(s.L, new Set(op.keys));
-  if (!mask) return s;
-  let vol: Volume;
-  let shift: Vec3 = [0, 0, 0];
-  if (op.kind === 'push') vol = growMask(s.vol, ctx.orig, mask, op.zRange, op.dir, op.n, op.backfill, op.follow);
-  else if (op.kind === 'translate') {
-    vol = translateMask(s.vol, ctx.orig, mask, op.zRange, op.d, op.backfill);
-    shift = op.d;
-  } else vol = setMaskMaterial(s.vol, mask, op.zRange, op.m);
-  return { vol, L: relabel(s.vol, s.L, mask, shift, vol, ctx.matName, ctx.newKey) };
-}
-
-/** 從原始重播一串操作。 */
-export const replay = (base: EditState, ops: Op[], ctx: OpContext) => ops.reduce((s, op) => applyOp(s, op, ctx), base);
-
-/** 操作的白話描述，例如「Poly-Si ×3 往上長 2 vx（1.0 nm）」。 */
-export function opText(op: Op, L: Labeled, Z: number, nmPerVoxel: number, matName: (id: number) => string) {
-  const comps = op.keys.map((k) => L.comps.find((c) => c.key === k)).filter((c) => !!c);
-  const mats = new Set(comps.map((c) => c.mat));
-  const who =
-    comps.length === 1
-      ? comps[0].label
-      : mats.size === 1 && comps.length
-        ? `${matName([...mats][0])} ×${comps.length}`
-        : `${op.keys.length} 個結構`;
-  const part = op.zRange[0] === 0 && op.zRange[1] === Z - 1 ? '' : `（z ${op.zRange[0]}～${op.zRange[1]}）`;
-  if (op.kind === 'push') {
-    const n = Math.abs(op.n);
-    return `${who}${part} ${directionName(op.dir)}${op.n > 0 ? '長' : '縮'} ${n} vx（${(n * nmPerVoxel).toFixed(1)} nm）`;
-  }
-  if (op.kind === 'translate') {
-    const parts = ['x', 'y', 'z']
-      .map((a, i) => (op.d[i] ? `${a}${op.d[i] > 0 ? '+' : ''}${op.d[i]}` : ''))
-      .filter(Boolean)
-      .join(' ');
-    return `${who}${part} 移動 ${parts}`;
-  }
-  return `${who}${part} 換成 ${matName(op.m)}`;
-}
-
-export type SweepKind = { kind: 'push'; dir: Vec3 } | { kind: 'translate'; axis: 0 | 1 | 2 };
-
-/** 掃描：同一個操作、不同數值，每個數值一個 op。 */
-export function sweepOps(
-  kind: SweepKind,
-  keys: string[],
-  zRange: ZRange,
-  voxels: number[],
-  follow: boolean,
-  backfill: Backfill,
-): Op[] {
-  return voxels.map((n) =>
-    kind.kind === 'push'
-      ? { kind: 'push', keys, zRange, dir: kind.dir, n, follow, backfill }
-      : {
-          kind: 'translate',
-          keys,
-          zRange,
-          d: [kind.axis === 0 ? n : 0, kind.axis === 1 ? n : 0, kind.axis === 2 ? n : 0],
-          backfill,
-        },
-  );
-}
+// diff 依體素陣列快取：同一個 split 的結果不重算
+const diffCache = new WeakMap<Uint8Array, Promise<Diff>>();
 
 // ---- useEditor ----
 
@@ -138,29 +70,33 @@ export interface MenuState {
 }
 
 export function useEditor() {
-  const [materials, setMaterials] = useState<Material[]>(MATERIALS);
-  const [source, setSource] = useState<string | undefined>(undefined);
-  const [orig, setOrig] = useState<EditState>(() => {
-    const vol = demoVolume();
-    return { vol, L: initialLabeled(vol, matNameOf(MATERIALS)) };
-  });
+  const [materials, setMaterials] = useState<Material[]>([]);
+  const [meta, setMeta] = useState<Meta>({ format: 'demo' });
+  const [origState, setOrig] = useState<EditState | null>(null);
   // 一開始只有「原始」；第一次在原始上調整會自動建立 Split 1
   const [splits, setSplits] = useState<Split[]>([]);
   const [activeId, setActiveId] = useState(BASE_ID);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [hidden, setHidden] = useState<Set<number>>(new Set());
-  const [cursor, setCursor] = useState<Vec3>([80, 50, 64]);
-  const [zRange, setZRangeRaw] = useState<ZRange>([0, 127]);
+  const [cursor, setCursor] = useState<Vec3>([0, 0, 0]);
+  const [zRange, setZRangeRaw] = useState<ZRange>([0, 0]);
   const [follow, setFollow] = useState(true);
   const [backfill, setBackfill] = useState<Backfill>('orig');
   const [nmPerVoxel, setNmPerVoxel] = useState(0.5);
+  const [bumpRadius, setBumpRadius] = useState(6);
   const [last, setLast] = useState<{ text: string; at: number } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  /** 計算中的說明（例如「計算中…」）；有值時其他改體素的動作先擋下。 */
+  const [busy, setBusy] = useState<string | null>(null);
+  const [diff, setDiff] = useState<Diff>({ mask: new Uint8Array(0), count: 0 });
+  const [counts, setCounts] = useState<{ before: number[]; after: number[] } | null>(null);
   const keySeq = useRef(1000);
   const splitSeq = useRef(1);
-  const newKey = useCallback(() => `c${keySeq.current++}`, []);
+  const running = useRef(false);
   const newSplitId = () => `s${splitSeq.current++}`;
 
+  const ready = !!origState;
+  const orig = origState ?? EMPTY;
   const isBase = activeId === BASE_ID;
   const active = splits.find((s) => s.id === activeId) ?? null;
   const cur = active ? active.cur : orig;
@@ -170,7 +106,7 @@ export function useEditor() {
   const future = active?.future ?? [];
 
   const matName = useMemo(() => matNameOf(materials), [materials]);
-  const ctx = useMemo<OpContext>(() => ({ orig: orig.vol, matName, newKey }), [orig, matName, newKey]);
+  const matNames = useMemo(() => Object.fromEntries(materials.map((m) => [m.id, m.name])), [materials]);
   const compByKey = useMemo(() => new Map(L.comps.map((c) => [c.key, c])), [L]);
   const origByKey = useMemo(() => new Map(orig.L.comps.map((c) => [c.key, c])), [orig]);
   const selComps = useMemo(() => L.comps.filter((c) => sel.has(c.key)), [L, sel]);
@@ -186,8 +122,39 @@ export function useEditor() {
   }, [selMask, zRange, vol]);
   const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
 
-  const diffOf = useCallback((v: Volume) => diffMask(v, orig.vol), [orig]);
-  const diff = useMemo(() => diffOf(vol), [vol, diffOf]);
+  /** 和原始逐體素比對（Worker），依陣列快取。 */
+  const diffOf = useCallback(
+    (v: Volume): Promise<Diff> => {
+      if (v.data === orig.vol.data) return Promise.resolve({ mask: new Uint8Array(v.data.length), count: 0 });
+      let p = diffCache.get(v.data);
+      if (!p) {
+        p = call('diff', { a: orig.vol.data, b: v.data });
+        diffCache.set(v.data, p);
+      }
+      return p;
+    },
+    [orig],
+  );
+
+  // 目前 split 的 diff 與各材質體積
+  useEffect(() => {
+    if (!origState) return;
+    let alive = true;
+    (async () => {
+      const d = await diffOf(vol);
+      const [before, after] = await Promise.all([
+        call('count', { data: origState.vol.data }),
+        vol === origState.vol ? null : call('count', { data: vol.data }),
+      ]);
+      if (!alive) return;
+      setDiff(d);
+      setCounts({ before, after: after ?? before });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [vol, origState, diffOf]);
+
   const changedKeys = useMemo(() => {
     const out = new Set<string>();
     L.comps.forEach((c) => {
@@ -209,12 +176,14 @@ export function useEditor() {
   }, [L, origByKey]);
   /** 各材質體積帳。 */
   const ledger = useMemo(() => {
-    const before = materialCounts(orig.vol);
-    const after = materialCounts(vol);
-    return [...new Set([...before.keys(), ...after.keys()])]
+    if (!counts) return [];
+    const ids = new Set<number>();
+    counts.before.forEach((n, id) => n && ids.add(id));
+    counts.after.forEach((n, id) => n && ids.add(id));
+    return [...ids]
       .sort((a, b) => a - b)
-      .map((id) => ({ id, name: matName(id), before: before.get(id) ?? 0, after: after.get(id) ?? 0 }));
-  }, [vol, orig, matName]);
+      .map((id) => ({ id, name: matName(id), before: counts.before[id], after: counts.after[id] }));
+  }, [counts, matName]);
 
   const setZRange = useCallback(
     (r: ZRange) => setZRangeRaw([Math.max(0, Math.min(r[0], r[1])), Math.min(vol.Z - 1, Math.max(r[0], r[1]))]),
@@ -228,12 +197,30 @@ export function useEditor() {
 
   const keepSel = (s: EditState) => setSel((prev) => new Set([...prev].filter((k) => s.L.comps.some((c) => c.key === k))));
 
+  /** 在 Worker 裡從 from 重播 ops（含 relabel）；busy 橫條顯示 label。 */
+  const run = useCallback(
+    async (from: EditState, ops: Op[], label: string): Promise<EditState> => {
+      setBusy(label);
+      running.current = true;
+      try {
+        const r = await call('replay', { from, orig: orig.vol, ops, matNames, keyCounter: keySeq.current });
+        keySeq.current = r.keyCounter;
+        return { vol: { X: from.vol.X, Y: from.vol.Y, Z: from.vol.Z, data: r.data }, L: r.L };
+      } finally {
+        setBusy(null);
+        running.current = false;
+      }
+    },
+    [orig, matNames],
+  );
+
   /** 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。 */
   const commit = useCallback(
-    (op: Op) => {
+    async (op: Op) => {
+      if (!origState || running.current) return;
       if (!active) {
         // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始
-        const next = applyOp(orig, op, ctx);
+        const next = await run(orig, [op], '計算中…');
         const id = newSplitId();
         const name = `Split ${splits.length + 1}`;
         setSplits((all) => [...all, { id, name, cur: next, ops: [op], hist: [{ snap: orig, ops: [] }], future: [] }]);
@@ -242,7 +229,7 @@ export function useEditor() {
         setLast({ text: `原始保持不變，已自動建立 ${name}：${describe(op, orig.L)}`, at: Date.now() });
         return;
       }
-      const next = applyOp(active.cur, op, ctx);
+      const next = await run(active.cur, [op], '計算中…');
       setSplits((all) =>
         all.map((s) =>
           s.id === active.id
@@ -259,11 +246,11 @@ export function useEditor() {
       keepSel(next);
       setLast({ text: describe(op, active.cur.L), at: Date.now() });
     },
-    [active, orig, splits.length, ctx, describe],
+    [origState, active, orig, splits.length, run, describe],
   );
 
   const undo = useCallback(() => {
-    if (!active || !active.hist.length) return;
+    if (!active || !active.hist.length || running.current) return;
     const h = active.hist[active.hist.length - 1];
     setSplits((all) =>
       all.map((s) =>
@@ -283,7 +270,7 @@ export function useEditor() {
   }, [active]);
 
   const redo = useCallback(() => {
-    if (!active || !active.future.length) return;
+    if (!active || !active.future.length || running.current) return;
     const f = active.future[0];
     setSplits((all) =>
       all.map((s) =>
@@ -297,7 +284,7 @@ export function useEditor() {
   }, [active]);
 
   const resetAll = useCallback(() => {
-    if (!active) return;
+    if (!active || running.current) return;
     setSplits((all) => all.map((s) => (s.id === active.id ? { ...s, cur: orig, ops: [], hist: [], future: [] } : s)));
     setLast(null);
   }, [active, orig]);
@@ -305,14 +292,15 @@ export function useEditor() {
   // ---- split ----
 
   const addSplit = useCallback(
-    (name?: string, ops: Op[] = []) => {
+    async (name?: string, ops: Op[] = []) => {
+      if (running.current) return;
+      const state = ops.length ? await run(orig, ops, '重播中…') : orig;
       const id = newSplitId();
-      const state = ops.length ? replay(orig, ops, ctx) : orig;
       setSplits((all) => [...all, { id, name: name ?? `Split ${all.length + 1}`, cur: state, ops, hist: [], future: [] }]);
       setActiveId(id);
       return id;
     },
-    [orig, ctx],
+    [orig, run],
   );
 
   const duplicateSplit = useCallback(
@@ -340,24 +328,26 @@ export function useEditor() {
     [splits, activeId],
   );
 
-  /** 一次產生多個 split，接在現有的後面。 */
+  /** 一次產生多個 split，接在現有的後面；從原始或接在目前 split 之後。 */
   const addSweep = useCallback(
-    (kind: SweepKind, values: number[], unit: 'nm' | 'vx', nameOf: (v: number) => string, extend: boolean) => {
-      if (!sel.size) return [];
+    async (kind: SweepKind, values: number[], unit: 'nm' | 'vx', nameOf: (v: number) => string, extend: boolean) => {
+      if (!sel.size || running.current) return [];
       const keys = [...sel];
       const prefix = extend && active ? active.ops : [];
+      const from = extend && active ? active.cur : orig;
       const voxels = values.map((v) => Math.round(unit === 'nm' ? v / nmPerVoxel : v));
       const ops = sweepOps(kind, keys, zRange, voxels, follow, backfill);
-      const made: Split[] = ops.map((op, i) => {
-        const all = [...prefix, op];
-        return { id: newSplitId(), name: nameOf(values[i]), cur: replay(orig, all, ctx), ops: all, hist: [], future: [] };
-      });
+      const made: Split[] = [];
+      for (let i = 0; i < ops.length; i++) {
+        const cur = await run(from, [ops[i]], `產生 ${nameOf(values[i])}…`);
+        made.push({ id: newSplitId(), name: nameOf(values[i]), cur, ops: [...prefix, ops[i]], hist: [], future: [] });
+      }
       setSplits((all) => [...all, ...made]);
       setActiveId(made[0].id);
       setLast({ text: `已產生 ${made.length} 個 split`, at: Date.now() });
       return made.map((s) => s.id);
     },
-    [sel, active, zRange, nmPerVoxel, follow, backfill, orig, ctx],
+    [sel, active, orig, zRange, nmPerVoxel, follow, backfill, run],
   );
 
   // ---- 選取 ----
@@ -416,9 +406,9 @@ export function useEditor() {
     [sel, zRange, backfill, commit],
   );
   const push = useCallback(
-    (dir: Vec3, n: number) => {
+    (dir: Vec3, n: number, local?: Local) => {
       if (!sel.size || !n) return;
-      commit({ kind: 'push', keys: [...sel], zRange, dir, n, follow, backfill });
+      commit({ kind: 'push', keys: [...sel], zRange, dir, n, follow, backfill, ...(local ? { local } : {}) });
     },
     [sel, zRange, follow, backfill, commit],
   );
@@ -431,21 +421,41 @@ export function useEditor() {
 
   // ---- 載入與材質 ----
 
-  const loadVolume = useCallback((v: Volume, name?: string) => {
-    const mats = materialsFor(v);
-    setMaterials(mats);
-    const state = { vol: v, L: initialLabeled(v, matNameOf(mats)) };
-    setOrig(state);
-    splitSeq.current = 1;
-    setSplits([]);
-    setActiveId(BASE_ID);
-    setSel(new Set());
-    setHidden(new Set());
-    setLast(null);
-    setZRangeRaw([0, v.Z - 1]);
-    setCursor([v.X >> 1, v.Y >> 1, v.Z >> 1]);
-    setSource(name);
+  /** 載入一個陣列：Worker 標記結構，材質沒給就一律「材質 n」。 */
+  const loadVolume = useCallback(async (v: Volume, m: Meta, mats?: Material[]) => {
+    if (running.current) return;
+    const ids = new Set<number>();
+    for (let i = 0; i < v.data.length; i++) ids.add(v.data[i]);
+    let table = materialsFor(ids);
+    if (mats) table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
+    setBusy('分析結構中…');
+    running.current = true;
+    try {
+      const { labels, raw } = await call('label', { vol: v });
+      setMaterials(table);
+      setMeta(m);
+      setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) } });
+      keySeq.current = 1000;
+      splitSeq.current = 1;
+      setSplits([]);
+      setActiveId(BASE_ID);
+      setSel(new Set());
+      setHidden(new Set());
+      setLast(null);
+      setZRangeRaw([0, v.Z - 1]);
+      setCursor([v.X >> 1, v.Y >> 1, v.Z >> 1]);
+      if (m.spacing) setNmPerVoxel(m.unit === 'um' ? m.spacing[0] * 1000 : m.spacing[0]);
+    } finally {
+      setBusy(null);
+      running.current = false;
+    }
   }, []);
+
+  /** 內建範例（只有它自帶名稱表）；scale 放大每一軸。 */
+  const demo = useCallback(
+    (scale = 1) => loadVolume(demoVolume(scale), { format: 'demo', name: scale > 1 ? `範例 ×${scale}` : undefined }, MATERIALS),
+    [loadVolume],
+  );
 
   const renameMaterial = useCallback(
     (id: number, name: string) => {
@@ -457,7 +467,7 @@ export function useEditor() {
         comps: l.comps.map((c) => (c.mat === id ? { ...c, label: name + c.label.slice(old.length) } : c)),
       });
       const fix = (s: EditState): EditState => ({ ...s, L: fixL(s.L) });
-      setOrig(fix);
+      setOrig((o) => o && fix(o));
       setSplits((all) =>
         all.map((s) => ({
           ...s,
@@ -468,6 +478,11 @@ export function useEditor() {
       );
     },
     [matName],
+  );
+
+  const setMaterialColor = useCallback(
+    (id: number, color: string) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, color } : m))),
+    [],
   );
 
   // ---- 十字 ----
@@ -539,10 +554,10 @@ export function useEditor() {
   }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId]);
 
   return {
+    ready,
     materials,
-    setMaterials,
     matName,
-    source,
+    meta,
     vol,
     orig,
     L,
@@ -554,6 +569,7 @@ export function useEditor() {
     undo,
     redo,
     resetAll,
+    busy,
     splits,
     activeId,
     setActiveId,
@@ -591,6 +607,8 @@ export function useEditor() {
     setBackfill,
     nmPerVoxel,
     setNmPerVoxel,
+    bumpRadius,
+    setBumpRadius,
     diff,
     changedKeys,
     ledger,
@@ -602,8 +620,26 @@ export function useEditor() {
     push,
     setMaterial,
     loadVolume,
+    demo,
     renameMaterial,
+    setMaterialColor,
   };
 }
 
 export type Editor = ReturnType<typeof useEditor>;
+
+/** 每個 split 和原始的 diff（並排比較、總表用），非同步算好後回傳。 */
+export function useSplitDiffs(ed: Editor) {
+  const [out, setOut] = useState<Map<string, Diff>>(new Map());
+  const { splits, diffOf } = ed;
+  useEffect(() => {
+    let alive = true;
+    Promise.all(splits.map((s) => diffOf(s.cur.vol))).then((ds) => {
+      if (alive) setOut(new Map(splits.map((s, i) => [s.id, ds[i]])));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [splits, diffOf]);
+  return out;
+}

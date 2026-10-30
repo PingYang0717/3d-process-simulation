@@ -123,7 +123,7 @@ export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void 
         </Section>
       )}
       <Button type="primary" block icon={<DownloadOutlined />} onClick={onExport}>
-        匯出 .npy
+        匯出 .vti
       </Button>
     </Flex>
   );

@@ -10,7 +10,7 @@ import {
   materialCounts,
 } from './volume';
 import { crc32, zipStore } from './zip';
-import { type EditState, type Op, type OpContext, applyOp, matNameOf, replay, sweepOps } from '../pages/Section3D/editor';
+import { type EditState, type Op, type OpContext, applyOp, matNameOf, replay, sweepOps } from './ops';
 
 const UP: [number, number, number] = [0, -1, 0];
 const DOWN: [number, number, number] = [0, 1, 0];

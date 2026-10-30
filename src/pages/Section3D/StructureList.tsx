@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
-import { Button, Tag, Tooltip, Typography } from 'antd';
-import { EyeInvisibleOutlined, EyeOutlined, RightOutlined } from '@ant-design/icons';
+import { Button, ColorPicker, Input, Tag, Tooltip, Typography } from 'antd';
+import { EditOutlined, EyeInvisibleOutlined, EyeOutlined, RightOutlined } from '@ant-design/icons';
 import { type Comp, isVoid } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
 import { type Editor, selectModeOf } from './editor';
@@ -8,9 +8,10 @@ import { type Editor, selectModeOf } from './editor';
 const { Text } = Typography;
 const labelNumber = (l: string) => parseInt(l.split(' ').pop() ?? '0', 10) || 0;
 
-/** 左欄：依材質分組；點材質名選整組；> 3 塊的材質預設收合。 */
+/** 左欄：依材質分組；點材質名選整組；點色塊改色、雙擊改名；> 3 塊的材質預設收合。 */
 export function StructureList({ ed, width }: { ed: Editor; width: number }) {
   const [open, setOpen] = useState<Set<number>>(new Set());
+  const [editing, setEditing] = useState<number | null>(null);
   const groups = useMemo(() => {
     const byMat = new Map<number, Comp[]>();
     ed.comps.forEach((c) => {
@@ -32,7 +33,7 @@ export function StructureList({ ed, width }: { ed: Editor; width: number }) {
           </Button>
         ) : (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Shift 點可多選
+            點色塊改色、雙擊改名
           </Text>
         )}
       </div>
@@ -66,21 +67,62 @@ export function StructureList({ ed, width }: { ed: Editor; width: number }) {
                 ) : (
                   <span className="group-caret" />
                 )}
-                <Swatch fill={mat.color} isVoid={isVoid(mat.id)} />
-                <button
-                  type="button"
-                  className="group-name"
-                  onClick={(e) => ed.selectKeys(regions.map((c) => c.key), selectModeOf(e))}
-                  title={only ? '選取' : '選取這個材質的全部結構'}
-                >
-                  {mat.name}
-                </button>
+                {isVoid(mat.id) ? (
+                  <Swatch fill={mat.color} isVoid />
+                ) : (
+                  <Tooltip title="改顏色">
+                    <ColorPicker
+                      size="small"
+                      value={mat.color}
+                      disabledAlpha
+                      onChangeComplete={(c) => ed.setMaterialColor(mat.id, c.toHexString())}
+                    >
+                      <span>
+                        <Swatch fill={mat.color} size={14} />
+                      </span>
+                    </ColorPicker>
+                  </Tooltip>
+                )}
+                {editing === mat.id ? (
+                  <Input
+                    size="small"
+                    autoFocus
+                    defaultValue={mat.name}
+                    onBlur={(e) => {
+                      ed.renameMaterial(mat.id, e.target.value.trim());
+                      setEditing(null);
+                    }}
+                    onPressEnter={(e) => e.currentTarget.blur()}
+                    onKeyDown={(e) => e.key === 'Escape' && setEditing(null)}
+                    style={{ flex: 1 }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="group-name"
+                    onClick={(e) => ed.selectKeys(regions.map((c) => c.key), selectModeOf(e))}
+                    onDoubleClick={() => setEditing(mat.id)}
+                    title={(only ? '選取' : '選取這個材質的全部結構') + '；雙擊改名'}
+                  >
+                    {mat.name}
+                  </button>
+                )}
                 {changed > 0 && (
                   <Tag color="orange" bordered={false} className="mini-tag">
                     {only ? '已改' : `已改 ${changed}`}
                   </Tag>
                 )}
                 {!only && <span className="group-count">{regions.length} 塊</span>}
+                <Tooltip title="改名稱">
+                  <Button
+                    type="text"
+                    size="small"
+                    className="group-eye"
+                    icon={<EditOutlined />}
+                    onClick={() => setEditing(mat.id)}
+                    aria-label="改名稱"
+                  />
+                </Tooltip>
                 <Tooltip title={hid ? '顯示' : '隱藏（看裡面用）'}>
                   <Button
                     type="text"

@@ -1,8 +1,7 @@
-import { useMemo } from 'react';
 import { Alert, Segmented, Tag, Typography } from 'antd';
 import { type Axis, bboxDims, sliceHasAny } from '../../volume/volume';
 import { signed } from '../../ui/format';
-import { BASE_ID, type Editor } from './editor';
+import { BASE_ID, type Editor, useSplitDiffs } from './editor';
 import { SliceView } from './views';
 
 const { Text } = Typography;
@@ -16,10 +15,7 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
     { id: BASE_ID, name: '原始', vol: ed.orig.vol, L: ed.orig.L, ops: [] as typeof ed.splits[number]['ops'] },
     ...ed.splits.map((s) => ({ id: s.id, name: s.name, vol: s.cur.vol, L: s.cur.L, ops: s.ops })),
   ];
-  const diffs = useMemo(
-    () => new Map(ed.splits.map((s) => [s.id, ed.diffOf(s.cur.vol)])),
-    [ed.splits, ed.diffOf],
-  );
+  const diffs = useSplitDiffs(ed);
   const focus = ed.selComps[0];
   const nm = ed.nmPerVoxel;
   const full: [number, number] = [0, ed.vol.Z - 1];
@@ -47,7 +43,7 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
       </div>
       <div className="compare-grid">
         {cards.map((card) => {
-          const diff = card.id === BASE_ID ? null : diffs.get(card.id)!;
+          const diff = card.id === BASE_ID ? null : (diffs.get(card.id) ?? null);
           const comp = focus ? card.L.comps.find((c) => c.key === focus.key) : undefined;
           const was = focus ? ed.origByKey.get(focus.key) : undefined;
           const now = comp ? bboxDims(comp.bbox) : null;
@@ -83,7 +79,7 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
                 )}
                 <span className="grow" />
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {diff ? `${diff.count.toLocaleString()} voxels 不同` : '基準'}
+                  {card.id === BASE_ID ? '基準' : diff ? `${diff.count.toLocaleString()} voxels 不同` : '比對中…'}
                 </Text>
               </div>
               <div className="slice-body">

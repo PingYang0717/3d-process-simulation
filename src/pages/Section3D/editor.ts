@@ -84,6 +84,8 @@ export interface MenuState {
   x: number;
   y: number;
   key: string | null;
+  /** 沿射線往裡面還有哪些結構（含第一個），「這裡的其他結構」用。 */
+  along?: string[];
 }
 
 export function useEditor() {

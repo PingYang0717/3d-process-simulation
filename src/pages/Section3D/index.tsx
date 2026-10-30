@@ -111,10 +111,11 @@ export default function Section3DPage() {
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [tab, setTab] = useState('props');
-  /** 剖面：軸與留哪一半；位置跟著橘色十字。 */
+  /** 剖面：軸、留哪一半、每軸各自的位置（和十字分開，點選結構不會讓剖面跳走）。 */
   const [clipOn, setClipOn] = useState(false);
   const [clipAxis, setClipAxis] = useState<Axis>('z');
   const [clipSide, setClipSide] = useState<1 | -1>(1);
+  const [clipPos, setClipPos] = useState<Record<Axis, number>>({ x: 0, y: 0, z: 0 });
   const [showDiff, setShowDiff] = useState(true);
   /** 現在／原始／差異。 */
   const [mode, setMode] = useState<ViewMode>('now');
@@ -139,21 +140,55 @@ export default function Section3DPage() {
     next[a === 'x' ? 0 : a === 'y' ? 1 : 2] = Math.max(0, Math.min(axisMax(a), Math.round(v)));
     ed.setCursor(next);
   };
+  const setClipAt = (a: Axis, v: number) => setClipPos((p) => ({ ...p, [a]: Math.max(0, Math.min(axisMax(a), Math.round(v))) }));
+  const toggleClip = () => {
+    // 開啟時從十字的位置開始
+    if (!clipOn) setClipPos((p) => ({ ...p, [clipAxis]: cursorAt(clipAxis) }));
+    setClipOn(!clipOn);
+  };
 
-  // B：現在 ⇄ 原始；D：現在 ⇄ 差異；, .：剖面前後一片；Esc：還原放大的切面
+  // B：現在 ⇄ 原始；D：現在 ⇄ 差異；, .：剖面前後一片；F 對準選取、H 全貌、1/2/3/4 視角；Esc：還原放大的切面
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement | null)?.closest?.('input,textarea,select,[contenteditable]')) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key.toLowerCase();
+      const views: Record<string, ViewPreset> = { f: 'fit', h: 'home', home: 'home', '1': 'front', '2': 'top', '3': 'side', '4': 'iso' };
       if (k === 'b') setMode((m) => (m === 'orig' ? 'now' : 'orig'));
       else if (k === 'd') setMode((m) => (m === 'diff' ? 'now' : 'diff'));
-      else if ((e.key === ',' || e.key === '.') && clipOn) ed.stepCursor(clipAxis, e.key === '.' ? 1 : -1);
-      else if (e.key === 'Escape') setFocus(null);
+      else if ((e.key === ',' || e.key === '.') && clipOn) setClipPos((p) => ({ ...p, [clipAxis]: Math.max(0, Math.min(axisMax(clipAxis), p[clipAxis] + (e.key === '.' ? 1 : -1))) }));
+      else if (views[k]) view.current?.setView(views[k]);
+      else if (e.key === '?') setHelpOpen(true);
+      else if (e.key === 'Escape' && focus) {
+        // 只退出放大的切面，選取留著
+        e.stopImmediatePropagation();
+        setFocus(null);
+      }
     };
-    window.addEventListener('keydown', down);
-    return () => window.removeEventListener('keydown', down);
-  }, [clipOn, clipAxis, ed.stepCursor]);
+    window.addEventListener('keydown', down, { capture: true });
+    return () => window.removeEventListener('keydown', down, { capture: true });
+  }, [clipOn, clipAxis, focus, ed.vol.X, ed.vol.Y, ed.vol.Z]);
+
+  // 剛套用一步：訊息＋「復原」，3D 選取框閃一下
+  useEffect(() => {
+    if (!ed.last) return;
+    view.current?.flash();
+    message.open({
+      key: 'last',
+      type: 'success',
+      duration: 4,
+      content: (
+        <span>
+          {ed.last.text}
+          {ed.hist.length > 0 && (
+            <Typography.Link style={{ marginLeft: 10 }} onClick={() => (ed.undo(), message.destroy('last'))}>
+              復原
+            </Typography.Link>
+          )}
+        </span>
+      ),
+    });
+  }, [ed.last]);
 
   useEffect(() => {
     if (mode === 'diff' && !ed.diff.count) setMode('now');
@@ -161,7 +196,7 @@ export default function Section3DPage() {
 
   const peek = mode === 'orig';
   const shown = peek ? ed.orig.vol : ed.vol;
-  const clip: Clip | null = clipOn ? { axis: clipAxis, at: cursorAt(clipAxis), side: clipSide } : null;
+  const clip: Clip | null = clipOn ? { axis: clipAxis, at: Math.min(axisMax(clipAxis), clipPos[clipAxis]), side: clipSide } : null;
   const selBBox = useMemo(() => {
     const b = unionBBox(ed.selComps);
     if (!b) return null;
@@ -215,6 +250,7 @@ export default function Section3DPage() {
 
   const menuComp = ed.menu?.key ? ed.compByKey.get(ed.menu.key) : undefined;
   const closeMenu = () => ed.setMenu(null);
+  const behind = (ed.menu?.along ?? []).filter((k) => k !== menuComp?.key).map((k) => ed.compByKey.get(k)).filter((c): c is NonNullable<typeof c> => !!c);
   const menuItems: MenuProps['items'] = menuComp
     ? [
         { key: 'only', label: `只選 ${menuComp.label}`, onClick: () => (ed.selectKeys([menuComp.key]), closeMenu()) },
@@ -224,7 +260,21 @@ export default function Section3DPage() {
           onClick: () => (ed.selectKeys([menuComp.key], 'toggle'), closeMenu()),
         },
         { key: 'samemat', label: `選全部的 ${ed.matName(menuComp.mat)}`, onClick: () => (ed.selectMaterial(menuComp.mat), closeMenu()) },
-        { type: 'divider' },
+        ...(behind.length
+          ? [
+              {
+                key: 'behind',
+                label: `選它後面的結構（${behind.length}）`,
+                children: behind.map((c) => ({
+                  key: `b-${c.key}`,
+                  label: <MatLabel mat={matOf(ed, c.mat)} />,
+                  extra: c.label,
+                  onClick: () => (ed.selectKeys([c.key]), closeMenu()),
+                })),
+              },
+            ]
+          : []),
+        { type: 'divider' as const },
         {
           key: 'hide',
           icon: <EyeInvisibleOutlined />,
@@ -449,8 +499,8 @@ export default function Section3DPage() {
           </Tooltip>
         )}
         <Space.Compact size="small" className="tb">
-          <Tooltip title="沿一個軸剖開 3D，剖口貼上切面圖；位置跟著橘色十字">
-            <Button type={clipOn ? 'primary' : 'default'} icon={<ScissorOutlined />} onClick={() => setClipOn(!clipOn)}>
+          <Tooltip title="沿一個軸剖開 3D，剖口貼上切面圖；用滑桿或 , . 鍵移動">
+            <Button type={clipOn ? 'primary' : 'default'} icon={<ScissorOutlined />} onClick={toggleClip} aria-label="剖面">
               <span className="tb-text">剖面</span>
             </Button>
           </Tooltip>
@@ -489,6 +539,7 @@ export default function Section3DPage() {
           diffMask={diffShown}
           mode={mode}
           brush={ed.brush}
+          nmPerVoxel={ed.nmPerVoxel}
           onPick={(v, m) => {
             if (v === null) {
               if (m === 'set') ed.clearSel();
@@ -497,11 +548,11 @@ export default function Section3DPage() {
             ed.pickVoxel(v, m);
             ed.setCursor(ed.voxelCoord(v));
           }}
-          onMenu={(v, x, y) => {
+          onMenu={(h, x, y) => {
             const r = wrapRef.current?.getBoundingClientRect();
             setMenuAt({ x: (r?.left ?? 0) + x, y: (r?.top ?? 0) + y });
-            const l = v !== null ? ed.L.labels[v] : -1;
-            ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
+            const l = h.voxel !== null ? ed.L.labels[h.voxel] : -1;
+            ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, along: h.along });
           }}
           onSculpt={(s) => {
             if (s.kind === 'level') ed.level(s.dir, s.to, s.local);
@@ -543,18 +594,23 @@ export default function Section3DPage() {
             <Slider
               min={0}
               max={axisMax(clipAxis)}
-              value={cursorAt(clipAxis)}
-              onChange={(v) => setCursorAxis(clipAxis, v)}
+              value={clip!.at}
+              onChange={(v) => setClipAt(clipAxis, v)}
               tooltip={{ formatter: (v) => `${clipAxis} = ${v}` }}
               style={{ flex: 1, margin: '0 10px' }}
             />
-            <InputNumber size="small" min={0} max={axisMax(clipAxis)} value={cursorAt(clipAxis)} onChange={(v) => v !== null && setCursorAxis(clipAxis, v)} precision={0} style={{ width: 72 }} />
+            <InputNumber size="small" min={0} max={axisMax(clipAxis)} value={clip!.at} onChange={(v) => v !== null && setClipAt(clipAxis, v)} precision={0} style={{ width: 72 }} />
             <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-              {(cursorAt(clipAxis) * ed.nmPerVoxel).toFixed(1)} nm
+              {(clip!.at * ed.nmPerVoxel).toFixed(1)} nm
             </Text>
-            <Tooltip title={`現在留 ${clipAxis} ${clipSide > 0 ? '≤' : '≥'} ${cursorAt(clipAxis)} 的那一半；按一下翻面`}>
+            <Tooltip title={`現在留 ${clipAxis} ${clipSide > 0 ? '≤' : '≥'} ${clip!.at} 的那一半；按一下翻面`}>
               <Button size="small" icon={<SwapOutlined />} onClick={() => setClipSide(clipSide > 0 ? -1 : 1)}>
                 翻面
+              </Button>
+            </Tooltip>
+            <Tooltip title="把剖面移到橘色十字的位置">
+              <Button size="small" icon={<AimOutlined />} disabled={clip!.at === cursorAt(clipAxis)} onClick={() => setClipAt(clipAxis, cursorAt(clipAxis))}>
+                對齊十字
               </Button>
             </Tooltip>
             <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
@@ -591,8 +647,8 @@ export default function Section3DPage() {
             ? ed.last!.text
             : hover ||
               (ed.sel.size
-                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 按住它的面拖＝筆刷雕刻；整面長縮、移動在右欄`
-                : '點一塊結構開始；Shift 多選；雙擊模型＝繞著那點轉')}
+                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 按住它的面拖＝筆刷雕刻（Alt 拖＝只轉視角）；整面長縮、移動在右欄`
+                : '點一塊結構開始；Shift 多選；雙擊模型＝繞著那點轉；F 對準、H 全貌')}
         </span>
         <span className="grow" />
         <span>

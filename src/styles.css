@@ -268,6 +268,7 @@ kbd { background: #f5f6f8; border-color: #e4e6eb; color: #646a73; }
 .canvas-wrap { background-image: none; background-color: #f5f5f5; }
 .sel-tag { position: absolute; z-index: 3; padding: 2px 8px; background: #1677ff; color: #fff; font-size: 12px; border-radius: 4px; pointer-events: none; white-space: nowrap; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
 .peek { top: 12px; }
+.canvas-wrap:has(.sectionbar) .peek { top: 60px; }
 /* 左欄 */
 .group-head { padding: 0 4px 0 4px; }
 .group-caret { margin-left: -2px; }
@@ -293,7 +294,6 @@ span.group-caret { display: inline-block; width: 22px; flex: none; }
 .busy-bar { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 16px; background: #e8f1ff; color: #0b57d0; font-size: 12px; flex: none; }
 .busy-dot { width: 8px; height: 8px; border-radius: 4px; background: #1677ff; animation: pulse 1s infinite; }
 @keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
-.drag-tip { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; padding: 4px 12px; background: rgba(0, 0, 0, .82); color: #fff; font-size: 12px; border-radius: 6px; pointer-events: none; }
 .mesh-busy { position: absolute; right: 12px; bottom: 12px; z-index: 3; padding: 3px 10px; background: rgba(255, 255, 255, .92); border-radius: 6px; font-size: 12px; color: #646a73; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); pointer-events: none; }
 
 /* ---- v11：筆刷、視角列、座標軸、剖面列、切面放大 ---- */
@@ -302,10 +302,12 @@ span.group-caret { display: inline-block; width: 22px; flex: none; }
 .viewbar { position: absolute; right: 12px; bottom: 12px; z-index: 3; display: flex; align-items: center; gap: 2px; padding: 3px; background: rgba(255,255,255,.94); border: 1px solid #eef0f3; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
 .viewbar .ant-btn { padding-inline: 8px; font-size: 12px; color: #3c4048; }
 .viewbar .ant-btn:not(:disabled):hover { background: #e8f1ff; color: #0b57d0; }
-.sectionbar { position: absolute; left: 96px; right: 12px; bottom: 54px; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: rgba(255,255,255,.96); border: 1px solid #eef0f3; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.sectionbar { position: absolute; left: 12px; right: 12px; top: 12px; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: rgba(255,255,255,.96); border: 1px solid #eef0f3; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
 .sectionbar .ant-slider { min-width: 80px; }
-.drag-tip { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; padding: 4px 12px; background: rgba(0,0,0,.82); color: #fff; font-size: 12px; border-radius: 6px; pointer-events: none; white-space: nowrap; }
-.mesh-busy { position: absolute; right: 12px; top: 12px; z-index: 3; padding: 3px 10px; background: rgba(255,255,255,.92); border-radius: 6px; font-size: 12px; color: #646a73; box-shadow: 0 1px 2px rgba(0,0,0,.08); pointer-events: none; }
+.drag-tip, .hover-tag { position: absolute; z-index: 4; padding: 3px 10px; font-size: 12px; border-radius: 6px; pointer-events: none; white-space: nowrap; }
+.drag-tip { background: rgba(0,0,0,.82); color: #fff; font-weight: 500; }
+.hover-tag { background: rgba(255,255,255,.96); color: #1f2329; border: 1px solid #e4e6eb; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.mesh-busy { position: absolute; left: 96px; right: auto; bottom: 16px; z-index: 3; padding: 3px 10px; background: rgba(255,255,255,.92); border-radius: 6px; font-size: 12px; color: #646a73; box-shadow: 0 1px 2px rgba(0,0,0,.08); pointer-events: none; }
 .pane-head .ant-segmented.tb { margin-left: 8px; }
 .slice-pos .ant-input-number-prefix { margin-inline-end: 2px; font-size: 11px; }
 .slice-pos .ant-btn { width: 24px; padding: 0; }

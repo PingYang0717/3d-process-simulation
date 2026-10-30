@@ -22,7 +22,7 @@ function setup() {
   let seq = 1000;
   const ctx: OpContext = { orig: vol, matName, newKey: () => `c${seq++}` };
   const poly = base.L.comps.filter((c) => c.mat === 6);
-  return { vol, base, ctx, poly, full: [0, vol.Z - 1] as [number, number] };
+  return { vol, base, ctx, poly, full: { axis: 'z' as const, lo: 0, hi: vol.Z - 1 } };
 }
 
 describe('逐體素', () => {
@@ -44,8 +44,8 @@ describe('逐體素', () => {
   it('poly 整塊往上 1 再往下 1：差異 0', () => {
     const { base, ctx, poly, full } = setup();
     const keys = poly.map((c) => c.key);
-    const up: Op = { kind: 'translate', keys, zRange: full, d: [0, -1, 0], backfill: 'orig' };
-    const down: Op = { kind: 'translate', keys, zRange: full, d: [0, 1, 0], backfill: 'orig' };
+    const up: Op = { kind: 'translate', keys, scope: full, d: [0, -1, 0], backfill: 'orig' };
+    const down: Op = { kind: 'translate', keys, scope: full, d: [0, 1, 0], backfill: 'orig' };
     const mid = applyOp(base, up, ctx);
     expect(diffMask(mid.vol, base.vol).count).toBeGreaterThan(0);
     // 選取以 key 延續
@@ -55,8 +55,8 @@ describe('逐體素', () => {
 
   it('poly 長高 2 再縮短 2（襯層跟著走）：差異 0；長高後 SiN 硬罩整層上移', () => {
     const { base, ctx, poly, full } = setup();
-    const grow = (keys: string[]): Op => ({ kind: 'push', keys, zRange: full, dir: UP, n: 2, follow: true, backfill: 'orig' });
-    const shrink = (keys: string[]): Op => ({ kind: 'push', keys, zRange: full, dir: UP, n: -2, follow: true, backfill: 'orig' });
+    const grow = (keys: string[]): Op => ({ kind: 'push', keys, scope: full, dir: UP, n: 2, follow: true, backfill: 'orig' });
+    const shrink = (keys: string[]): Op => ({ kind: 'push', keys, scope: full, dir: UP, n: -2, follow: true, backfill: 'orig' });
     const one = [poly[0].key];
     const grown = applyOp(base, grow(one), ctx);
     expect(diffMask(grown.vol, base.vol).count).toBe(13824);
@@ -77,7 +77,7 @@ describe('逐體素', () => {
   it('只改 z 60–67：只有那 8 片變', () => {
     const { base, ctx, poly } = setup();
     const target = poly.find((c) => c.bbox.z0 <= 60 && c.bbox.z1 >= 67)!;
-    const op: Op = { kind: 'push', keys: [target.key], zRange: [60, 67], dir: UP, n: 2, follow: true, backfill: 'orig' };
+    const op: Op = { kind: 'push', keys: [target.key], scope: { axis: 'z' as const, lo: 60, hi: 67 }, dir: UP, n: 2, follow: true, backfill: 'orig' };
     const out = applyOp(base, op, ctx);
     const { mask, count } = diffMask(out.vol, base.vol);
     expect(count).toBeGreaterThan(0);
@@ -91,9 +91,9 @@ describe('逐體素', () => {
     const { base, ctx, poly, full } = setup();
     const keys = [poly[0].key];
     const ops: Op[] = [
-      { kind: 'push', keys, zRange: full, dir: UP, n: 3, follow: false, backfill: 'orig' },
-      { kind: 'translate', keys, zRange: full, d: [4, 0, 0], backfill: 'orig' },
-      { kind: 'material', keys, zRange: [20, 25], m: 254 },
+      { kind: 'push', keys, scope: full, dir: UP, n: 3, follow: false, backfill: 'orig' },
+      { kind: 'translate', keys, scope: full, d: [4, 0, 0], backfill: 'orig' },
+      { kind: 'material', keys, scope: { axis: 'z' as const, lo: 20, hi: 25 }, m: 254 },
     ];
     const out = replay(base, ops, ctx);
     const before = materialCounts(base.vol);
@@ -133,8 +133,8 @@ describe('逐體素', () => {
     expect(base.L.comps.filter((c) => c.mat === 6).length).toBe(3);
     const keys = [p3.key];
     for (const dir of [UP, DOWN, [0, 0, 1] as [number, number, number], [1, 0, 0] as [number, number, number]]) {
-      const grow: Op = { kind: 'push', keys, zRange: full, dir, n: 2, follow: true, backfill: 'orig' };
-      const shrink: Op = { kind: 'push', keys, zRange: full, dir, n: -2, follow: true, backfill: 'orig' };
+      const grow: Op = { kind: 'push', keys, scope: full, dir, n: 2, follow: true, backfill: 'orig' };
+      const shrink: Op = { kind: 'push', keys, scope: full, dir, n: -2, follow: true, backfill: 'orig' };
       const g = applyOp(base, grow, ctx);
       expect(materialCounts(g.vol).get(254)).toBe(voids0);
       const sh = applyOp(base, shrink, ctx);
@@ -146,8 +146,8 @@ describe('逐體素', () => {
   it('縮短的反方向：往下長再往下縮回到原點', () => {
     const { base, ctx, poly, full } = setup();
     const keys = [poly[1].key];
-    const a: Op = { kind: 'push', keys, zRange: full, dir: DOWN, n: 1, follow: true, backfill: 'orig' };
-    const b: Op = { kind: 'push', keys, zRange: full, dir: DOWN, n: -1, follow: true, backfill: 'orig' };
+    const a: Op = { kind: 'push', keys, scope: full, dir: DOWN, n: 1, follow: true, backfill: 'orig' };
+    const b: Op = { kind: 'push', keys, scope: full, dir: DOWN, n: -1, follow: true, backfill: 'orig' };
     expect(diffMask(replay(base, [a, b], ctx).vol, base.vol).count).toBe(0);
   });
 });

@@ -57,7 +57,7 @@ describe('v11 筆刷', () => {
     const key = s0.L.comps.find((c) => c.mat === 6)!.key;
     const mask = maskOf(s0.L, new Set([key]))!;
     // 點頂面（x 4, y 0, z 2），方形筆刷 r = 3 蓋住整個頭
-    const out = levelMask(vol, vol, mask, [0, vol.Z - 1], [0, -1, 0], [4, 0, 2], 3, 'square', 0, 'orig');
+    const out = levelMask(vol, vol, mask, { axis: 'z', lo: 0, hi: vol.Z - 1 }, [0, -1, 0], [4, 0, 2], 3, 'square', 0, 'orig');
     for (let z = 1; z <= 3; z++) for (let x = 1; x <= 7; x++) expect(topOf(out, x, z)).toBe(0);
     // 鄰居與 x = 0 那一列沒變
     for (let i = 0; i < vol.data.length; i++) {
@@ -75,10 +75,10 @@ describe('v11 筆刷', () => {
     // 每層 z 補 (7-1)+(7-3)+(7-5) = 12 格
     expect(changed).toBe(36);
     // 只補範圍內：r = 0 只動 x = 4 那一列（它本來就在頂，所以什麼都不變）
-    const none = levelMask(vol, vol, mask, [0, vol.Z - 1], [0, -1, 0], [4, 0, 2], 0, 'square', 0, 'orig');
+    const none = levelMask(vol, vol, mask, { axis: 'z', lo: 0, hi: vol.Z - 1 }, [0, -1, 0], [4, 0, 2], 0, 'square', 0, 'orig');
     expect(none.data).toEqual(vol.data);
     // r = 1：x 3～5，每層 2 格（x 3、5 的 y 0）
-    const small = levelMask(vol, vol, mask, [0, vol.Z - 1], [0, -1, 0], [4, 0, 2], 1, 'square', 0, 'orig');
+    const small = levelMask(vol, vol, mask, { axis: 'z', lo: 0, hi: vol.Z - 1 }, [0, -1, 0], [4, 0, 2], 1, 'square', 0, 'orig');
     let n = 0;
     for (let i = 0; i < vol.data.length; i++) if (small.data[i] !== vol.data[i]) n++;
     expect(n).toBe(6);
@@ -90,10 +90,10 @@ describe('v11 筆刷', () => {
     const key = s0.L.comps[0].key;
     const mask = maskOf(s0.L, new Set([key]))!;
     // 點 y = 3 那一層當目標：頭（y 0～2）全部削掉
-    const out = levelMask(vol, vol, mask, [0, vol.Z - 1], [0, -1, 0], [4, 3, 2], Infinity, 'round', 3, 'orig');
+    const out = levelMask(vol, vol, mask, { axis: 'z', lo: 0, hi: vol.Z - 1 }, [0, -1, 0], [4, 3, 2], Infinity, 'round', 3, 'orig');
     for (let z = 1; z <= 3; z++) for (let x = 1; x <= 7; x++) expect(topOf(out, x, z)).toBe(3);
     // 只在 z 範圍內
-    const part = levelMask(vol, vol, mask, [2, 2], [0, -1, 0], [4, 3, 2], Infinity, 'round', 3, 'orig');
+    const part = levelMask(vol, vol, mask, { axis: 'z', lo: 2, hi: 2 }, [0, -1, 0], [4, 3, 2], Infinity, 'round', 3, 'orig');
     expect(topOf(part, 4, 1)).toBe(0);
     expect(topOf(part, 4, 2)).toBe(3);
   });
@@ -102,14 +102,14 @@ describe('v11 筆刷', () => {
     const vol = roundHead();
     const s0 = state(vol);
     const key = s0.L.comps[0].key;
-    const op = { kind: 'level' as const, keys: [key], zRange: [0, 4] as [number, number], dir: [0, -1, 0] as Vec3, to: 0, local: { center: [4, 0, 2] as Vec3, radius: 3, shape: 'square' as const }, backfill: 'orig' as const };
+    const op = { kind: 'level' as const, keys: [key], scope: { axis: 'z' as const, lo: 0, hi: 4 }, dir: [0, -1, 0] as Vec3, to: 0, local: { center: [4, 0, 2] as Vec3, radius: 3, shape: 'square' as const }, backfill: 'orig' as const };
     const ctx = { orig: vol, matName, newKey: () => 'k' };
     const s1 = applyOp(s0, op, ctx);
     expect(s1.L.comps.length).toBe(1);
     expect(s1.L.comps[0].key).toBe(key);
     expect(s1.L.comps[0].count).toBe(s0.L.comps[0].count + 36);
     expect(replay(s0, [op], ctx).vol.data).toEqual(s1.vol.data);
-    expect(opText(op, s0.L, vol.Z, 0.5, matName)).toContain('補平到 y = 0');
+    expect(opText(op, s0.L, vol, 0.5, matName)).toContain('補平到 y = 0');
     // 整面（radius null）也可以
     const whole = applyOp(s0, { ...op, local: { center: [4, 0, 2], radius: null } }, ctx);
     expect(whole.vol.data).toEqual(s1.vol.data);

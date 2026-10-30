@@ -13,7 +13,8 @@ import {
   translateMask,
   unionBBox,
 } from './volume';
-import { type EditState, type Op, radiusOf } from './ops';
+import { type EditState, type LegacyOp, type Op, radiusOf, upgradeOp } from './ops';
+import { axisIndex } from './scope';
 
 export interface Preview {
   /** 裁切範圍（含端點，整個陣列的座標）。 */
@@ -83,7 +84,8 @@ export function cropMask(L: Labeled, keys: Set<string>, v: Volume, b: BBox): Uin
  * 這一步會動到的範圍：選取外框，推面／補平沿法線兩側多留 |n|＋襯層，筆刷只留筆刷蓋到的列，
  * 平移是外框 ∪ 搬到的地方。超出陣列的部分切掉；選取不存在回傳 null。
  */
-export function previewBox(s: EditState, op: Op): BBox | null {
+export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
+  const op = upgradeOp(input);
   const keys = new Set(op.keys);
   const b = unionBBox(s.L.comps.filter((c) => keys.has(c.key)));
   if (!b) return null;
@@ -120,13 +122,16 @@ export function previewBox(s: EditState, op: Op): BBox | null {
  * 在裁切範圍內算這一步的結果；範圍超過 cap 個體素就回傳 null（留給 Worker）。
  * 範圍內逐體素和 applyOp 的結果相同；範圍外這一步本來就不會改到。
  */
-export function previewOp(s: EditState, orig: Volume, op: Op, cap = Infinity): Preview | null {
+export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity): Preview | null {
+  const op = upgradeOp(input);
   const box = previewBox(s, op);
   if (!box || boxVoxels(box) > cap) return null;
   const vol = cropVolume(s.vol, box);
   const o = cropVolume(orig, box);
   const mask = cropMask(s.L, new Set(op.keys), s.vol, box);
-  const zr: [number, number] = [Math.max(0, op.zRange[0] - box.z0), Math.min(vol.Z - 1, op.zRange[1] - box.z0)];
+  // scope 換成裁切範圍裡的座標（超出的部分本來就不會被改）
+  const off = [box.x0, box.y0, box.z0][axisIndex(op.scope.axis)];
+  const zr = { axis: op.scope.axis, lo: op.scope.lo - off, hi: op.scope.hi - off };
   const shift = (p: Vec3): Vec3 => [p[0] - box.x0, p[1] - box.y0, p[2] - box.z0];
   let out: Volume;
   if (op.kind === 'push') {

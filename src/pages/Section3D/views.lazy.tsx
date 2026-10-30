@@ -3,9 +3,11 @@ import { Suspense, lazy } from 'react';
 /** 3D／切面畫布拖著 three.js；歡迎頁用不到，等載入檔案後再抓。CompareView 與 index 都從這裡拿。 */
 type View3DProps = Parameters<typeof import('./views').View3D>[0];
 type SliceViewProps = Parameters<typeof import('./views').SliceView>[0];
+type SliceEditorProps = Parameters<typeof import('./SliceEditor').SliceEditor>[0];
 
 const LazyView3D = lazy(() => import('./views').then((m) => ({ default: m.View3D })));
 const LazySliceView = lazy(() => import('./views').then((m) => ({ default: m.SliceView })));
+const LazySliceEditor = lazy(() => import('./SliceEditor').then((m) => ({ default: m.SliceEditor })));
 
 export function View3D(props: View3DProps) {
   return (
@@ -19,6 +21,14 @@ export function SliceView(props: SliceViewProps) {
   return (
     <Suspense fallback={<div className="view-loading" role="status">載入中…</div>}>
       <LazySliceView {...props} />
+    </Suspense>
+  );
+}
+
+export function SliceEditor(props: SliceEditorProps) {
+  return (
+    <Suspense fallback={<div className="view-loading" role="status">載入中…</div>}>
+      <LazySliceEditor {...props} />
     </Suspense>
   );
 }

@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { Alert, Button, Collapse, Empty, Flex, InputNumber, Segmented, Select, Slider, Space, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, Collapse, Empty, Flex, InputNumber, Select, Space, Table, Tooltip, Typography } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
-import { DIRECTIONS, type Vec3, bboxDims, isVoid, unionBBox } from '../../volume/volume';
+import { DIRECTIONS, type Vec3, bboxDims, isVoid } from '../../volume/volume';
 import { MatLabel, Swatch } from '../../ui/Swatch';
 import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
+import { ScopeControl } from './PositionBar';
 
 const { Text } = Typography;
 
@@ -133,63 +134,6 @@ function MaterialRow({ ed, value, onMaterial }: { ed: Editor; value?: number; on
   );
 }
 
-function ZRangeRow({ ed }: { ed: Editor }) {
-  const [z0, z1] = ed.zRange;
-  const max = ed.vol.Z - 1;
-  const whole = z0 === 0 && z1 === max;
-  const b = unionBBox(ed.selComps);
-  const covered = b ? Math.max(0, Math.min(b.z1, z1) - Math.max(b.z0, z0) + 1) : 0;
-  const depth = b ? b.z1 - b.z0 + 1 : 0;
-  return (
-    <Flex vertical gap={4}>
-      <Segmented
-        size="small"
-        block
-        value={whole ? 'all' : 'part'}
-        onChange={(v) =>
-          ed.setZRange(
-            v === 'all'
-              ? [0, max]
-              : b
-                ? [Math.round((b.z0 * 2 + b.z1) / 3), Math.round((b.z0 + b.z1 * 2) / 3)]
-                : [ed.cursor[2], ed.cursor[2]],
-          )
-        }
-        options={[
-          { label: '整塊都改', value: 'all' },
-          { label: '只改其中一段（z）', value: 'part' },
-        ]}
-      />
-      {!whole && (
-        <>
-          <Slider
-            range
-            min={0}
-            max={max}
-            value={[z0, z1]}
-            onChange={(v) => ed.setZRange([v[0], v[1]])}
-            tooltip={{ formatter: (v) => `z = ${v}` }}
-            marks={b ? { [b.z0]: { label: <small>{b.z0}</small> }, [b.z1]: { label: <small>{b.z1}</small> } } : undefined}
-            style={{ margin: '4px 8px 18px' }}
-          />
-          <Flex align="center" gap={8}>
-            <span style={{ fontSize: 12 }}>z 從</span>
-            <InputNumber size="small" min={0} max={max} value={z0} onChange={(v) => v !== null && ed.setZRange([v, z1])} precision={0} style={{ width: 64 }} />
-            <span style={{ fontSize: 12 }}>到</span>
-            <InputNumber size="small" min={0} max={max} value={z1} onChange={(v) => v !== null && ed.setZRange([z0, v])} precision={0} style={{ width: 64 }} />
-            <Button size="small" type="text" onClick={() => ed.setZRange([ed.cursor[2], ed.cursor[2]])}>
-              只有十字那片
-            </Button>
-          </Flex>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {b ? `這段蓋到選取的 ${covered} / ${depth} 片；` : ''}3D 上藍色的部分就是會被改到的範圍，切面上是藍色虛線框
-          </Text>
-        </>
-      )}
-    </Flex>
-  );
-}
-
 /** 右欄「選取與調整」。 */
 export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: number) => void }) {
   const nm = ed.nmPerVoxel;
@@ -203,7 +147,7 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
             <b>選取</b>　在 3D 或切面點一塊，或點左邊清單。<kbd>Shift</kbd>＋點可以多選，例如兩根 poly。
           </li>
           <li>
-            <b>調整</b>　細修在 3D 上拖它的面（筆刷）；整面長縮、移動、換材質在這裡輸入。選取會留著。
+            <b>調整</b>　按 3D 上方「2D 編輯」（E）切到放大的切面；整面長縮、移動、換材質在這裡輸入。選取會留著。
           </li>
           <li>
             <b>匯出</b>　右上角「匯出」，shape 與 dtype 和原始一樣。
@@ -301,8 +245,8 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
       <Section title="材質">
         <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} onMaterial={onMaterial} />
       </Section>
-      <Section title="要改哪裡">
-        <ZRangeRow ed={ed} />
+      <Section title="範圍（要改哪裡）">
+        <ScopeControl ed={ed} showAxis />
       </Section>
       <Section title="長高／縮短">
         <PushRow ed={ed} />

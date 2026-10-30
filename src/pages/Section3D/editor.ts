@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from 'antd';
 import {
+  type Axis,
   type Backfill,
+  type BBox,
   type Labeled,
   type Material,
   type Vec3,
   type Volume,
-  type ZRange,
   MATERIALS,
   coordOf,
   demoVolume,
@@ -18,6 +19,44 @@ import {
 } from '../../volume/volume';
 import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
 import type { BrushShape } from '../../volume/volume';
+import { type Scope, axisIndex, axisLen, boxRange, clampScope, fullScope, isFullScope, scopeBox } from '../../volume/scope';
+
+/** 範圍：整個結構（預設）、只有目前這一片、自訂一段；軸＝目前主切面的法線軸。 */
+export type ScopeMode = 'whole' | 'slice' | 'custom';
+const isAxis = (v: unknown): v is Axis => v === 'x' || v === 'y' || v === 'z';
+const isScopeMode = (v: unknown): v is ScopeMode => v === 'whole' || v === 'slice' || v === 'custom';
+
+/** 選取 ∩ scope：所見即會被改。scope 是整段時直接回傳原 mask。 */
+export function maskInScope(mask: Uint8Array, vol: Volume, scope: Scope): Uint8Array {
+  if (isFullScope(scope, vol)) return mask;
+  const out = new Uint8Array(mask.length);
+  const b = scopeBox(vol, scope);
+  if (!b) return out;
+  const { X, Y } = vol;
+  if (scope.axis === 'z') {
+    const plane = X * Y;
+    out.set(mask.subarray(b.z0 * plane, (b.z1 + 1) * plane), b.z0 * plane);
+    return out;
+  }
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++) {
+      const row = (z * Y + y) * X;
+      out.set(mask.subarray(row + b.x0, row + b.x1 + 1), row + b.x0);
+    }
+  return out;
+}
+
+/** mask 沿 axis 每一片有沒有體素（找「最近有這個結構的一片」用）。 */
+export function slicesWith(mask: Uint8Array, vol: Volume, axis: Axis): Uint8Array {
+  const { X, Y, Z } = vol;
+  const out = new Uint8Array(axisLen(vol, axis));
+  for (let z = 0; z < Z; z++)
+    for (let y = 0; y < Y; y++) {
+      const row = (z * Y + y) * X;
+      for (let x = 0; x < X; x++) if (mask[row + x]) out[axis === 'x' ? x : axis === 'y' ? y : z] = 1;
+    }
+  return out;
+}
 
 /** 3D 筆刷：推拉（沿法線長／縮 n 格）、補平（補到／削到點到的那一面）或關閉（拖拉一律轉視角）；半徑 null = 整面。 */
 export interface Brush {
@@ -28,7 +67,7 @@ export interface Brush {
 /** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
 import { call, ensure, loadOrig, replayIn, retain } from '../../volume/client';
-import { overlayOpen, usePersisted } from '../../ui/persist';
+import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
 
@@ -104,7 +143,15 @@ export function useEditor() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<Vec3>([0, 0, 0]);
-  const [zRange, setZRangeRaw] = useState<ZRange>([0, 0]);
+  // 範圍（Scope）：一個狀態，位置列與右欄兩處顯示。軸＝主切面的法線軸（上次用的方向記在 localStorage）
+  const [editAxis, setEditAxis] = usePersisted<Axis>('editAxis', 'z', isAxis);
+  const [scopeMode, setScopeMode] = usePersisted<ScopeMode>('scopeMode', 'whole', isScopeMode);
+  /** 自訂範圍的兩端（絕對座標，沿 editAxis）。 */
+  const [customRange, setCustomRange] = useState<[number, number]>([0, 0]);
+  /** 在 3D 上雕刻（進階，預設關）：關著時 3D 上怎麼拖都只轉視角。 */
+  const [sculpt3d, setSculpt3d] = usePersisted('sculpt3d', false);
+  /** 選到結構時主切面自動放大到它。 */
+  const [autoZoom, setAutoZoom] = usePersisted('autoZoom', true);
   // 跨次記住：襯層跟推、nm 比例（載入有 spacing 的 .vti 會覆蓋）、筆刷
   const [follow, setFollow] = usePersisted('follow', true);
   const [backfill, setBackfill] = useState<Backfill>('orig');
@@ -145,15 +192,44 @@ export function useEditor() {
   /** 選取結構在 L.comps 裡的 index（給 Worker 畫選取層）。 */
   const selIdx = useMemo(() => L.comps.flatMap((c, i) => (sel.has(c.key) ? [i] : [])), [L, sel]);
   const selMask = useMemo(() => maskOf(L, sel), [L, sel]);
-  /** 選取 ∩ z 範圍：所見即會被改。 */
-  const affMask = useMemo(() => {
-    if (!selMask) return null;
-    if (zRange[0] === 0 && zRange[1] === vol.Z - 1) return selMask;
-    const out = new Uint8Array(selMask.length);
-    const plane = vol.X * vol.Y;
-    out.set(selMask.subarray(zRange[0] * plane, (zRange[1] + 1) * plane), zRange[0] * plane);
-    return out;
-  }, [selMask, zRange, vol]);
+  const selBox: BBox | null = useMemo(() => unionBBox(selComps), [selComps]);
+  /** 選取結構沿 editAxis 的起止（「整個結構（z 0～127）」的數字）。 */
+  const selRange = useMemo<[number, number] | null>(() => (selBox ? boxRange(selBox, editAxis) : null), [selBox, editAxis]);
+  /** 實際送進 Op 的範圍：整個結構＝整段（選取本來就只有那段，重播到別的 split 也不會被切掉）。 */
+  const scope: Scope = useMemo(() => {
+    if (scopeMode === 'slice') {
+      const t = cursor[axisIndex(editAxis)];
+      return clampScope({ axis: editAxis, lo: t, hi: t }, vol);
+    }
+    if (scopeMode === 'custom') return clampScope({ axis: editAxis, lo: customRange[0], hi: customRange[1] }, vol);
+    return fullScope(vol, editAxis);
+  }, [scopeMode, editAxis, cursor, customRange, vol]);
+  const setCustom = useCallback(
+    (lo: number, hi: number) => {
+      const c = clampScope({ axis: editAxis, lo, hi }, vol);
+      setCustomRange([c.lo, c.hi]);
+    },
+    [editAxis, vol],
+  );
+  // 換結構時，自訂的兩端夾到結構的範圍裡（完全沒交集就用整個結構）；換軸時舊的數字沒有意義，直接用整個結構
+  const selKey = [...sel].sort().join(',');
+  const rangeAxis = useRef(editAxis);
+  useEffect(() => {
+    if (!selRange) return;
+    if (rangeAxis.current !== editAxis) {
+      rangeAxis.current = editAxis;
+      setCustomRange([selRange[0], selRange[1]]);
+      return;
+    }
+    setCustomRange(([a, b]) => {
+      const lo = Math.max(a, selRange[0]);
+      const hi = Math.min(b, selRange[1]);
+      return lo <= hi ? [lo, hi] : [selRange[0], selRange[1]];
+    });
+    // 只在選取或軸改變時夾；長高之後外框變了不必重夾
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selKey, editAxis]);
+  const affMask = useMemo(() => (selMask ? maskInScope(selMask, vol, scope) : null), [selMask, scope, vol]);
   const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
 
   /** 和原始逐體素比對（Worker），依陣列快取。 */
@@ -222,14 +298,9 @@ export function useEditor() {
       .map((id) => ({ id, name: matName(id), before: counts.before[id], after: counts.after[id] }));
   }, [counts, matName]);
 
-  const setZRange = useCallback(
-    (r: ZRange) => setZRangeRaw([Math.max(0, Math.min(r[0], r[1])), Math.min(vol.Z - 1, Math.max(r[0], r[1]))]),
-    [vol.Z],
-  );
-
   const describe = useCallback(
-    (op: Op, at: Labeled) => opText(op, at, vol.Z, nmPerVoxel, matName),
-    [vol.Z, nmPerVoxel, matName],
+    (op: Op, at: Labeled) => opText(op, at, vol, nmPerVoxel, matName),
+    [vol, nmPerVoxel, matName],
   );
 
   const keepSel = (s: EditState) => setSel((prev) => new Set([...prev].filter((k) => s.L.comps.some((c) => c.key === k))));
@@ -384,7 +455,7 @@ export function useEditor() {
       const prefix = extend && active ? active.ops : [];
       const from = extend && active ? active.cur : orig;
       const voxels = values.map((v) => Math.round(unit === 'nm' ? v / nmPerVoxel : v));
-      const ops = sweepOps(kind, keys, zRange, voxels, follow, backfill);
+      const ops = sweepOps(kind, keys, scope, voxels, follow, backfill);
       const made: Split[] = [];
       for (let i = 0; i < ops.length; i++) {
         const cur = await run(from, [ops[i]], `產生 ${nameOf(values[i])}…`);
@@ -397,7 +468,7 @@ export function useEditor() {
       setLast({ text: `已產生 ${made.length} 個 split`, at: Date.now() });
       return made.map((s) => s.id);
     },
-    [sel, active, orig, zRange, nmPerVoxel, follow, backfill, run],
+    [sel, active, orig, scope, nmPerVoxel, follow, backfill, run],
   );
 
   // ---- 選取 ----
@@ -451,34 +522,34 @@ export function useEditor() {
   const translate = useCallback(
     (d: Vec3) => {
       if (!sel.size || (!d[0] && !d[1] && !d[2])) return;
-      commit({ kind: 'translate', keys: [...sel], zRange, d, backfill });
+      commit({ kind: 'translate', keys: [...sel], scope, d, backfill });
     },
-    [sel, zRange, backfill, commit],
+    [sel, scope, backfill, commit],
   );
   const push = useCallback(
     (dir: Vec3, n: number, local?: Local) => {
       if (!sel.size || !n) return;
-      commit({ kind: 'push', keys: [...sel], zRange, dir, n, follow, backfill, ...(local ? { local } : {}) });
+      commit({ kind: 'push', keys: [...sel], scope, dir, n, follow, backfill, ...(local ? { local } : {}) });
     },
-    [sel, zRange, follow, backfill, commit],
+    [sel, scope, follow, backfill, commit],
   );
   const level = useCallback(
     (dir: Vec3, to: number, local: Local) => {
       if (!sel.size) return;
-      commit({ kind: 'level', keys: [...sel], zRange, dir, to, local, backfill, follow });
+      commit({ kind: 'level', keys: [...sel], scope, dir, to, local, backfill, follow });
     },
-    [sel, zRange, backfill, follow, commit],
+    [sel, scope, backfill, follow, commit],
   );
   /** 3D 筆刷的一筆 → Op（即時預覽和正式套用用同一個）；沒選取或 n = 0 回傳 null。 */
   const opFor = useCallback(
     (s: Sculpt): Op | null => {
       if (!sel.size) return null;
       const keys = [...sel];
-      if (s.kind === 'level') return { kind: 'level', keys, zRange, dir: s.dir, to: s.to, local: s.local, backfill, follow };
+      if (s.kind === 'level') return { kind: 'level', keys, scope, dir: s.dir, to: s.to, local: s.local, backfill, follow };
       if (!s.n) return null;
-      return { kind: 'push', keys, zRange, dir: s.dir, n: s.n, follow, backfill, local: s.local };
+      return { kind: 'push', keys, scope, dir: s.dir, n: s.n, follow, backfill, local: s.local };
     },
-    [sel, zRange, follow, backfill],
+    [sel, scope, follow, backfill],
   );
   const sculpt = useCallback(
     (s: Sculpt) => {
@@ -507,15 +578,15 @@ export function useEditor() {
       const to = levelTarget(dir);
       if (!b || to === null) return;
       const center: Vec3 = [(b.x0 + b.x1) >> 1, (b.y0 + b.y1) >> 1, (b.z0 + b.z1) >> 1];
-      commit({ kind: 'level', keys: [...sel], zRange, dir, to, local: { center, radius: null }, backfill, follow });
+      commit({ kind: 'level', keys: [...sel], scope, dir, to, local: { center, radius: null }, backfill, follow });
     },
-    [selComps, levelTarget, sel, zRange, backfill, follow, commit],
+    [selComps, levelTarget, sel, scope, backfill, follow, commit],
   );
   const setMaterial = useCallback(
     (m: number) => {
-      if (sel.size) commit({ kind: 'material', keys: [...sel], zRange, m });
+      if (sel.size) commit({ kind: 'material', keys: [...sel], scope, m });
     },
-    [sel, zRange, commit],
+    [sel, scope, commit],
   );
 
   // ---- 載入與材質 ----
@@ -540,7 +611,7 @@ export function useEditor() {
       setSel(new Set());
       setHidden(new Set());
       setLast(null);
-      setZRangeRaw([0, v.Z - 1]);
+      setCustomRange([0, axisLen(v, 'z') - 1]);
       setCursor([v.X >> 1, v.Y >> 1, v.Z >> 1]);
       if (m.spacing) setNmPerVoxel(m.unit === 'um' ? m.spacing[0] * 1000 : m.spacing[0]);
     } finally {
@@ -603,7 +674,7 @@ export function useEditor() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement | null)?.closest?.('input,select,textarea,[contenteditable]')) return;
+      if (typingIn(e.target)) return;
       // Modal／Drawer 開著：Esc 關它、Ctrl+Z 留給輸入框，不動模型
       if (overlayOpen()) return;
       const mod = e.ctrlKey || e.metaKey;
@@ -707,8 +778,19 @@ export function useEditor() {
     stepCursor,
     cursorIndex,
     voxelCoord,
-    zRange,
-    setZRange,
+    scope,
+    scopeMode,
+    setScopeMode,
+    editAxis,
+    setEditAxis,
+    customRange,
+    setCustom,
+    selBox,
+    selRange,
+    sculpt3d,
+    setSculpt3d,
+    autoZoom,
+    setAutoZoom,
     follow,
     setFollow,
     backfill,

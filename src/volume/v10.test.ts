@@ -255,7 +255,7 @@ describe('局部凸起', () => {
     const op: Op = {
       kind: 'push',
       keys: [poly.key],
-      zRange: [0, vol.Z - 1],
+      scope: { axis: 'z' as const, lo: 0, hi: vol.Z - 1 },
       dir: [0, -1, 0],
       n: 2,
       follow: false,
@@ -280,13 +280,13 @@ describe('relabel 只重算局部', () => {
     const base: EditState = { vol, L: initialLabeled(vol, matName) };
     const poly = base.L.comps.filter((c) => c.mat === 6);
     const fin = base.L.comps.find((c) => c.mat === 3)!;
-    const full: [number, number] = [0, vol.Z - 1];
+    const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
     const ops: Op[] = [
-      { kind: 'push', keys: [poly[0].key], zRange: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' },
-      { kind: 'translate', keys: [poly[1].key, poly[2].key], zRange: full, d: [3, 0, 0], backfill: 'orig' },
+      { kind: 'push', keys: [poly[0].key], scope: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' },
+      { kind: 'translate', keys: [poly[1].key, poly[2].key], scope: full, d: [3, 0, 0], backfill: 'orig' },
       // 把 fin 中間一段換成 Air：fin 被切成兩塊，一塊沿用 key、一塊取新名
-      { kind: 'material', keys: [fin.key], zRange: [60, 64], m: 0 },
-      { kind: 'push', keys: [poly[2].key], zRange: full, dir: [1, 0, 0], n: -3, follow: false, backfill: 'orig', local: { center: [120, 30, 100], radius: 5 } },
+      { kind: 'material', keys: [fin.key], scope: { axis: 'z' as const, lo: 60, hi: 64 }, m: 0 },
+      { kind: 'push', keys: [poly[2].key], scope: full, dir: [1, 0, 0], n: -3, follow: false, backfill: 'orig', local: { center: [120, 30, 100], radius: 5 } },
     ];
     let a = base;
     let b = base;

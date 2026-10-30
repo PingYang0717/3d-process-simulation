@@ -166,6 +166,33 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .canvas-area[class*="focus-"] .pane-3d .tb-text, .canvas-area[class*="focus-"] .pane-3d .pane-sub, .canvas-area[class*="focus-"] .pane-3d .gizmo,
 .canvas-area[class*="focus-"] .pane-3d .pane-head .tb, .canvas-area[class*="focus-"] .pane-3d .pane-head .ant-segmented { display: none !important; }
 
+/* 2D 編輯：主切面在左邊佔滿，3D 與另外兩張切面是右側小窗（DOM 不動，WebGL 不重建）；窄螢幕沿用上一排／下一排 */
+@media (min-width: 1200px) {
+  .canvas-area.editing { grid-template-columns: minmax(0, 1fr) minmax(220px, 28%); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+  .canvas-area.editing .slice-pane.big { grid-column: 1; grid-row: 1 / -1; }
+  .canvas-area.editing .pane-3d { grid-column: 2; grid-row: 1; }
+  .canvas-area.editing .slice-pane:not(.big) { grid-column: 2; grid-row: auto; }
+}
+.canvas-area.editing .pane-3d .pane-head { flex-wrap: nowrap; overflow: hidden; min-height: 34px; height: 34px; }
+.canvas-area.editing .pane-3d .pane-expand { margin-left: auto; }
+.main-slice .pane-head { gap: 10px; }
+.main-slice .slice-body { padding: 0; }
+.position-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 14px; border-bottom: 1px solid var(--c-border-2); font-size: 12px; background: var(--c-surface); }
+.position-bar .pb-sep { width: 1px; height: 18px; background: var(--c-border-2); }
+.scope-ctl.compact { display: flex; flex-wrap: nowrap; min-width: 0; }
+.scope-ctl .ant-slider-mark-text { font-size: 10px; }
+.tick-gray { display: inline-block; width: 2px; height: 8px; margin-top: -2px; background: var(--c-text-3); border-radius: 1px; opacity: .6; cursor: help; }
+.tick-sel { color: var(--c-primary); }
+.sedit { position: relative; flex: 1; width: 100%; height: 100%; min-height: 0; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none; }
+.sedit-img { position: absolute; box-shadow: 0 0 0 1px rgba(0, 0, 0, .12); }
+.sedit-img canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.sedit-img svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.sedit-zoombar { position: absolute; right: 12px; bottom: 12px; z-index: 3; display: flex; align-items: center; gap: 2px; padding: 3px; background: rgba(255, 255, 255, .94); border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); cursor: default; }
+.sedit-zoombar .ant-btn { padding-inline: 8px; font-size: 12px; color: var(--c-text-soft); }
+.sedit-zoom { min-width: 40px; padding: 0 6px; font-size: 12px; color: var(--c-text-3); font-variant-numeric: tabular-nums; text-align: right; }
+.sedit-hint { position: absolute; left: 12px; bottom: 12px; z-index: 3; max-width: calc(100% - 420px); padding: 3px 10px; background: rgba(255, 255, 255, .9); border-radius: var(--radius); font-size: 11px; color: var(--c-text-2); pointer-events: none; }
+@media (max-width: 1499px) { .sedit-hint { display: none; } }
+
 /* 並排比較 */
 .compare { flex: 1; min-height: 0; overflow: auto; padding: 12px; background: var(--c-bg); }
 .compare-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }

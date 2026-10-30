@@ -1,6 +1,8 @@
 // 體素陣列與所有直接改體素的操作。
 // index = (z·Y + y)·X + x，對應 numpy C order 的 shape (Z, Y, X)。
 
+import { type Scope, axisIndex, scopeBox } from './scope';
+
 export interface Volume {
   X: number;
   Y: number;
@@ -304,13 +306,13 @@ export function localMask(vol: Volume, mask: Uint8Array, dir: Vec3, center: Vec3
  * 補平：筆刷範圍內每一列（沿 dir 軸）的最外側面補到或削到座標 to。
  * 矮的補起來（只填 Air；follow = 前方的薄襯層整列往前推、再填，和推面一樣；碰到厚的材質就停、不吃鄰居）；
  * 高的削掉（回填原始內容；follow = 上面的襯層跟著退回來）。
- * 只動 mask ∩ z 範圍裡的列；其他體素一個都不變。
+ * 只動 mask ∩ scope 裡的列；其他體素一個都不變。
  */
 export function levelMask(
   vol: Volume,
   orig: Volume,
   mask: Uint8Array,
-  zRange: ZRange,
+  scope: Scope,
   dir: Vec3,
   center: Vec3,
   r: number,
@@ -336,7 +338,8 @@ export function levelMask(
   const coord = (a: number, b: number, t: number): Vec3 => (axis === 0 ? [t, a, b] : axis === 1 ? [a, t, b] : [a, b, t]);
   const A = axis === 0 ? Y : X;
   const B = axis === 2 ? Y : Z;
-  const inZ = (c: Vec3) => c[2] >= zRange[0] && c[2] <= zRange[1];
+  const sa = axisIndex(scope.axis);
+  const inZ = (c: Vec3) => c[sa] >= scope.lo && c[sa] <= scope.hi;
   for (let b = 0; b < B; b++)
     for (let a = 0; a < A; a++) {
       const c0 = coord(a, b, 0);
@@ -407,7 +410,7 @@ export function translateMask(
   vol: Volume,
   orig: Volume,
   mask: Uint8Array,
-  zRange: ZRange,
+  scope: Scope,
   d: Vec3,
   backfill: Backfill,
 ): Volume {
@@ -415,9 +418,11 @@ export function translateMask(
   const out = new Uint8Array(vol.data);
   const moved: number[] = [];
   const mats: number[] = [];
-  for (let z = zRange[0]; z <= zRange[1]; z++)
-    for (let y = 0; y < Y; y++)
-      for (let x = 0; x < X; x++) {
+  const b = scopeBox(vol, scope);
+  if (b)
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++)
+      for (let x = b.x0; x <= b.x1; x++) {
         const i = (z * Y + y) * X + x;
         if (!mask[i]) continue;
         moved.push(i);
@@ -434,13 +439,15 @@ export function translateMask(
   return { X, Y, Z, data: out };
 }
 
-/** 換材質：只改 mask ∩ z 範圍。 */
-export function setMaskMaterial(vol: Volume, mask: Uint8Array, zRange: ZRange, mat: number): Volume {
+/** 換材質：只改 mask ∩ scope。 */
+export function setMaskMaterial(vol: Volume, mask: Uint8Array, scope: Scope, mat: number): Volume {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(vol.data);
-  for (let z = zRange[0]; z <= zRange[1]; z++)
-    for (let y = 0; y < Y; y++)
-      for (let x = 0; x < X; x++) {
+  const b = scopeBox(vol, scope);
+  if (b)
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++)
+      for (let x = b.x0; x <= b.x1; x++) {
         const i = (z * Y + y) * X + x;
         if (mask[i]) out[i] = mat;
       }
@@ -531,7 +538,7 @@ export function growMask(
   vol: Volume,
   orig: Volume,
   mask: Uint8Array,
-  zRange: ZRange,
+  scope: Scope,
   dir: Vec3,
   n: number,
   backfill: Backfill,
@@ -540,14 +547,16 @@ export function growMask(
   let cur = vol;
   let m = new Uint8Array(mask);
   const { X, Y, Z } = vol;
+  const sb = scopeBox(vol, scope);
+  if (!sb) return vol;
   for (let step = 0; step < Math.abs(n); step++) {
     const out = new Uint8Array(cur.data);
     const d: Vec3 = n > 0 ? dir : [-dir[0], -dir[1], -dir[2]];
     if (n > 0) {
       const front = shiftMask(cur, outerFace(cur, m, d), d);
-      for (let z = zRange[0]; z <= zRange[1]; z++)
-        for (let y = 0; y < Y; y++)
-          for (let x = 0; x < X; x++) {
+      for (let z = sb.z0; z <= sb.z1; z++)
+        for (let y = sb.y0; y <= sb.y1; y++)
+          for (let x = sb.x0; x <= sb.x1; x++) {
             const i = (z * Y + y) * X + x;
             if (!front[i] || m[i]) continue;
             const src = (z - d[2]) * X * Y + (y - d[1]) * X + (x - d[0]);
@@ -570,9 +579,9 @@ export function growMask(
       // d 指向要退的方向（dir 的反向）；要退掉的是 dir 方向最外側那一層
       const back: Vec3 = [-d[0], -d[1], -d[2]];
       const face = outerFace(cur, m, back);
-      for (let z = zRange[0]; z <= zRange[1]; z++)
-        for (let y = 0; y < Y; y++)
-          for (let x = 0; x < X; x++) {
+      for (let z = sb.z0; z <= sb.z1; z++)
+        for (let y = sb.y0; y <= sb.y1; y++)
+          for (let x = sb.x0; x <= sb.x1; x++) {
             const i = (z * Y + y) * X + x;
             if (!face[i]) continue;
             const mat = cur.data[i];

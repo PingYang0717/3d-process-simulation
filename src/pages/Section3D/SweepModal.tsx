@@ -53,7 +53,7 @@ export function SweepModal({
   const verb = kind === 'move' ? `${dir.name}移` : `${dir.name}長`;
   const nameOf = (v: number) => `${prefix || who} ${verb} ${v > 0 ? '+' : ''}${v}${unit}`;
   const toVx = (v: number) => Math.round(unit === 'nm' ? v / ed.nmPerVoxel : v);
-  const whole = ed.zRange[0] === 0 && ed.zRange[1] === ed.vol.Z - 1;
+  const whole = ed.scopeMode === 'whole';
 
   const ok = () => {
     if (!values.length) {
@@ -94,7 +94,7 @@ export function SweepModal({
                 {who}
               </Tag>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {whole ? '整塊' : `只改 z ${ed.zRange[0]}～${ed.zRange[1]}`}。要換，關掉視窗後在 3D 或左邊清單重選（Shift 多選）。
+                {whole ? '整塊' : `只改 ${ed.scope.axis} ${ed.scope.lo}～${ed.scope.hi}`}。要換，關掉視窗後在 3D 或左邊清單重選（Shift 多選）。
               </Text>
             </Flex>
           ) : (

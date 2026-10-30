@@ -18,7 +18,6 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
   const diffs = useSplitDiffs(ed);
   const focus = ed.selComps[0];
   const nm = ed.nmPerVoxel;
-  const full: [number, number] = [0, ed.vol.Z - 1];
 
   return (
     <div className="compare">
@@ -99,7 +98,7 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
                   hidden={ed.hidden}
                   selMask={null}
                   cursor={ed.cursor}
-                  zRange={full}
+                  scope={null}
                   diff={showDiff && diff ? diff.mask : null}
                   onPick={(p) => ed.setCursor(p)}
                   onStep={(d) => ed.stepCursor(axis, d)}

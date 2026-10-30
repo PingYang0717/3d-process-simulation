@@ -1,11 +1,12 @@
 // Web Worker：所有 O(N) 的運算（標記、重播操作＋relabel、網格、diff、計數）都在這裡，主執行緒只畫畫面。
 // 狀態常駐在 Worker：原始與每個 split 目前的結果用編號（sid）存著，主執行緒只送編號與小資料，
 // 不必每一步都把幾百 MB 的陣列複製過來。結果先在 Worker 裡複製一份（memcpy）再 transfer 回去。
-import { type BBox, type Comp, type MeshData, type RawComp, type Volume, type ZRange, DIFF_BIT, greedyMesh, labelComponents } from './volume';
+import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, greedyMesh, labelComponents } from './volume';
+import { type Scope, clipBox } from './scope';
 import { type Op, replay } from './ops';
 
 /** 網格只畫一部分：選取（結構編號 ∩ z 範圍，box = 它們的外框）或某個材質（空洞層）。 */
-export type Only = { comps: number[]; zRange: ZRange; box: BBox } | { mat: number };
+export type Only = { comps: number[]; scope: Scope; box: BBox } | { mat: number };
 
 export interface Requests {
   /** 載入原始：存起來並標記結構；之前的狀態全部丟掉。 */
@@ -168,9 +169,7 @@ const handlers: { [K in Kind]: Handler<K> } = {
         const on = new Uint8Array(Math.max(1, ...only.comps.map((c) => c + 1)));
         only.comps.forEach((c) => (on[c] = 1));
         test = (i) => labels[i] >= 0 && on[labels[i]] === 1;
-        const z0 = Math.max(only.box.z0, only.zRange[0]);
-        const z1 = Math.min(only.box.z1, only.zRange[1]);
-        box = z0 <= z1 ? { ...only.box, z0, z1 } : null;
+        box = clipBox(only.box, only.scope);
       }
       const m = box ? meshInBox(vol, box, test, tint ?? [0.09, 0.47, 1]) : emptyMesh();
       if (inflate) for (let i = 0; i < m.positions.length; i++) m.positions[i] += m.normals[i] * inflate;

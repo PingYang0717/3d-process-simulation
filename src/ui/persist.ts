@@ -39,3 +39,10 @@ function isSameShape<T>(sample: T) {
 /** 有 Modal 或 Drawer 開著：單鍵快捷鍵（B、D、1～4…）先不要動 3D。 */
 export const overlayOpen = () =>
   !!document.querySelector('.ant-drawer-open, .ant-modal-wrap:not([style*="display: none"])');
+
+/** 鍵盤事件來自打字的地方（文字輸入框、下拉、可編輯區）：單鍵快捷鍵不要搶。單選鈕、勾選框不算。 */
+export const typingIn = (t: EventTarget | null) => {
+  const el = (t as HTMLElement | null)?.closest?.('input,select,textarea,[contenteditable]') as HTMLInputElement | null;
+  if (!el) return false;
+  return !(el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox'));
+};

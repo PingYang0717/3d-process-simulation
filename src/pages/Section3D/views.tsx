@@ -36,7 +36,6 @@ import {
   type MeshData,
   type Vec3,
   type Volume,
-  type ZRange,
   DIFF_BIT,
   VOID,
   directionName,
@@ -51,6 +50,7 @@ import type { Preview } from '../../volume/preview';
 import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
 
 export type { Sculpt } from './editor';
+import { type Scope, axisLen } from '../../volume/scope';
 
 const SEL_RGB: Vec3 = [22, 119, 255];
 /** 選取層沿法線外推的量：固定值，相機再遠也不會和主網格共面閃爍。 */
@@ -302,7 +302,7 @@ export function View3D({
   hidden,
   selMask,
   selComps,
-  zRange,
+  scope,
   selBBox,
   cursor,
   clip,
@@ -333,7 +333,8 @@ export function View3D({
   selMask: Uint8Array | null;
   /** 選取結構的編號（L.comps 的 index），Worker 依它畫選取層。 */
   selComps: number[] | null;
-  zRange: ZRange;
+  /** 範圍：選取層只畫 scope 裡的部分。 */
+  scope: Scope;
   selBBox: BBox | null;
   cursor: Vec3;
   clip: Clip | null;
@@ -854,14 +855,14 @@ export function View3D({
     c.selBox.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
     c.selBox.visible = true;
     const tint = SEL_RGB.map((v) => v / 255) as Vec3;
-    const only = { comps: selComps, zRange, box: b };
+    const only = { comps: selComps, scope, box: b };
     call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint, inflate: INFLATE }).then((m) => {
       if (seq !== selSeq.current || !ctxRef.current) return;
       c.selFill.geometry.dispose();
       c.selFill.geometry = toGeometry(m);
       c.selFill.visible = true;
     });
-  }, [state, selComps, zRange, selBBox]);
+  }, [state, selComps, scope, selBBox]);
 
   /** 剖面的世界座標平面；null = 不剖。 */
   const clipPlane = (cl: Clip | null) => {
@@ -1513,7 +1514,7 @@ export function SliceView({
   hidden,
   selMask,
   cursor,
-  zRange,
+  scope,
   diff,
   preview,
   onPick,
@@ -1527,7 +1528,8 @@ export function SliceView({
   hidden: Set<number>;
   selMask: Uint8Array | null;
   cursor: Vec3;
-  zRange: ZRange;
+  /** 範圍；沿別的軸時在切面上畫藍色虛線框（null = 不畫）。 */
+  scope: Scope | null;
   diff: Uint8Array | null;
   /** 即時預覽蓋在切面上（index 只在它根據的陣列還是這份時才傳）。 */
   preview?: Preview | null;
@@ -1579,9 +1581,11 @@ export function SliceView({
     return u >= 0 && v >= 0 && u < W && v < H ? toVoxel(u, v) : null;
   };
 
-  const partial = axis !== 'z' && (zRange[0] > 0 || zRange[1] < vol.Z - 1);
-  const z0 = zRange[0];
-  const z1 = zRange[1] + 1;
+  const partial = !!scope && scope.axis !== axis && (scope.lo > 0 || scope.hi < axisLen(vol, scope.axis) - 1);
+  const z0 = scope?.lo ?? 0;
+  const z1 = (scope?.hi ?? 0) + 1;
+  // scope 的軸在切面上是橫的（u）還是直的（v）
+  const vertical = !!scope && (axis === 'y' ? scope.axis === 'z' : axis === 'z' ? scope.axis === 'y' : scope.axis === 'y');
   const frame = { fill: 'var(--c-primary)', fillOpacity: 0.08, stroke: 'var(--c-primary)', strokeWidth: 1, strokeDasharray: '3 3', vectorEffect: 'non-scaling-stroke' } as const;
 
   return (
@@ -1605,7 +1609,7 @@ export function SliceView({
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
         >
           {partial &&
-            (axis === 'y' ? (
+            (vertical ? (
               <rect x={0} y={z0} width={W} height={z1 - z0} {...frame} />
             ) : (
               <rect x={z0} y={0} width={z1 - z0} height={H} {...frame} />

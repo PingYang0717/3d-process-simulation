@@ -46,6 +46,11 @@ export function upgradeOp(op: Op | LegacyOp): Op {
 export interface EditState {
   vol: Volume;
   L: Labeled;
+  /**
+   * 版本號：同一個號碼＝同一份體素與 labels（Worker 常駐狀態、網格、diff、計數的快取 key）。
+   * 主執行緒的狀態都有；純函式（applyOp／replay）不看它，結果也不帶。
+   */
+  version?: number;
 }
 
 export interface OpContext {

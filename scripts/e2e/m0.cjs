@@ -91,9 +91,16 @@ const ok = (cond, msg) => {
   ok(true, `套用訊息帶範圍「x ${lo}～${hi}」`);
   await page.waitForFunction(() => /已改動/.test(document.querySelector('.insp-foot')?.textContent ?? ''), null, { timeout: 30000 });
   const changed = Number((await page.locator('.insp-foot').innerText()).replace(/[^0-9]/g, ''));
-  ok(changed > 0 && changed < 144 * 24, `只改到範圍裡的那一段（${changed} voxels）`);
+  ok(changed === 2304, `只改到範圍裡的那一段（${changed} voxels）`);
   if (shots) await page.screenshot({ path: `${shots}/m0-custom.png` });
   await page.keyboard.press('Control+z');
+  await page.waitForFunction(() => /尚未改動/.test(document.querySelector('.insp-foot')?.textContent ?? ''), null, { timeout: 30000 });
+  ok(true, 'Ctrl+Z 回到原始（改動 0）');
+  await page.keyboard.press('Control+y');
+  await page.waitForFunction(() => /已改動 2,304/.test(document.querySelector('.insp-foot')?.textContent ?? ''), null, { timeout: 30000 });
+  ok(true, 'Ctrl+Y 重做（改動回到 2,304）');
+  await page.keyboard.press('Control+z');
+  await page.waitForFunction(() => /尚未改動/.test(document.querySelector('.insp-foot')?.textContent ?? ''), null, { timeout: 30000 });
   await page.locator('.position-bar .ant-segmented-item', { hasText: '整個結構' }).click();
   await page.keyboard.press('Escape');
 

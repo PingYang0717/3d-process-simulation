@@ -572,7 +572,7 @@ M3
 
 ### M1 Worker 區域性運算與 chunk 網格（總量 L）
 
-- [ ] S　8.1 版本號（單獨 PR，不改行為）
+- [x] S　8.1 版本號（單獨 PR，不改行為）：`EditState.version`、`client.ts` 以版本號當 sid、diff／count／網格快取改用版本號；`worker.test.ts`
 - [ ] M　7.2 核心 ＋ 三個函式改寫（對照舊實作的測試）
 - [ ] M　8.2 `apply` 只在外框裡算、回補丁、relabel 吃外框
 - [ ] S　8.3 補丁式復原、HISTORY_LIMIT 50

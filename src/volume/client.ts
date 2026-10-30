@@ -37,27 +37,34 @@ export function call<K extends Kind>(type: K, req: Requests[K]['req'], transfer:
   });
 }
 
-// ---- 常駐狀態：體素陣列 → 編號（sid） ----
+// ---- 常駐狀態：版本號（version）＝ Worker 裡的編號（sid） ----
+// 版本號全域單調遞增：每個新的體素狀態（載入、每一步的結果）拿一個新號碼；改名、改色不換號碼。
+// 以前用陣列身分當 key；之後補丁式更新會原地改陣列，所以改用版本號（plan v7 §8.1）。
 
-const sids = new WeakMap<Uint8Array, number>();
 const resident = new Set<number>();
 /** 已送出、結果還沒回來的編號；retain 時要一起留著。 */
 const inflight = new Set<number>();
-let nextSid = 1;
+let nextVersion = 1;
+/** 沒帶版本號的狀態（測試、舊程式碼）退回用陣列身分配號。 */
+const fallback = new WeakMap<Uint8Array, number>();
 
-/** 每個體素陣列一個編號（同一份陣列＝同一個狀態，改名只換 comps 不換陣列）。 */
-export function sidOf(data: Uint8Array) {
-  let id = sids.get(data);
+/** 下一個版本號。 */
+export const newVersion = () => nextVersion++;
+
+/** 狀態的版本號（＝ Worker 裡的 sid）。 */
+export function sidOf(s: Pick<EditState, 'vol' | 'version'>) {
+  if (s.version !== undefined) return s.version;
+  let id = fallback.get(s.vol.data);
   if (!id) {
-    id = nextSid++;
-    sids.set(data, id);
+    id = nextVersion++;
+    fallback.set(s.vol.data, id);
   }
   return id;
 }
 
 /** 確保 Worker 有這個狀態；沒有就補送（只有復原回來的舊步驟會走到）。 */
 export function ensure(s: EditState) {
-  const id = sidOf(s.vol.data);
+  const id = sidOf(s);
   if (!resident.has(id) && !inflight.has(id)) {
     resident.add(id);
     call('put', { sid: id, vol: s.vol, labels: s.L.labels });
@@ -65,25 +72,25 @@ export function ensure(s: EditState) {
   return id;
 }
 
-/** 載入新的原始陣列：Worker 標記結構，之前的狀態全部丟掉。 */
+/** 載入新的原始陣列：Worker 標記結構，之前的狀態全部丟掉。回傳的 version 是原始的版本號。 */
 export async function loadOrig(vol: EditState['vol']) {
-  const sid = sidOf(vol.data);
+  const sid = newVersion();
   resident.clear();
   inflight.clear();
   resident.add(sid);
-  return call('load', { sid, vol });
+  const r = await call('load', { sid, vol });
+  return { ...r, version: sid };
 }
 
-/** 在 Worker 裡從 from 重播 ops，結果留在 Worker，複本回到主執行緒。 */
+/** 在 Worker 裡從 from 重播 ops，結果留在 Worker（新的版本號），複本回到主執行緒。 */
 export async function replayIn(from: EditState, req: Omit<Requests['replay']['req'], 'from' | 'to' | 'comps'>) {
   const fromId = ensure(from);
-  const to = nextSid++;
+  const to = newVersion();
   inflight.add(to);
   try {
     const r = await call('replay', { ...req, from: fromId, to, comps: from.L.comps });
-    sids.set(r.data, to);
     resident.add(to);
-    return r;
+    return { ...r, version: to };
   } finally {
     inflight.delete(to);
   }
@@ -91,7 +98,7 @@ export async function replayIn(from: EditState, req: Omit<Requests['replay']['re
 
 /** 只留這些狀態在 Worker（原始一定留著）；復原用的舊步驟之後要用再補送。 */
 export function retain(states: EditState[]) {
-  const keep = new Set(states.map((s) => sidOf(s.vol.data)));
+  const keep = new Set(states.map(sidOf));
   for (const id of resident) if (!keep.has(id)) resident.delete(id);
   call('retain', { sids: [...keep, ...inflight] });
 }

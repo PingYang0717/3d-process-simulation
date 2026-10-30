@@ -34,6 +34,7 @@ import { type Op, type SelectMode, slicesWith, useEditor } from './editor';
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
 import { axisIndex, clipBox } from '../../volume/scope';
 import { type Preview, previewOp } from '../../volume/preview';
+import { sidOf } from '../../volume/client';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceEditor, SliceView, View3D } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
@@ -106,7 +107,8 @@ const voxelCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : `${(
  */
 const LIVE_PREVIEW_CAP = 400_000;
 const COMMIT_PREVIEW_CAP = 6_000_000;
-type PV = Preview & { base: Uint8Array; committed: boolean };
+/** base = 預覽根據的狀態版本號。 */
+type PV = Preview & { base: number; committed: boolean };
 
 /** 3D 雕刻關著時給 View3D 的筆刷：拖拉一律轉視角。 */
 const OFF_BRUSH = { mode: 'off' as const, radius: 6, shape: 'round' as const };
@@ -172,7 +174,7 @@ export default function Section3DPage() {
   const makePreview = (op: Op, cap: number, committed: boolean) => {
     if (mode !== 'now' || op.kind === 'material') return false;
     const p = previewOp(ed.cur, ed.orig.vol, op, cap);
-    setPv(p ? { ...p, base: ed.cur.vol.data, committed } : null);
+    setPv(p ? { ...p, base: sidOf(ed.cur), committed } : null);
     return !!p;
   };
   // 每一步送 Worker 前先預覽（按鈕、方向鍵、筆刷放開都走 commit）
@@ -181,11 +183,11 @@ export default function Section3DPage() {
   });
   // 計算結束但狀態沒變（失敗或沒改到）：預覽收掉；換檔案也收掉
   useEffect(() => {
-    if (!ed.busy && pv?.committed && pv.base === ed.cur.vol.data) setPv(null);
+    if (!ed.busy && pv?.committed && pv.base === sidOf(ed.cur)) setPv(null);
   }, [ed.busy, ed.cur, pv]);
   useEffect(() => setPv(null), [ed.orig, mode]);
   /** 切面要畫的預覽：只有根據的陣列還是現在這份才有效（正式結果到了切面本來就會重畫）。 */
-  const slicePv = pv && pv.base === ed.cur.vol.data && mode === 'now' ? pv : null;
+  const slicePv = pv && pv.base === sidOf(ed.cur) && mode === 'now' ? pv : null;
 
   const cursorAt = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
   const axisMax = (a: Axis) => (a === 'x' ? ed.vol.X : a === 'y' ? ed.vol.Y : ed.vol.Z) - 1;

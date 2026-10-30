@@ -348,7 +348,8 @@ export function View3D({
   /** 原始陣列（預覽裡改過的體素混紅用）。 */
   orig: Volume | null;
   /** 即時預覽（主執行緒裁切重算的結果，base = 它根據的陣列）；null = 沒有。網格在這裡畫，正式網格到了就收掉。 */
-  preview: (Preview & { base: Uint8Array }) | null;
+  /** base = 預覽根據的狀態版本號（sidOf）。 */
+  preview: (Preview & { base: number }) | null;
   /** 拖拉中每改一格就要一次預覽；null = 收掉。回傳 false 表示範圍太大沒算（改畫橘色塊）。 */
   onPreview: (op: Op | null) => boolean;
   /** 筆刷的一筆 → 完整 Op（補上選取、z 範圍、襯層設定）。 */
@@ -707,7 +708,7 @@ export function View3D({
     if (!c) return;
     const seq = ++meshSeq.current;
     setMeshing(true);
-    const base = [sidOf(state.vol.data), [...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
+    const base = [sidOf(state), [...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
     const swap = (m: MeshData) => {
       const g = toGeometry(m);
       if (m.quads) g.boundsTree = new MeshBVH(g);
@@ -757,7 +758,7 @@ export function View3D({
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
-    if (!preview || preview.base !== state.vol.data || mode === 'diff') {
+    if (!preview || preview.base !== sidOf(state) || mode === 'diff') {
       hidePreview(c);
       return;
     }
@@ -885,7 +886,7 @@ export function View3D({
       return;
     }
     const cv = document.createElement('canvas');
-    const patch = preview && preview.base === vol.data && mode === 'now' ? preview : null;
+    const patch = preview && preview.base === sidOf(state) && mode === 'now' ? preview : null;
     drawSlice(cv, vol, clip.axis, clip.at, rgb, hidden, mode === 'orig' ? null : selMask, mode === 'orig' ? null : diffMask, patch);
     const tex = new CanvasTexture(cv);
     tex.magFilter = NearestFilter;

@@ -66,7 +66,7 @@ export interface Brush {
 }
 /** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
-import { call, ensure, loadOrig, replayIn, retain } from '../../volume/client';
+import { call, ensure, loadOrig, replayIn, retain, sidOf } from '../../volume/client';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
@@ -104,18 +104,24 @@ export interface Diff {
 export const BASE_ID = 'base';
 /** 每個 split 留幾步 Undo（大陣列一步就是幾十 MB）。 */
 const HISTORY_LIMIT = 10;
-const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] } };
+const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] }, version: 0 };
 
-// diff 與各材質體積依體素陣列快取：同一個 split 的結果不重算
-const diffCache = new WeakMap<Uint8Array, Promise<Diff>>();
-const countCache = new WeakMap<Uint8Array, Promise<number[]>>();
+// diff 與各材質體積依版本號快取：同一個狀態不重算；不在記憶體裡的版本由 pruneCaches 丟掉
+const diffCache = new Map<number, Promise<Diff>>();
+const countCache = new Map<number, Promise<number[]>>();
 const countOf = (s: EditState) => {
-  let p = countCache.get(s.vol.data);
+  const v = sidOf(s);
+  let p = countCache.get(v);
   if (!p) {
     p = call('count', { sid: ensure(s) });
-    countCache.set(s.vol.data, p);
+    countCache.set(v, p);
   }
   return p;
+};
+/** 只留還在用的版本（原始、每個 split 目前的結果與復原／重做堆疊裡的）。 */
+const pruneCaches = (alive: Set<number>) => {
+  for (const k of diffCache.keys()) if (!alive.has(k)) diffCache.delete(k);
+  for (const k of countCache.keys()) if (!alive.has(k)) countCache.delete(k);
 };
 
 // ---- useEditor ----
@@ -235,12 +241,12 @@ export function useEditor() {
   /** 和原始逐體素比對（Worker），依陣列快取。 */
   const diffOf = useCallback(
     (s: EditState): Promise<Diff> => {
-      const v = s.vol;
-      if (v.data === orig.vol.data) return Promise.resolve({ mask: new Uint8Array(v.data.length), count: 0 });
-      let p = diffCache.get(v.data);
+      const v = sidOf(s);
+      if (v === sidOf(orig)) return Promise.resolve({ mask: new Uint8Array(s.vol.data.length), count: 0 });
+      let p = diffCache.get(v);
       if (!p) {
         p = call('diff', { sid: ensure(s) });
-        diffCache.set(v.data, p);
+        diffCache.set(v, p);
       }
       return p;
     },
@@ -249,7 +255,11 @@ export function useEditor() {
 
   // Worker 只留原始與每個 split 目前的結果；復原用的舊步驟要用時再補送
   useEffect(() => {
-    if (origState) retain([origState, ...splits.map((s) => s.cur)]);
+    if (!origState) return;
+    retain([origState, ...splits.map((s) => s.cur)]);
+    const alive = new Set<number>([sidOf(origState)]);
+    for (const s of splits) for (const x of [s.cur, ...s.hist.map((h) => h.snap), ...s.future.map((h) => h.snap)]) alive.add(sidOf(x));
+    pruneCaches(alive);
   }, [origState, splits]);
 
   // 目前 split 的 diff 與各材質體積
@@ -313,7 +323,11 @@ export function useEditor() {
       try {
         const r = await replayIn(from, { ops, matNames, keyCounter: keySeq.current });
         keySeq.current = r.keyCounter;
-        const next: EditState = { vol: { X: from.vol.X, Y: from.vol.Y, Z: from.vol.Z, data: r.data }, L: { labels: r.labels, comps: r.comps } };
+        const next: EditState = {
+          vol: { X: from.vol.X, Y: from.vol.Y, Z: from.vol.Z, data: r.data },
+          L: { labels: r.labels, comps: r.comps },
+          version: r.version,
+        };
         // 先排 diff 與計數，讓「改動」數字比重畫 3D 早出來
         diffOf(next);
         countOf(next);
@@ -597,13 +611,13 @@ export function useEditor() {
     setBusy('分析結構中…');
     running.current = true;
     try {
-      const { labels, raw } = await loadOrig(v);
+      const { labels, raw, version } = await loadOrig(v);
       // 每個非 0 編號至少有一塊結構，所以從結構清單就知道有哪些材質
       let table = materialsFor(raw.map((r) => r.mat));
       if (mats) table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
       setMaterials(table);
       setMeta(m);
-      setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) } });
+      setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) }, version });
       keySeq.current = 1000;
       splitSeq.current = 1;
       setSplits([]);

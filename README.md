@@ -54,7 +54,7 @@ npm run build      # 型別檢查 + 打包
 
 ## 大陣列的效能
 
-- **Worker 常駐狀態**：原始與每個 split 目前的結果放在 Worker，一步操作只送編號、ops 與結構清單；結果在 Worker 複製後 transfer 回來。復原用的舊步驟只在主執行緒，要用時才補送。
+- **Worker 常駐狀態**：原始與每個 split 目前的結果放在 Worker，用版本號（`EditState.version`，全域遞增；改名不換號）當編號與 diff／計數／網格快取的 key；一步操作只送編號、ops 與結構清單；結果在 Worker 複製後 transfer 回來。復原用的舊步驟只在主執行緒，要用時才補送。
 - **relabel 只重算改到的地方**：找出和上一步不同的外框，只重算碰到它的結構；測試驗證和整個重算逐體素相同。
 - **網格**：選取層、空洞層只在外框裡做 greedy mesh；主網格保留最近 6 個（復原、看原始、切 split 不重算）。
 - **點選**：three-mesh-bvh。

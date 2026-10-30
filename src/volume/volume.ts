@@ -274,24 +274,94 @@ export function voxelFromHit(vol: Volume, point: Vec3, normal: Vec3) {
   return inside(vol, x, y, z) ? (z * vol.Y + y) * vol.X + x : -1;
 }
 
+export type BrushShape = 'round' | 'square';
+
+/** 筆刷範圍：垂直於 dir 軸的平面上，離 center 在半徑 r 以內（圓）或 |da|,|db| ≤ r（方）；r = Infinity 表示整面。 */
+export const inBrush = (axis: number, center: Vec3, r: number, shape: BrushShape, x: number, y: number, z: number) => {
+  if (!isFinite(r)) return true;
+  const a = axis === 0 ? y - center[1] : x - center[0];
+  const b = axis === 2 ? y - center[1] : z - center[2];
+  return shape === 'square' ? Math.abs(a) <= r && Math.abs(b) <= r : a * a + b * b <= r * r;
+};
+
 /**
- * 局部凸起：只留下沿 dir 軸、離 center 在半徑 r 以內的那些列（垂直於 dir 的平面上量距離）。
+ * 局部雕刻：只留下沿 dir 軸、筆刷範圍內的那些列。
  */
-export function localMask(vol: Volume, mask: Uint8Array, dir: Vec3, center: Vec3, r: number) {
+export function localMask(vol: Volume, mask: Uint8Array, dir: Vec3, center: Vec3, r: number, shape: BrushShape = 'round') {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(mask.length);
   const axis = dir[0] ? 0 : dir[1] ? 1 : 2;
-  const r2 = r * r;
   for (let z = 0; z < Z; z++)
     for (let y = 0; y < Y; y++)
       for (let x = 0; x < X; x++) {
         const i = (z * Y + y) * X + x;
-        if (!mask[i]) continue;
-        const a = axis === 0 ? y - center[1] : x - center[0];
-        const b = axis === 2 ? y - center[1] : z - center[2];
-        if (a * a + b * b <= r2) out[i] = 1;
+        if (mask[i] && inBrush(axis, center, r, shape, x, y, z)) out[i] = 1;
       }
   return out;
+}
+
+/**
+ * 補平：筆刷範圍內每一列（沿 dir 軸）的最外側面補到或削到座標 to。
+ * 矮的補起來（只填 Air，碰到別的材質就停、不吃鄰居）；高的削掉（回填原始內容）。
+ * 只動 mask ∩ z 範圍裡的列；其他體素一個都不變。
+ */
+export function levelMask(
+  vol: Volume,
+  orig: Volume,
+  mask: Uint8Array,
+  zRange: ZRange,
+  dir: Vec3,
+  center: Vec3,
+  r: number,
+  shape: BrushShape,
+  to: number,
+  backfill: Backfill,
+): Volume {
+  const { X, Y, Z } = vol;
+  const out = new Uint8Array(vol.data);
+  const axis = dir[0] ? 0 : dir[1] ? 1 : 2;
+  const sign = dir[0] + dir[1] + dir[2];
+  const len = axis === 0 ? X : axis === 1 ? Y : Z;
+  const at =
+    axis === 0
+      ? (a: number, b: number, t: number) => (b * Y + a) * X + t
+      : axis === 1
+        ? (a: number, b: number, t: number) => (b * Y + t) * X + a
+        : (a: number, b: number, t: number) => (t * Y + b) * X + a;
+  const coord = (a: number, b: number, t: number): Vec3 => (axis === 0 ? [t, a, b] : axis === 1 ? [a, t, b] : [a, b, t]);
+  const A = axis === 0 ? Y : X;
+  const B = axis === 2 ? Y : Z;
+  const inZ = (c: Vec3) => c[2] >= zRange[0] && c[2] <= zRange[1];
+  for (let b = 0; b < B; b++)
+    for (let a = 0; a < A; a++) {
+      const c0 = coord(a, b, 0);
+      if (!inBrush(axis, center, r, shape, c0[0], c0[1], c0[2])) continue;
+      // 這一列最外側（沿 dir）的 mask 體素
+      let outer = -1;
+      for (let t = 0; t < len; t++) if (mask[at(a, b, t)] && inZ(coord(a, b, t)) && (sign > 0 || outer < 0)) outer = t;
+      if (outer < 0) continue;
+      const mat = vol.data[at(a, b, outer)];
+      const gap = (to - outer) * sign;
+      if (gap > 0) {
+        // 補：從 outer 往 dir 走到 to，只填 Air
+        for (let k = 1; k <= gap; k++) {
+          const t = outer + k * sign;
+          if (t < 0 || t >= len) break;
+          const i = at(a, b, t);
+          if (!inZ(coord(a, b, t)) || vol.data[i] !== AIR) break;
+          out[i] = mat;
+        }
+      } else if (gap < 0) {
+        // 削：從 outer 往回退到 to+1
+        for (let k = 0; k < -gap; k++) {
+          const t = outer - k * sign;
+          const i = at(a, b, t);
+          if (!mask[i] || !inZ(coord(a, b, t))) continue;
+          out[i] = fillAt(orig, i, vol.data[i], backfill);
+        }
+      }
+    }
+  return { X, Y, Z, data: out };
 }
 
 /** 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。 */

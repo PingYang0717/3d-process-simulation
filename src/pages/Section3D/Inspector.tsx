@@ -39,7 +39,7 @@ function PushRow({ ed }: { ed: Editor }) {
         {steps < 0 ? `${dir.name}縮 ${-steps} 格` : `${dir.name}長 ${steps} 格`}（{(Math.abs(steps) * ed.nmPerVoxel).toFixed(1)} nm）
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        只推那一面；套用後選取保留，可以連續按。
+        整面一起推；套用後選取保留，可以連續按。局部的凸起、補平請在 3D 上用筆刷。
       </Text>
     </Flex>
   );
@@ -83,17 +83,17 @@ function MoveRow({ ed }: { ed: Editor }) {
   );
 }
 
-function MaterialRow({ ed, value }: { ed: Editor; value?: number }) {
+function MaterialRow({ ed, value, onMaterial }: { ed: Editor; value?: number; onMaterial: (id: number) => void }) {
   return (
     <Space.Compact style={{ width: '100%' }}>
       <Select
         style={{ flex: 1 }}
         value={value}
         placeholder="多種材質"
-        onChange={(m) => ed.setMaterial(m)}
+        onChange={(m) => onMaterial(m)}
         options={ed.materials.filter((m) => m.id !== 0).map((m) => ({ value: m.id, label: <MatLabel mat={m} /> }))}
       />
-      <Button onClick={() => ed.setMaterial(254)}>設為 VOID</Button>
+      <Button onClick={() => onMaterial(254)}>設為 VOID</Button>
     </Space.Compact>
   );
 }
@@ -156,7 +156,7 @@ function ZRangeRow({ ed }: { ed: Editor }) {
 }
 
 /** 右欄「選取與調整」。 */
-export function Inspector({ ed }: { ed: Editor }) {
+export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: number) => void }) {
   const nm = ed.nmPerVoxel;
   const sel = ed.selComps;
   if (!sel.length)
@@ -168,7 +168,7 @@ export function Inspector({ ed }: { ed: Editor }) {
             <b>選取</b>　在 3D 或切面點一塊，或點左邊清單。<kbd>Shift</kbd>＋點可以多選，例如兩根 poly。
           </li>
           <li>
-            <b>調整</b>　長高／縮短、移動、換材質；選取會留著，可以一直微調。
+            <b>調整</b>　細修在 3D 上拖它的面（筆刷）；整面長縮、移動、換材質在這裡輸入。選取會留著。
           </li>
           <li>
             <b>匯出</b>　右上角「匯出」，shape 與 dtype 和原始一樣。
@@ -273,7 +273,7 @@ export function Inspector({ ed }: { ed: Editor }) {
         <MoveRow ed={ed} />
       </Section>
       <Section title="材質">
-        <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} />
+        <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} onMaterial={onMaterial} />
       </Section>
     </>
   );

@@ -15,6 +15,14 @@ import {
   nameComponents,
 } from '../../volume/volume';
 import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
+import type { BrushShape } from '../../volume/volume';
+
+/** 3D 筆刷：推拉（沿法線長／縮 n 格）或補平（補到／削到點到的那一面）；半徑 null = 整面。 */
+export interface Brush {
+  mode: 'push' | 'level';
+  radius: number | null;
+  shape: BrushShape;
+}
 import { call, ensure, loadOrig, replayIn, retain } from '../../volume/client';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
@@ -92,7 +100,7 @@ export function useEditor() {
   const [follow, setFollow] = useState(true);
   const [backfill, setBackfill] = useState<Backfill>('orig');
   const [nmPerVoxel, setNmPerVoxel] = useState(0.5);
-  const [bumpRadius, setBumpRadius] = useState(6);
+  const [brush, setBrush] = useState<Brush>({ mode: 'push', radius: 6, shape: 'round' });
   const [last, setLast] = useState<{ text: string; at: number } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   /** 計算中的說明（例如「計算中…」）；有值時其他改體素的動作先擋下。 */
@@ -430,6 +438,13 @@ export function useEditor() {
     },
     [sel, zRange, follow, backfill, commit],
   );
+  const level = useCallback(
+    (dir: Vec3, to: number, local: Local) => {
+      if (!sel.size) return;
+      commit({ kind: 'level', keys: [...sel], zRange, dir, to, local, backfill });
+    },
+    [sel, zRange, backfill, commit],
+  );
   const setMaterial = useCallback(
     (m: number) => {
       if (sel.size) commit({ kind: 'material', keys: [...sel], zRange, m });
@@ -626,8 +641,8 @@ export function useEditor() {
     setBackfill,
     nmPerVoxel,
     setNmPerVoxel,
-    bumpRadius,
-    setBumpRadius,
+    brush,
+    setBrush,
     diff,
     changedKeys,
     ledger,
@@ -637,6 +652,7 @@ export function useEditor() {
     setMenu,
     translate,
     push,
+    level,
     setMaterial,
     loadVolume,
     demo,

@@ -6,9 +6,18 @@ let worker: Worker | null = null;
 let seq = 0;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
+/** 單檔 prototype 把 Worker 原始碼放在這個全域變數；平常由 Vite 另外打包。 */
+declare global {
+  // eslint-disable-next-line no-var
+  var __WORKER_SRC__: string | undefined;
+}
+
 function get() {
   if (worker) return worker;
-  worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+  const src = globalThis.__WORKER_SRC__;
+  worker = src
+    ? new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })))
+    : new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = (e: MessageEvent<{ id: number; ok: boolean; result?: unknown; error?: string }>) => {
     const p = pending.get(e.data.id);
     if (!p) return;

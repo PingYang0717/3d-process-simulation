@@ -1,6 +1,7 @@
 // 操作（Op）與重播：純函式，主執行緒與 Worker 共用，可單獨測試。
 import {
   type Backfill,
+  type BrushShape,
   type Labeled,
   type Material,
   type Vec3,
@@ -8,6 +9,7 @@ import {
   type ZRange,
   directionName,
   growMask,
+  levelMask,
   localMask,
   maskOf,
   relabel,
@@ -15,16 +17,20 @@ import {
   translateMask,
 } from './volume';
 
-/** Alt＋拖拉的局部凸起：只推離 center 半徑 radius 內的列。 */
+/** 筆刷：只推離 center 半徑 radius 內的列（shape 省略 = 圓；radius = Infinity 以 null 存，表示整面）。 */
 export interface Local {
   center: Vec3;
-  radius: number;
+  radius: number | null;
+  shape?: BrushShape;
 }
+export const radiusOf = (l: Local) => (l.radius === null ? Infinity : l.radius);
 
 export type Op =
   | { kind: 'push'; keys: string[]; zRange: ZRange; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local }
   | { kind: 'translate'; keys: string[]; zRange: ZRange; d: Vec3; backfill: Backfill }
-  | { kind: 'material'; keys: string[]; zRange: ZRange; m: number };
+  | { kind: 'material'; keys: string[]; zRange: ZRange; m: number }
+  /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）。 */
+  | { kind: 'level'; keys: string[]; zRange: ZRange; dir: Vec3; to: number; local: Local; backfill: Backfill };
 
 export interface EditState {
   vol: Volume;
@@ -46,8 +52,11 @@ export function applyOp(s: EditState, op: Op, ctx: OpContext): EditState {
   let vol: Volume;
   let shift: Vec3 = [0, 0, 0];
   if (op.kind === 'push') {
-    if (op.local) mask = localMask(s.vol, mask, op.dir, op.local.center, op.local.radius);
+    if (op.local) mask = localMask(s.vol, mask, op.dir, op.local.center, radiusOf(op.local), op.local.shape ?? 'round');
     vol = growMask(s.vol, ctx.orig, mask, op.zRange, op.dir, op.n, op.backfill, op.follow);
+  } else if (op.kind === 'level') {
+    const l = op.local;
+    vol = levelMask(s.vol, ctx.orig, mask, op.zRange, op.dir, l.center, radiusOf(l), l.shape ?? 'round', op.to, op.backfill);
   } else if (op.kind === 'translate') {
     vol = translateMask(s.vol, ctx.orig, mask, op.zRange, op.d, op.backfill);
     shift = op.d;
@@ -69,9 +78,14 @@ export function opText(op: Op, L: Labeled, Z: number, nmPerVoxel: number, matNam
         ? `${matName([...mats][0])} ×${comps.length}`
         : `${op.keys.length} 個結構`;
   const part = op.zRange[0] === 0 && op.zRange[1] === Z - 1 ? '' : `（z ${op.zRange[0]}～${op.zRange[1]}）`;
+  const brush = (l: Local) => (l.radius === null ? '整面' : `筆刷 ${l.shape === 'square' ? '方' : '圓'} r${l.radius}`);
   if (op.kind === 'push') {
     const n = Math.abs(op.n);
-    return `${who}${part}${op.local ? ' 局部' : ''} ${directionName(op.dir)}${op.n > 0 ? '長' : '縮'} ${n} vx（${(n * nmPerVoxel).toFixed(1)} nm）`;
+    return `${who}${part}${op.local ? `（${brush(op.local)}）` : ''} ${directionName(op.dir)}${op.n > 0 ? '長' : '縮'} ${n} vx（${(n * nmPerVoxel).toFixed(1)} nm）`;
+  }
+  if (op.kind === 'level') {
+    const axis = op.dir[0] ? 'x' : op.dir[1] ? 'y' : 'z';
+    return `${who}${part}（${brush(op.local)}）補平到 ${axis} = ${op.to}（${(op.to * nmPerVoxel).toFixed(1)} nm）`;
   }
   if (op.kind === 'translate') {
     const parts = ['x', 'y', 'z']

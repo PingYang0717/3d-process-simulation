@@ -15,7 +15,7 @@ import {
   voxelFromHit,
 } from './volume';
 import { decodeVti, encodeVti } from './vti';
-import { type EditState, type Op, applyOp, matNameOf } from './ops';
+import { type EditState, type Op, applyOp, matNameOf, radiusOf } from './ops';
 
 const small = (): Volume => {
   const X = 5;
@@ -298,7 +298,7 @@ describe('relabel 只重算局部', () => {
       // b 用整個重算的版本，體素結果相同
       b = {
         vol: a.vol,
-        L: relabelFull(b.vol, b.L, op.kind === 'push' && op.local ? localMask(b.vol, mask, op.dir, op.local.center, op.local.radius) : mask, op.kind === 'translate' ? op.d : [0, 0, 0], a.vol, matName, () => `c${seqB++}`),
+        L: relabelFull(b.vol, b.L, op.kind === 'push' && op.local ? localMask(b.vol, mask, op.dir, op.local.center, radiusOf(op.local), op.local.shape ?? 'round') : mask, op.kind === 'translate' ? op.d : [0, 0, 0], a.vol, matName, () => `c${seqB++}`),
       };
       expect(a.L.comps.length).toBe(b.L.comps.length);
       for (let i = 0; i < vol.data.length; i++) {

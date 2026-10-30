@@ -295,3 +295,31 @@ span.group-caret { display: inline-block; width: 22px; flex: none; }
 @keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
 .drag-tip { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; padding: 4px 12px; background: rgba(0, 0, 0, .82); color: #fff; font-size: 12px; border-radius: 6px; pointer-events: none; }
 .mesh-busy { position: absolute; right: 12px; bottom: 12px; z-index: 3; padding: 3px 10px; background: rgba(255, 255, 255, .92); border-radius: 6px; font-size: 12px; color: #646a73; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); pointer-events: none; }
+
+/* ---- v11：筆刷、視角列、座標軸、剖面列、切面放大 ---- */
+.gizmo { position: absolute; left: 10px; bottom: 10px; z-index: 3; overflow: visible; }
+.gizmo text { user-select: none; }
+.viewbar { position: absolute; right: 12px; bottom: 12px; z-index: 3; display: flex; align-items: center; gap: 2px; padding: 3px; background: rgba(255,255,255,.94); border: 1px solid #eef0f3; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.viewbar .ant-btn { padding-inline: 8px; font-size: 12px; color: #3c4048; }
+.viewbar .ant-btn:not(:disabled):hover { background: #e8f1ff; color: #0b57d0; }
+.sectionbar { position: absolute; left: 96px; right: 12px; bottom: 54px; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: rgba(255,255,255,.96); border: 1px solid #eef0f3; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.sectionbar .ant-slider { min-width: 80px; }
+.drag-tip { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; padding: 4px 12px; background: rgba(0,0,0,.82); color: #fff; font-size: 12px; border-radius: 6px; pointer-events: none; white-space: nowrap; }
+.mesh-busy { position: absolute; right: 12px; top: 12px; z-index: 3; padding: 3px 10px; background: rgba(255,255,255,.92); border-radius: 6px; font-size: 12px; color: #646a73; box-shadow: 0 1px 2px rgba(0,0,0,.08); pointer-events: none; }
+.pane-head .ant-segmented.tb { margin-left: 8px; }
+.slice-pos .ant-input-number-prefix { margin-inline-end: 2px; font-size: 11px; }
+.slice-pos .ant-btn { width: 24px; padding: 0; }
+.slice-pane .pane-head .slice-pos { flex: none; }
+/* 放大一張切面：它佔上面整排，3D 與另兩張縮到下排（DOM 不動，WebGL 不重建） */
+.canvas-area[class*="focus-"] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(0, 1.7fr) minmax(0, 1fr); }
+.canvas-area[class*="focus-"] .slices { display: contents; }
+.canvas-area[class*="focus-"] .pane-3d { grid-row: 2; }
+.canvas-area[class*="focus-"] .slice-pane.big { grid-column: 1 / -1; grid-row: 1; }
+.canvas-area[class*="focus-"] .slice-pane:not(.big) { grid-row: 2; }
+.canvas-area[class*="focus-"] .slice-pane.big .pane-head { height: 40px; min-height: 40px; }
+@media (max-width: 1499px) { .slice-pane:not(.big) .slice-hint { display: none; } }
+/* 放大切面時 3D 只剩一小格：藏掉浮動列與文字，工具列只留圖示 */
+.canvas-area[class*="focus-"] { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); }
+.canvas-area[class*="focus-"] .pane-3d .viewbar, .canvas-area[class*="focus-"] .pane-3d .sectionbar, .canvas-area[class*="focus-"] .pane-3d .pane-foot,
+.canvas-area[class*="focus-"] .pane-3d .tb-text, .canvas-area[class*="focus-"] .pane-3d .pane-sub, .canvas-area[class*="focus-"] .pane-3d .gizmo { display: none !important; }
+@media (max-width: 1599px) { .tb-text { display: none; } .pane-head .tb .ant-btn-icon { margin-inline-end: 0 !important; } }

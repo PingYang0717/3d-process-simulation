@@ -29,8 +29,15 @@ export interface Requests {
       /** 長度 768，每個材質的 RGB（0～1）。 */
       palette: Float32Array;
       tint?: [number, number, number];
+      /** 頂點沿面法線外推這麼多（選取層用，避免和主網格共面閃爍）。 */
+      inflate?: number;
     };
     res: MeshData;
+  };
+  /** 差異模式：改過的體素（含被拿掉的，畫紅）一層、沒改的一層（半透明灰）。 */
+  diffMesh: {
+    req: { sid: number; hidden: Uint8Array; palette: Float32Array };
+    res: { changed: MeshData; ghost: MeshData };
   };
   diff: { req: { sid: number }; res: { mask: Uint8Array; count: number } };
   count: { req: { sid: number }; res: number[] };
@@ -67,6 +74,9 @@ const diffOf = (sid: number) => {
   }
   return d;
 };
+
+/** 差異模式裡「原本有、現在是空氣」的體素代碼（材質編號只到 254）。 */
+const REMOVED = 255;
 
 const emptyMesh = (): MeshData => ({ positions: new Float32Array(0), normals: new Float32Array(0), colors: new Float32Array(0), quads: 0 });
 
@@ -145,7 +155,7 @@ const handlers: { [K in Kind]: Handler<K> } = {
     const labels = s.L.labels.slice();
     return [{ data, labels, comps: s.L.comps, keyCounter: seq }, [data.buffer, labels.buffer]];
   },
-  mesh: ({ sid, hidden, diff, only, palette, tint }) => {
+  mesh: ({ sid, hidden, diff, only, palette, tint, inflate }) => {
     const { vol, labels } = get(sid);
     if (only) {
       // 選取層、空洞層只在外框裡做 greedy mesh，不掃整個陣列三次
@@ -163,6 +173,7 @@ const handlers: { [K in Kind]: Handler<K> } = {
         box = z0 <= z1 ? { ...only.box, z0, z1 } : null;
       }
       const m = box ? meshInBox(vol, box, test, tint ?? [0.09, 0.47, 1]) : emptyMesh();
+      if (inflate) for (let i = 0; i < m.positions.length; i++) m.positions[i] += m.normals[i] * inflate;
       return [m, [m.positions.buffer, m.normals.buffer, m.colors.buffer]];
     }
     const { X, Y, Z, data } = vol;
@@ -181,6 +192,27 @@ const handlers: { [K in Kind]: Handler<K> } = {
       return code & DIFF_BIT ? [r * 0.35 + 0.65, g * 0.35 + 0.2, b * 0.35 + 0.2] : [r, g, b];
     });
     return [m, [m.positions.buffer, m.normals.buffer, m.colors.buffer]];
+  },
+  diffMesh: ({ sid, hidden, palette }) => {
+    const { vol } = get(sid);
+    const o = get(origSid).vol.data;
+    const { X, Y, Z, data } = vol;
+    const N = X * Y * Z;
+    const d = sid === origSid ? null : diffOf(sid).mask;
+    const changed = new Uint16Array(N);
+    const ghost = new Uint16Array(N);
+    for (let i = 0; i < N; i++) {
+      const m = data[i];
+      if (d?.[i]) {
+        if (m && !hidden[m]) changed[i] = m;
+        else if (!m && o[i] && !hidden[o[i]]) changed[i] = REMOVED;
+      } else if (m && !hidden[m]) ghost[i] = 1;
+    }
+    const color = (code: number): [number, number, number] =>
+      code === REMOVED ? [0.96, 0.3, 0.3] : [palette[code * 3], palette[code * 3 + 1], palette[code * 3 + 2]];
+    const a = greedyMesh(X, Y, Z, changed, color);
+    const b = greedyMesh(X, Y, Z, ghost, () => [0.72, 0.74, 0.78]);
+    return [{ changed: a, ghost: b }, [a.positions.buffer, a.normals.buffer, a.colors.buffer, b.positions.buffer, b.normals.buffer, b.colors.buffer]];
   },
   diff: ({ sid }) => {
     const d = diffOf(sid);

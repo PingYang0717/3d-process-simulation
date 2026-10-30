@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, Menu, Modal, Space, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, InputNumber, Menu, Modal, Popover, Segmented, Slider, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   AimOutlined,
   ArrowDownOutlined,
   ArrowUpOutlined,
+  CompressOutlined,
   DownOutlined,
+  ExpandOutlined,
+  FormatPainterOutlined,
+  LeftOutlined,
+  RightOutlined,
+  SwapOutlined,
   DownloadOutlined,
   EyeInvisibleOutlined,
   EyeOutlined,
@@ -19,13 +25,13 @@ import {
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { type Axis, type Volume, encodeNpy, isVoid, unionBBox } from '../../volume/volume';
+import { type Axis, type Vec3, type Volume, encodeNpy, hexToRgb, isVoid, unionBBox } from '../../volume/volume';
 import { encodeVti } from '../../volume/vti';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel, Swatch } from '../../ui/Swatch';
 import { type SelectMode, useEditor } from './editor';
-import { View3D, type View3DHandle, SliceView } from './views';
+import { type Clip, type ViewMode, type ViewPreset, View3D, type View3DHandle, SliceView } from './views';
 import { Inspector, matOf } from './Inspector';
 import { ChangesTab } from './ChangesTab';
 import { SplitsTab } from './SplitsTab';
@@ -105,9 +111,16 @@ export default function Section3DPage() {
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [tab, setTab] = useState('props');
-  const [clip, setClip] = useState(false);
+  /** 剖面：軸與留哪一半；位置跟著橘色十字。 */
+  const [clipOn, setClipOn] = useState(false);
+  const [clipAxis, setClipAxis] = useState<Axis>('z');
+  const [clipSide, setClipSide] = useState<1 | -1>(1);
   const [showDiff, setShowDiff] = useState(true);
-  const [peek, setPeek] = useState(false);
+  /** 現在／原始／差異。 */
+  const [mode, setMode] = useState<ViewMode>('now');
+  /** 放大哪一張切面當主畫面（null = 3D 大）。 */
+  const [focus, setFocus] = useState<Axis | null>(null);
+  const [sliceHover, setSliceHover] = useState<Vec3 | null>(null);
   const [xray, setXray] = useState(false);
   const [translucent, setTranslucent] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -119,23 +132,36 @@ export default function Section3DPage() {
   const tagRef = useRef<HTMLDivElement>(null);
   const view = useRef<View3DHandle | null>(null);
 
-  // 按住 B 看原始
+  const cursorAt = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
+  const axisMax = (a: Axis) => (a === 'x' ? ed.vol.X : a === 'y' ? ed.vol.Y : ed.vol.Z) - 1;
+  const setCursorAxis = (a: Axis, v: number) => {
+    const next: Vec3 = [...ed.cursor];
+    next[a === 'x' ? 0 : a === 'y' ? 1 : 2] = Math.max(0, Math.min(axisMax(a), Math.round(v)));
+    ed.setCursor(next);
+  };
+
+  // B：現在 ⇄ 原始；D：現在 ⇄ 差異；, .：剖面前後一片；Esc：還原放大的切面
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 'b' && !(e.target as HTMLElement | null)?.closest?.('input,textarea')) setPeek(true);
-    };
-    const up = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 'b') setPeek(false);
+      if ((e.target as HTMLElement | null)?.closest?.('input,textarea,select,[contenteditable]')) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 'b') setMode((m) => (m === 'orig' ? 'now' : 'orig'));
+      else if (k === 'd') setMode((m) => (m === 'diff' ? 'now' : 'diff'));
+      else if ((e.key === ',' || e.key === '.') && clipOn) ed.stepCursor(clipAxis, e.key === '.' ? 1 : -1);
+      else if (e.key === 'Escape') setFocus(null);
     };
     window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
-    return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
-    };
-  }, []);
+    return () => window.removeEventListener('keydown', down);
+  }, [clipOn, clipAxis, ed.stepCursor]);
 
+  useEffect(() => {
+    if (mode === 'diff' && !ed.diff.count) setMode('now');
+  }, [mode, ed.diff.count]);
+
+  const peek = mode === 'orig';
   const shown = peek ? ed.orig.vol : ed.vol;
+  const clip: Clip | null = clipOn ? { axis: clipAxis, at: cursorAt(clipAxis), side: clipSide } : null;
   const selBBox = useMemo(() => {
     const b = unionBBox(ed.selComps);
     if (!b) return null;
@@ -234,29 +260,57 @@ export default function Section3DPage() {
   }, [ed.last]);
   const hot = !!ed.last && Date.now() - ed.last.at < 4000;
 
+  /** 換材質：先在 GPU 上把選取的面改色（幾十毫秒），再送 Worker；正式網格幾秒後覆蓋。 */
+  const changeMaterial = (id: number) => {
+    const m = ed.materials.find((x) => x.id === id);
+    if (m && ed.affMask) view.current?.recolor(ed.affMask, hexToRgb(m.color));
+    ed.setMaterial(id);
+  };
   const matItems: MenuProps['items'] = ed.materials
     .filter((m) => m.id !== 0)
-    .map((m) => ({ key: `m${m.id}`, label: <MatLabel mat={m} />, onClick: () => ed.setMaterial(m.id) }));
+    .map((m) => ({ key: `m${m.id}`, label: <MatLabel mat={m} />, onClick: () => changeMaterial(m.id) }));
 
   const pickInSlice = (p: [number, number, number], mode: SelectMode) => {
     ed.setCursor(p);
     ed.pickVoxel((p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0], mode);
   };
   const slice = (axis: Axis) => {
-    const at = axis === 'x' ? ed.cursor[0] : axis === 'y' ? ed.cursor[1] : ed.cursor[2];
+    const at = cursorAt(axis);
+    const big = focus === axis;
+    const hov = sliceHover;
+    const hovMat = hov ? ed.matName(shown.data[(hov[2] * ed.vol.Y + hov[1]) * ed.vol.X + hov[0]]) : null;
     return (
-      <div className="pane slice-pane" key={axis}>
+      <div className={'pane slice-pane' + (big ? ' big' : '')} key={axis} data-axis={axis}>
         <div className="pane-head">
           <Text strong style={{ fontSize: 12 }}>
             {AXIS_NAME[axis]}
           </Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {axis} = {at}（{(at * ed.nmPerVoxel).toFixed(1)} nm）
+          <Space.Compact size="small" className="slice-pos">
+            <Button icon={<LeftOutlined />} onClick={() => ed.stepCursor(axis, -1)} aria-label="上一片" />
+            <InputNumber
+              size="small"
+              min={0}
+              max={axisMax(axis)}
+              value={at}
+              onChange={(v) => v !== null && setCursorAxis(axis, v)}
+              precision={0}
+              prefix={<span style={{ color: '#8f959e' }}>{axis} =</span>}
+              style={{ width: 88 }}
+            />
+            <Button icon={<RightOutlined />} onClick={() => ed.stepCursor(axis, 1)} aria-label="下一片" />
+          </Space.Compact>
+          <Text type="secondary" className="slice-hint" style={{ fontSize: 11 }}>
+            {(at * ed.nmPerVoxel).toFixed(1)} nm
           </Text>
           <span className="grow" />
-          <Text type="secondary" className="slice-hint" style={{ fontSize: 11 }}>
-            滾輪換切片
-          </Text>
+          {big && hov && (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              ({hov[0]}, {hov[1]}, {hov[2]}) {hovMat}
+            </Text>
+          )}
+          <Tooltip title={big ? '還原（Esc）' : '放大這張切面'}>
+            <Button type="text" size="small" icon={big ? <CompressOutlined /> : <ExpandOutlined />} onClick={() => setFocus(big ? null : axis)} aria-label="放大" />
+          </Tooltip>
         </div>
         <div className="slice-body">
           <SliceView
@@ -271,11 +325,65 @@ export default function Section3DPage() {
             diff={diffShown}
             onPick={pickInSlice}
             onStep={(d) => ed.stepCursor(axis, d)}
+            onHover={big ? setSliceHover : undefined}
           />
         </div>
       </div>
     );
   };
+
+  // ---- 筆刷設定（3D 工具列） ----
+  const br = ed.brush;
+  const brushPop = (
+    <Flex vertical gap={12} style={{ width: 280 }}>
+      <Segmented
+        block
+        value={br.mode}
+        onChange={(v) => ed.setBrush({ ...br, mode: v as 'push' | 'level' })}
+        options={[
+          { label: '推拉', value: 'push' },
+          { label: '補平', value: 'level' },
+        ]}
+      />
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {br.mode === 'push'
+          ? '按住已選結構的面往外拉＝長、往回推＝縮，只改筆刷範圍。'
+          : '點已選結構的一個面，筆刷範圍內每一排都補到（或削到）跟它一樣高；圓頭變方頭用這個。'}
+      </Text>
+      <Flex align="center" gap={10}>
+        <span style={{ fontSize: 12, width: 64 }}>整面</span>
+        <Switch size="small" checked={br.radius === null} onChange={(on) => ed.setBrush({ ...br, radius: on ? null : 6 })} />
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          不限範圍，等於整個面一起
+        </Text>
+      </Flex>
+      {br.radius !== null && (
+        <>
+          <Flex align="center" gap={10}>
+            <span style={{ fontSize: 12, width: 64 }}>半徑</span>
+            <Slider min={0} max={60} value={br.radius} onChange={(v) => ed.setBrush({ ...br, radius: v })} style={{ flex: 1, margin: '0 4px' }} />
+            <InputNumber size="small" min={0} max={500} value={br.radius} onChange={(v) => v !== null && ed.setBrush({ ...br, radius: Math.round(v) })} addonAfter="vx" style={{ width: 96 }} />
+          </Flex>
+          <Flex align="center" gap={10}>
+            <span style={{ fontSize: 12, width: 64 }}>形狀</span>
+            <Segmented
+              size="small"
+              value={br.shape}
+              onChange={(v) => ed.setBrush({ ...br, shape: v as 'round' | 'square' })}
+              options={[
+                { label: '圓', value: 'round' },
+                { label: '方', value: 'square' },
+              ]}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {br.shape === 'square' ? `${2 * br.radius + 1}×${2 * br.radius + 1} 格` : `直徑 ${(2 * br.radius + 1)} 格`}（{((2 * br.radius + 1) * ed.nmPerVoxel).toFixed(1)} nm）
+            </Text>
+          </Flex>
+        </>
+      )}
+    </Flex>
+  );
+  const brushLabel = `${br.mode === 'push' ? '筆刷' : '補平'} ${br.radius === null ? '整面' : `${br.shape === 'square' ? '方' : '圓'}${br.radius}`}`;
 
   const selName = ed.selComps.length === 1 ? ed.selComps[0].label : `${ed.selComps.length} 個結構`;
   const firstMat = ed.selComps.length ? matOf(ed, ed.selComps[0].mat) : null;
@@ -312,6 +420,11 @@ export default function Section3DPage() {
                 <DownOutlined style={{ fontSize: 10, marginLeft: 2 }} />
               </Button>
             </Dropdown>
+            <Popover content={brushPop} trigger="click" placement="bottomLeft">
+              <Tooltip title="3D 上拖拉面只改筆刷範圍；整面長縮與移動在右欄輸入">
+                <Button icon={<FormatPainterOutlined />}>{brushLabel}</Button>
+              </Tooltip>
+            </Popover>
           </Space.Compact>
         )}
         <Space.Compact size="small" className="tb">
@@ -326,23 +439,25 @@ export default function Section3DPage() {
             </Button>
           </Tooltip>
         </Space.Compact>
+        {ed.diff.count > 0 && (
+          <Tooltip title="B：現在 ⇄ 原始；D：現在 ⇄ 差異（沒改的半透明、改過的實色、拿掉的紅）">
+            <Segmented
+              size="small"
+              className="tb"
+              value={mode}
+              onChange={(v) => setMode(v as ViewMode)}
+              options={[
+                { label: '現在', value: 'now' },
+                { label: '原始', value: 'orig' },
+                { label: '差異', value: 'diff' },
+              ]}
+            />
+          </Tooltip>
+        )}
         <Space.Compact size="small" className="tb">
-          {ed.diff.count > 0 && (
-            <Tooltip title="按住看原始陣列（鍵盤 B）">
-              <Button
-                type={peek ? 'primary' : 'default'}
-                icon={<EyeOutlined />}
-                onPointerDown={() => setPeek(true)}
-                onPointerUp={() => setPeek(false)}
-                onPointerLeave={() => setPeek(false)}
-              >
-                <span className="tb-text">看原始</span>
-              </Button>
-            </Tooltip>
-          )}
-          <Tooltip title="剖開到目前 z 切面，看裡面">
-            <Button type={clip ? 'primary' : 'default'} icon={<ScissorOutlined />} onClick={() => setClip(!clip)}>
-              <span className="tb-text">剖開</span>
+          <Tooltip title="沿一個軸剖開 3D，剖口貼上切面圖；位置跟著橘色十字">
+            <Button type={clipOn ? 'primary' : 'default'} icon={<ScissorOutlined />} onClick={() => setClipOn(!clipOn)}>
+              <span className="tb-text">剖面</span>
             </Button>
           </Tooltip>
           <Dropdown
@@ -354,8 +469,6 @@ export default function Section3DPage() {
               items: [
                 { key: 'xray', label: '空洞透視：VOID 永遠畫在最上面', onClick: () => setXray(!xray) },
                 { key: 'trans', label: '材質半透明：看得到內部', onClick: () => setTranslucent(!translucent) },
-                { type: 'divider' },
-                { key: 'reset', icon: <AimOutlined />, label: '重設視角', onClick: () => view.current?.resetView() },
               ],
             }}
           >
@@ -377,14 +490,17 @@ export default function Section3DPage() {
           zRange={ed.zRange}
           selBBox={peek ? null : selBBox}
           cursor={ed.cursor}
-          clipZ={clip ? ed.cursor[2] : null}
+          clip={clip}
           showDiff={showDiff && !peek}
-          onPick={(v, mode) => {
+          diffMask={diffShown}
+          mode={mode}
+          brush={ed.brush}
+          onPick={(v, m) => {
             if (v === null) {
-              if (mode === 'set') ed.clearSel();
+              if (m === 'set') ed.clearSel();
               return;
             }
-            ed.pickVoxel(v, mode);
+            ed.pickVoxel(v, m);
             ed.setCursor(ed.voxelCoord(v));
           }}
           onMenu={(v, x, y) => {
@@ -393,18 +509,66 @@ export default function Section3DPage() {
             const l = v !== null ? ed.L.labels[v] : -1;
             ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
           }}
-          onDrag={(kind, dir, n, local) => {
-            if (kind === 'move') ed.translate([dir[0] * n, dir[1] * n, dir[2] * n]);
-            else ed.push(dir, n, local ? { center: local, radius: ed.bumpRadius } : undefined);
+          onSculpt={(s) => {
+            if (s.kind === 'level') ed.level(s.dir, s.to, s.local);
+            else ed.push(s.dir, s.n, s.local);
           }}
           onHover={setHover}
           floatRef={tagRef}
           handle={view}
           xray={xray}
           translucent={translucent}
-          bumpRadius={ed.bumpRadius}
           busy={!!ed.busy}
         />
+        <div className="viewbar">
+          {(
+            [
+              ['front', '正視', 'XY 正面（和下方第一張切面同方向）'],
+              ['top', '上視', 'XZ 上視'],
+              ['side', '側視', 'YZ 側面'],
+              ['iso', '等角', '斜 45° 看全貌'],
+              ['home', '全貌', '回到載入時的視角（雙擊空白也可以）'],
+              ['fit', '對準選取', '把選取的結構放到畫面中央（雙擊模型＝繞著點到的地方轉）'],
+            ] as [ViewPreset, string, string][]
+          ).map(([k, label, tip]) => (
+            <Tooltip key={k} title={tip}>
+              <Button size="small" type="text" icon={k === 'fit' ? <AimOutlined /> : undefined} disabled={k === 'fit' && !ed.sel.size} onClick={() => view.current?.setView(k)}>
+                {label}
+              </Button>
+            </Tooltip>
+          ))}
+        </div>
+        {clipOn && (
+          <div className="sectionbar">
+            <Segmented
+              size="small"
+              value={clipAxis}
+              onChange={(v) => setClipAxis(v as Axis)}
+              options={(['x', 'y', 'z'] as Axis[]).map((a) => ({ label: a.toUpperCase(), value: a }))}
+            />
+            <Slider
+              min={0}
+              max={axisMax(clipAxis)}
+              value={cursorAt(clipAxis)}
+              onChange={(v) => setCursorAxis(clipAxis, v)}
+              tooltip={{ formatter: (v) => `${clipAxis} = ${v}` }}
+              style={{ flex: 1, margin: '0 10px' }}
+            />
+            <InputNumber size="small" min={0} max={axisMax(clipAxis)} value={cursorAt(clipAxis)} onChange={(v) => v !== null && setCursorAxis(clipAxis, v)} precision={0} style={{ width: 72 }} />
+            <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+              {(cursorAt(clipAxis) * ed.nmPerVoxel).toFixed(1)} nm
+            </Text>
+            <Tooltip title={`現在留 ${clipAxis} ${clipSide > 0 ? '≤' : '≥'} ${cursorAt(clipAxis)} 的那一半；按一下翻面`}>
+              <Button size="small" icon={<SwapOutlined />} onClick={() => setClipSide(clipSide > 0 ? -1 : 1)}>
+                翻面
+              </Button>
+            </Tooltip>
+            <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+              <kbd>,</kbd>
+              <kbd>.</kbd> 前後一片
+            </Text>
+          </div>
+        )}
         <div ref={tagRef} className="sel-tag" style={{ display: 'none' }}>
           {selName}
         </div>
@@ -421,11 +585,11 @@ export default function Section3DPage() {
             </div>,
             document.body,
           )}
-        {peek ? (
-          <div className="peek">原始陣列（放開回到現在）</div>
-        ) : (
-          clip && <div className="peek">剖開到 z = {ed.cursor[2]}（在 XZ／YZ 切面滾輪可以移動）</div>
-        )}
+        {mode === 'orig' ? (
+          <div className="peek">原始陣列（唯讀；B 或上方切換回到現在）</div>
+        ) : mode === 'diff' ? (
+          <div className="peek">差異：沒改的半透明、改過的實色、拿掉的紅（D 切回）</div>
+        ) : null}
       </div>
       <div className={'pane-foot' + (hot ? ' hot' : '')}>
         <span>
@@ -433,8 +597,8 @@ export default function Section3DPage() {
             ? ed.last!.text
             : hover ||
               (ed.sel.size
-                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 拖拉它的面可以推；方向鍵整塊移動`
-                : '點一塊結構開始；Shift 多選')}
+                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 按住它的面拖＝筆刷雕刻；整面長縮、移動在右欄`
+                : '點一塊結構開始；Shift 多選；雙擊模型＝繞著那點轉')}
         </span>
         <span className="grow" />
         <span>
@@ -456,7 +620,7 @@ export default function Section3DPage() {
             label: '選取與調整',
             children: (
               <div className="insp-body">
-                <Inspector ed={ed} />
+                <Inspector ed={ed} onMaterial={changeMaterial} />
               </div>
             ),
           },
@@ -597,7 +761,7 @@ export default function Section3DPage() {
           {compare ? (
             <CompareView ed={ed} axis={cmpAxis} setAxis={setCmpAxis} showDiff={showDiff} />
           ) : (
-            <div className="canvas-area">
+            <div className={'canvas-area' + (focus ? ` focus-${focus}` : '')}>
               {pane3d}
               <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>
             </div>

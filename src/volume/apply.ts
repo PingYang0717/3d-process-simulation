@@ -6,6 +6,7 @@ import { type EditState, type LegacyOp, type Op, type OpContext, upgradeOp } fro
 import { previewBox, previewOp } from './preview';
 import { type Step, cropArr, diffInBox, pasteArr } from './patch';
 import { type Report, newReport } from './kernel';
+import { axisIndex } from './scope';
 
 export interface Applied {
   state: { vol: Volume; L: Labeled };
@@ -20,6 +21,12 @@ export function applyOpLocal(s: EditState, input: Op | LegacyOp, ctx: OpContext)
   const box = previewBox(s, op);
   if (!box) return none;
   const p = previewOp(s, ctx.orig, op, Infinity, report)!;
+  if (op.kind === 'profile') {
+    // scope 裡、選取外框外面的片：這個結構根本不在，算略過
+    const a = axisIndex(op.scope.axis);
+    const [blo, bhi] = [[box.x0, box.y0, box.z0][a], [box.x1, box.y1, box.z1][a]];
+    for (let t = op.scope.lo; t <= op.scope.hi; t++) if (t < blo || t > bhi) report.skipped.push(t);
+  }
   // 被擋的格子：裁切範圍的 index → 整個陣列
   {
     const W = box.x1 - box.x0 + 1;

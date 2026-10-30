@@ -183,7 +183,7 @@ export function nearestSlice(has: Uint8Array | null, at: number) {
  * 位置列（編輯狀態的主切面上方）：第幾片 │ 套用到哪裡 │ 提示（這一片沒有選取、不在範圍內）。
  * has = 選取沿 axis 每一片有沒有體素。
  */
-export function PositionBar({ ed, axis, has }: { ed: Editor; axis: Axis; has: Uint8Array | null }) {
+export function PositionBar({ ed, axis, has, onJumpBlocked }: { ed: Editor; axis: Axis; has: Uint8Array | null; onJumpBlocked?: () => void }) {
   const at = ed.cursor[axisIndex(axis)];
   const sel = ed.selComps;
   const name = sel.length === 1 ? sel[0].label : sel.length ? `已選的 ${sel.length} 個結構` : '';
@@ -205,6 +205,17 @@ export function PositionBar({ ed, axis, has }: { ed: Editor; axis: Axis; has: Ui
           <Typography.Link onClick={() => jump(near)}>
             跳到最近的一片（{axis} = {near}）
           </Typography.Link>
+        </Text>
+      )}
+      {!!ed.report?.slices.length && ed.report.axis === axis && (
+        <Text type="danger" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+          上一步 {ed.report.slices.length} 片有格子被擋住
+          {ed.report.slices.some((s) => s.at === at) ? '（這一片有，標紅）' : ''} · <Typography.Link onClick={onJumpBlocked}>下一片</Typography.Link>
+        </Text>
+      )}
+      {ed.queued > 0 && (
+        <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+          排隊 {ed.queued} 步
         </Text>
       )}
       {outOfScope && (near === null || near === at) && (

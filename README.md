@@ -19,6 +19,8 @@ npm run build      # 型別檢查 + 打包
 
 **2D 編輯（主要的改法）**：主畫面預設是 3D，用來看、選、轉。選好結構按 3D 上方「2D 編輯」（或 E）：主畫面換成放大的切面，3D 與另外兩張切面縮到右側小窗；Esc 或「回 3D」回來，選取與範圍都留著。方向自動選結構最長那一軸的法線（fin 沿 z → XY 正面；poly 沿 x → YZ 側面），頁籤可換、換過之後沿用；主切面跳到十字那一片（那一片沒有這個結構就跳到最近的一片），並自動放大到選取。主切面滾輪朝游標縮放（0.25×～32×）、右鍵／中鍵／空白鍵＋左鍵／Alt＋左鍵拖平移、雙擊空白適合視窗；換片用 Ctrl＋滾輪、`,` `.`、PgUp／PgDn、位置列。拖輪廓改剖面是下一階段（plan v7 M2）。
 
+**拖剖面（plan v7 M2）**：2D 編輯的主切面描出已選結構的輪廓（含內環），角上有節點。靠近節點＝拖節點（左右兩節點之間依 cos 衰減跟著走）、靠近邊＝推邊（沿到角為止的整段邊、平滑後的法線）、在結構裡面＝整塊搬；Shift 只動一點／一小段，按住 V／E／R 只抓一種。每拖一下主切面就是這一片的結果（第 1 級），範圍 × 外框 ≤ 40 萬格時 3D 與小切面也即時（第 2 級），放開＝一步、立刻套用到範圍。手勢對到 Op：橫跨整個結構的最外側直邊 → `push`；整塊搬 → `translate`（帶殼）；其他（節點、斜邊、圓弧、部分邊）→ `profile`（每片：先拿再加、由近到遠、要和結構 4 鄰接才填，規則走 `kernel.ts`）。訊息帶格數、被擋的片數（「看這些片」跳過去、被擋的格子標紅）、略過的片數。大操作（預設 400 萬格）先確認；Worker 忙時排隊。`slice/trace.ts`（描輪廓）、`slice/raster.ts`（光柵化與差）、`slice/gestures.ts`（熱區、拖法、手勢 → Op）、`volume/profile.ts`。
+
 **範圍（Scope）**：取代以前只能沿 z 的「要改哪裡」。一個軸＋起止索引，軸＝主切面的法線；三種模式：整個結構（預設）、此片、自訂一段（滑桿上標結構起止與旁邊結構的起止）。位置列與右欄是同一個狀態。所有 Op 存 `scope: {axis, lo, hi}`；舊的 `zRange: [a, b]` 讀進來會轉成 `scope: {axis: 'z', lo: a, hi: b}`（`upgradeOp`），重播逐體素相同（`scope.test.ts`）。
 
 **3D 雕刻（進階，預設關）**：設定裡「在 3D 上雕刻」或 3D 標題列的「3D 雕刻：關」打開。關著時 3D 上怎麼拖都只轉視角。打開後 3D 上的拖拉是**筆刷雕刻**：選好結構後滑鼠移到它的面上會看到筆刷圈與法線箭頭（半徑、圓／方在工具列），按住沿法線拖＝圈圈裡局部長／縮，拖的時候 3D 與切面就顯示結果，放開才套用（橘色虛線框是範圍、游標旁顯示格數與 nm）。先拖過 8px 才算拖拉，手抖不會改到；正對著面看時改用垂直位移估算；格數上限是選取外框在該軸的長度；拖到一半按 Esc 取消。轉視角：左鍵拖在非選取處、中鍵拖、或 Alt＋左鍵拖；筆刷切到「關閉」時怎麼拖都只轉視角。筆刷切到「補平」時點一個面＝圈圈裡每一排補到或削到那一面；整根要變方頭用右欄「補平（圓頭變方頭）」（每一排補到最外側那一點；薄襯層跟著外推、厚的鄰居不吃）。整面長縮、整塊移動、換材質都在右欄輸入；換材質點下去 3D 立刻變色（GPU 上先改面的顏色，Worker 的正式結果幾秒後覆蓋）。
@@ -47,7 +49,9 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/SliceEditor.tsx` | 2D 編輯的主切面：縮放、平移、換片、縮放列（1:1／8×／適合／對準選取）、自動放大到選取 |
 | `src/pages/Section3D/PositionBar.tsx` | 位置列（第幾片、套用到哪裡、「這一片沒有…跳到最近的一片」）與範圍控制 `ScopeControl`（右欄共用）、自動選切面方向 |
 | `src/pages/Section3D/views.lazy.tsx` | `View3D`／`SliceView`／`SliceEditor` 的 lazy 包裝：three.js 等載入檔案後才抓，歡迎頁不用等 |
-| `scripts/e2e/m0.cjs` | M0 驗收（Playwright）：`npm run dev` 後 `node scripts/e2e/m0.cjs` |
+| `scripts/e2e/m0.cjs`、`m2.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m2.cjs` |
+| `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、拖法、手勢 → Op） |
+| `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算、補丁、chunk 網格、profile Op、一步的報告 |
 | `src/ui/` | Swatch、StatTile、download、theme（antd 主題；色票和 `styles.css` 的 `:root` 變數對齊）、persist（`usePersisted`：欄寬、筆刷、襯層跟推、nm 比例、標紅存 localStorage；`overlayOpen`：Modal／Drawer 開著時單鍵快捷鍵不動 3D） |
 
 面板不直接碰 Volume；所有改體素的路徑都經過 `useEditor` 的 `commit`，所以每一步都有 Op 記錄、都能復原、都能在別的 split 重播。

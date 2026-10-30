@@ -14,7 +14,8 @@ import {
   unionBBox,
 } from './volume';
 import { type EditState, type LegacyOp, type Op, radiusOf, upgradeOp } from './ops';
-import { axisIndex } from './scope';
+import { axisIndex, planeAxes } from './scope';
+import { applyProfileMask, rleBox } from './profile';
 import type { Report } from './kernel';
 
 export interface Preview {
@@ -92,6 +93,15 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
   if (!b) return null;
   const l = lo(b);
   const h = hi(b);
+  // scope 比結構短：沿 scope 的軸只算 scope 那一段（推面／補平的方向和 scope 同軸時不行：
+  // 最外側的面要看整根，裁掉會把裁切邊當成表面）
+  const sa = axisIndex(op.scope.axis);
+  const along = (op.kind === 'push' || op.kind === 'level') && (op.dir[0] ? 0 : op.dir[1] ? 1 : 2) === sa;
+  if (op.kind !== 'translate' && !along) {
+    l[sa] = Math.max(l[sa], op.scope.lo);
+    h[sa] = Math.min(h[sa], op.scope.hi);
+    if (l[sa] > h[sa]) return null;
+  }
   if (op.kind === 'push' || op.kind === 'level') {
     const a = op.dir[0] ? 0 : op.dir[1] ? 1 : 2;
     const local = op.local;
@@ -107,6 +117,28 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
     const reach = (op.kind === 'push' ? Math.abs(op.n) : Math.abs(op.to - l[a]) + Math.abs(op.to - h[a])) + LINER_MARGIN;
     l[a] -= reach;
     h[a] += reach;
+    return clampBox(fromLoHi(l, h), s.vol);
+  }
+  if (op.kind === 'profile') {
+    // 切面上：選取外框 ∪ 要加／拿的格子，四周多留襯層；沿法線：scope ∩ 選取外框
+    const a = axisIndex(op.scope.axis);
+    const [ua, va] = planeAxes(op.scope.axis);
+    for (const pk of Object.values(op.perKey))
+      for (const r of [pk.add, pk.remove]) {
+        const rb = rleBox(r);
+        if (!rb) continue;
+        l[ua] = Math.min(l[ua], rb.u0);
+        h[ua] = Math.max(h[ua], rb.u1);
+        l[va] = Math.min(l[va], rb.v0);
+        h[va] = Math.max(h[va], rb.v1);
+      }
+    for (const k of [ua, va]) {
+      l[k] -= LINER_MARGIN;
+      h[k] += LINER_MARGIN;
+    }
+    l[a] = Math.max(l[a], op.scope.lo);
+    h[a] = Math.min(h[a], op.scope.hi);
+    if (l[a] > h[a]) return null;
     return clampBox(fromLoHi(l, h), s.vol);
   }
   if (op.kind === 'translate') {
@@ -136,6 +168,10 @@ export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap 
   const vol = cropVolume(s.vol, box);
   const o = cropVolume(orig, box);
   const mask = cropMask(s.L, new Set(op.keys), s.vol, box);
+  if (op.kind === 'profile') {
+    const masks = new Map(op.keys.map((k) => [k, cropMask(s.L, new Set([k]), s.vol, box)] as const));
+    return { box, data: applyProfileMask(vol, o, masks, op, [box.x0, box.y0, box.z0], report).data };
+  }
   // scope 換成裁切範圍裡的座標（超出的部分本來就不會被改）
   const off = [box.x0, box.y0, box.z0][axisIndex(op.scope.axis)];
   const zr = { axis: op.scope.axis, lo: op.scope.lo - off, hi: op.scope.hi - off };

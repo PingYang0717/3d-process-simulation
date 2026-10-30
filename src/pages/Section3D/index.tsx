@@ -132,6 +132,8 @@ function Brand() {
 
 export default function Section3DPage() {
   const ed = useEditor();
+  // 開發模式：e2e 腳本從 window.__ed 讀狀態（正式打包不會有）
+  if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
   const { message, modal } = App.useApp();
   const [leftW, setLeftW] = usePersisted('leftW', 240);
   const [rightW, setRightW] = usePersisted('rightW', 350);
@@ -221,8 +223,13 @@ export default function Section3DPage() {
         return;
       }
       if (k === 'e') {
-        if (editing) leaveEdit();
-        else if (ed.sel.size) enterEdit();
+        // 2D 編輯裡：E 點一下＝回 3D；按住＝只抓邊（放開時判斷）
+        if (editing) {
+          if (!e.repeat) {
+            eDownAt.current = Date.now();
+            draggedSinceE.current = false;
+          }
+        } else if (ed.sel.size) enterEdit();
         else message.info({ key: 'edit', content: '先選一個結構，再按 E 進入 2D 編輯' });
         return;
       }
@@ -237,9 +244,49 @@ export default function Section3DPage() {
         leaveEdit();
       }
     };
+    const up = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'e' || !editing || typingIn(e.target)) return;
+      if (Date.now() - eDownAt.current < 300 && !draggedSinceE.current) leaveEdit();
+    };
     window.addEventListener('keydown', down, { capture: true });
-    return () => window.removeEventListener('keydown', down, { capture: true });
+    window.addEventListener('keyup', up, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', down, { capture: true });
+      window.removeEventListener('keyup', up, { capture: true });
+    };
   });
+  const eDownAt = useRef(0);
+  const draggedSinceE = useRef(false);
+
+  /** 拖動中：主切面只算這一片（第 1 級）；範圍小的話 3D 與小切面也即時（第 2 級）。 */
+  const [dragPv, setDragPv] = useState<PV | null>(null);
+  const onLive = (op: Op | null) => {
+    if (!op) {
+      setDragPv(null);
+      setPv((p) => (p && !p.committed ? null : p));
+      return;
+    }
+    const a = ed.editAxis;
+    const t = cursorAt(a);
+    if (op.scope.axis === a && t >= op.scope.lo && t <= op.scope.hi) {
+      const p = previewOp(ed.cur, ed.orig.vol, { ...op, scope: { axis: a, lo: t, hi: t } } as Op, 2_000_000);
+      setDragPv(p ? { ...p, base: sidOf(ed.cur), committed: false } : null);
+    } else setDragPv(null);
+    makePreview(op, LIVE_PREVIEW_CAP, false);
+  };
+  /** 「看這些片」：跳到下一個有被擋住的片（循環）。 */
+  const jumpBlocked = () => {
+    const r = ed.report;
+    if (!r?.slices.length) return;
+    const a = r.axis;
+    const cur = cursorAt(a);
+    const next = r.slices.find((s) => s.at > cur) ?? r.slices[0];
+    if (!editing || ed.editAxis !== a) {
+      ed.setEditAxis(a);
+      setEditing(true);
+    }
+    setCursorAxis(a, next.at);
+  };
 
   /**
    * 進入 2D 編輯：方向＝使用者挑過的，否則選取最長的那一軸當法線；
@@ -290,6 +337,11 @@ export default function Section3DPage() {
       content: (
         <span>
           {ed.last.text}
+          {!!ed.report?.slices.length && (
+            <Typography.Link style={{ marginLeft: 10 }} onClick={jumpBlocked}>
+              看這些片
+            </Typography.Link>
+          )}
           {ed.hist.length > 0 && (
             <Typography.Link style={{ marginLeft: 10 }} onClick={() => (ed.undo(), message.destroy('last'))}>
               復原
@@ -505,7 +557,7 @@ export default function Section3DPage() {
             </Text>
           )}
         </div>
-        <PositionBar ed={ed} axis={axis} has={selSlices} />
+        <PositionBar ed={ed} axis={axis} has={selSlices} onJumpBlocked={jumpBlocked} />
         <div className="slice-body">
           <SliceEditor
             key={axis}
@@ -518,13 +570,24 @@ export default function Section3DPage() {
             cursor={ed.cursor}
             scope={ed.sel.size ? ed.scope : null}
             diff={diffShown}
-            preview={slicePv}
+            preview={dragPv ?? slicePv}
             selBox={peek ? null : (unionBBox(ed.selComps) ?? null)}
             focusKey={selKey}
             autoZoom={ed.autoZoom}
             onPick={pickInSlice}
             onStep={(d) => ed.stepCursor(axis, d)}
             onHover={setSliceHover}
+            L={peek ? undefined : ed.L}
+            selKeys={peek ? [] : [...ed.sel]}
+            gesture={{ scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }}
+            onCommit={ed.commit}
+            onLive={onLive}
+            blocked={ed.report?.cells ?? null}
+            handle={ed.handle}
+            setHandle={ed.setHandle}
+            onDragState={(d) => {
+              if (d) draggedSinceE.current = true;
+            }}
           />
         </div>
       </div>

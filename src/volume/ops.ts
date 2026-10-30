@@ -16,6 +16,9 @@ import {
   translateMask,
 } from './volume';
 import { type Scope, fromZRange, isFullScope, scopeText } from './scope';
+import { type ProfileOp, applyProfileMask } from './profile';
+
+export type { ProfileOp } from './profile';
 
 /** 筆刷：只推離 center 半徑 radius 內的列（shape 省略 = 圓；radius = Infinity 以 null 存，表示整面）。 */
 export interface Local {
@@ -32,10 +35,12 @@ export type Op =
   | { kind: 'translate'; keys: string[]; scope: Scope; d: Vec3; backfill: Backfill; follow?: boolean }
   | { kind: 'material'; keys: string[]; scope: Scope; m: number }
   /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）；follow = 襯層跟推（同 push）。 */
-  | { kind: 'level'; keys: string[]; scope: Scope; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean };
+  | { kind: 'level'; keys: string[]; scope: Scope; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean }
+  /** 2D 剖面編輯（拖節點、斜邊、圓弧）：每個結構一份要加、要拿的格子，套用到 scope 裡的每一片（§7.3）。 */
+  | ProfileOp;
 
 /** 舊格式（v6／v11 的 manifest、重播紀錄）：用 zRange: [a, b] 而不是 scope。 */
-export type LegacyOp = Op extends infer O ? (O extends { scope: Scope } ? Omit<O, 'scope'> & { zRange: [number, number] } : never) : never;
+export type LegacyOp = Exclude<Op, ProfileOp> extends infer O ? (O extends { scope: Scope } ? Omit<O, 'scope'> & { zRange: [number, number] } : never) : never;
 
 /** 讀進來的 Op 一律先過這裡：zRange → scope（axis z）；已是新格式原樣回傳。 */
 export function upgradeOp(op: Op | LegacyOp): Op {
@@ -67,6 +72,11 @@ export function applyOp(s: EditState, input: Op | LegacyOp, ctx: OpContext): Edi
   const op = upgradeOp(input);
   let mask = maskOf(s.L, new Set(op.keys));
   if (!mask) return s;
+  if (op.kind === 'profile') {
+    const masks = new Map(op.keys.map((k) => [k, maskOf(s.L, new Set([k]))!] as const).filter(([, m]) => !!m));
+    const vol = applyProfileMask(s.vol, ctx.orig, masks, op, [0, 0, 0]);
+    return { vol, L: relabel(s.vol, s.L, mask, [0, 0, 0], vol, ctx.matName, ctx.newKey) };
+  }
   let vol: Volume;
   let shift: Vec3 = [0, 0, 0];
   if (op.kind === 'push') {
@@ -97,6 +107,10 @@ export function opText(input: Op | LegacyOp, L: Labeled, dims: { X: number; Y: n
         ? `${matName([...mats][0])} ×${comps.length}`
         : `${op.keys.length} 個結構`;
   const part = isFullScope(op.scope, dims) ? '' : `（${scopeText(op.scope)}）`;
+  if (op.kind === 'profile') {
+    const plane = op.scope.axis === 'z' ? 'XY' : op.scope.axis === 'y' ? 'XZ' : 'YZ';
+    return `${who}（${plane}，${scopeText(op.scope)}）${op.text ?? '剖面調整'}`;
+  }
   const brush = (l: Local) => (l.radius === null ? '整面' : `筆刷 ${l.shape === 'square' ? '方' : '圓'} r${l.radius}`);
   if (op.kind === 'push') {
     const n = Math.abs(op.n);

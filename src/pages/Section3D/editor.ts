@@ -70,6 +70,9 @@ export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { ki
 import { applyIn, call, deriveIn, ensure, loadOrig, replayIn, retain, sidOf } from '../../volume/client';
 import { type Step, applyStep } from '../../volume/patch';
 import { type OpReport, blockedPhrase, summarize } from '../../volume/report';
+import { boxVoxels } from '../../volume/preview';
+import { clipBox as clipScopeBox } from '../../volume/scope';
+import type { PickedHandle } from './SliceEditor';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
@@ -154,7 +157,7 @@ export interface MenuState {
 }
 
 export function useEditor() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [materials, setMaterials] = useState<Material[]>([]);
   const [meta, setMeta] = useState<Meta>({ format: 'demo' });
   const [origState, setOrig] = useState<EditState | null>(null);
@@ -190,6 +193,10 @@ export function useEditor() {
   const [sculpt3d, setSculpt3d] = usePersisted('sculpt3d', false);
   /** 選到結構時主切面自動放大到它。 */
   const [autoZoom, setAutoZoom] = usePersisted('autoZoom', true);
+  /** 大操作確認門檻（體素數）：一步會動到的範圍超過就先問。 */
+  const [bigOp, setBigOp] = usePersisted('bigOp', 4_000_000, (v): v is number => typeof v === 'number' && v > 0);
+  /** 主切面上選到的把手（節點／邊）：右欄數值輸入、方向鍵。 */
+  const [handle, setHandle] = useState<PickedHandle | null>(null);
   // 跨次記住：襯層跟推、nm 比例（載入有 spacing 的 .vti 會覆蓋）、筆刷
   const [follow, setFollow] = usePersisted('follow', true);
   const [backfill, setBackfill] = useState<Backfill>('orig');
@@ -470,22 +477,51 @@ export function useEditor() {
    * 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。
    * Worker 忙的時候排隊（最多 QUEUE_MAX 步），依序接在前一步的結果後面；超過就拒絕並提示。
    */
+  const enqueue = (op: Op) => {
+    if (queue.current.length > QUEUE_MAX) {
+      message.warning({ key: 'queue', content: '還在算前面的步驟，請稍等' });
+      return;
+    }
+    if (!running.current) previewHook.current?.(op);
+    queue.current.push(op);
+    setQueued(Math.max(0, queue.current.length - 1));
+    if (!running.current) void drain();
+  };
+  /** 這一步大概會動到多少體素（選取外框 ∩ 範圍）。 */
+  const opVoxels = (op: Op) => {
+    const s = splitsRef.current.find((x) => x.id === activeRef.current)?.cur ?? origRef.current;
+    if (!s) return 0;
+    const keys = new Set(op.keys);
+    const b = unionBBox(s.L.comps.filter((c) => keys.has(c.key)));
+    const c = b && clipScopeBox(b, op.scope);
+    return c ? boxVoxels(c) : 0;
+  };
+  const bigRef = useRef(bigOp);
+  bigRef.current = bigOp;
   const commit = useCallback(
     (op: Op) => {
       if (!origRef.current) return;
-      if (queue.current.length > QUEUE_MAX) {
-        message.warning({ key: 'queue', content: '還在算前面的步驟，請稍等' });
+      const n = opVoxels(op);
+      if (n > bigRef.current && op.kind !== 'material') {
+        const comps = (splitsRef.current.find((x) => x.id === activeRef.current)?.cur ?? origRef.current).L.comps.filter((c) => op.keys.includes(c.key));
+        const who = comps.length === 1 ? comps[0].label : `${comps.length} 個結構`;
+        modal.confirm({
+          title: '這一步範圍很大',
+          content: `這一步會改到約 ${Math.round(n / 1e4).toLocaleString()} 萬格（整個 ${who}），可能要幾秒。繼續？`,
+          okText: '繼續',
+          cancelText: '取消',
+          onOk: () => enqueue(op),
+        });
         return;
       }
-      if (!running.current) previewHook.current?.(op);
-      queue.current.push(op);
-      setQueued(Math.max(0, queue.current.length - 1));
-      if (!running.current) void drain();
+      enqueue(op);
     },
-    // drain／commitOne 每次 render 都是新的閉包，但只讀 ref，所以不必放進依賴
+    // enqueue／drain 每次 render 都是新的閉包，但只讀 ref，所以不必放進依賴
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [message],
+    [message, modal],
   );
+  // 換選取或換方向時把手失效
+  useEffect(() => setHandle(null), [selKey, editAxis]);
 
   /** 排隊中按復原：先清掉還沒開始的步驟，正在算的那一步做完再復原它。 */
   const undoAfter = useRef(false);
@@ -918,8 +954,13 @@ export function useEditor() {
     stepCursor,
     cursorIndex,
     voxelCoord,
+    commit,
     report,
     setReport,
+    handle,
+    setHandle,
+    bigOp,
+    setBigOp,
     queued,
     scope,
     scopeMode,

@@ -61,3 +61,22 @@ export const fromZRange = (r: [number, number]): Scope => ({ axis: 'z', lo: r[0]
 
 /** 「z 40～80」這種範圍詞。 */
 export const scopeText = (s: Scope) => (s.lo === s.hi ? `${s.axis} = ${s.lo}` : `${s.axis} ${s.lo}～${s.hi}`);
+
+/** 切面上的 (u, v) 是哪兩個體素軸：XY 正面 u=x v=y；XZ 上視 u=x v=z；YZ 側面 u=z v=y。 */
+export const planeAxes = (axis: Axis): [0 | 1 | 2, 0 | 1 | 2] => (axis === 'z' ? [0, 1] : axis === 'y' ? [0, 2] : [2, 1]);
+/** 切面座標 (u, v) 加上第 t 片 → 體素座標。 */
+export function to3D(axis: Axis, u: number, v: number, t: number): Vec3 {
+  const [a, b] = planeAxes(axis);
+  const p: Vec3 = [0, 0, 0];
+  p[a] = u;
+  p[b] = v;
+  p[axisIndex(axis)] = t;
+  return p;
+}
+/** 切面上的位移 (du, dv) → 體素方向。 */
+export const uvTo3D = (axis: Axis, du: number, dv: number): Vec3 => to3D(axis, du, dv, 0);
+/** 體素座標 → 切面 (u, v)。 */
+export function toUV(axis: Axis, p: Vec3): [number, number] {
+  const [a, b] = planeAxes(axis);
+  return [p[a], p[b]];
+}

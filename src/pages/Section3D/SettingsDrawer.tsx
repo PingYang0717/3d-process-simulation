@@ -61,6 +61,16 @@ export function SettingsDrawer({
           <Row label="選到結構時自動放大到它" sub="2D 編輯的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />
           </Row>
+          <Row label="大操作先確認（進階）" sub="一步會動到的範圍超過這麼多格就先問">
+            <InputNumber
+              min={10}
+              step={50}
+              value={Math.round(ed.bigOp / 1e4)}
+              onChange={(v) => v && v > 0 && ed.setBigOp(v * 1e4)}
+              suffix="萬格"
+              style={{ width: 130 }}
+            />
+          </Row>
         </Section>
         <Section title="畫面">
           <Row label="改過的地方標紅">

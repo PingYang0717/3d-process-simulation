@@ -586,14 +586,16 @@ M3
 
 ### M2 2D 編輯核心（總量 L）
 
-- [ ] M　trace（含內環、多環）、節點、SVG 編輯層
-- [ ] M　手勢狀態機、三種拖法、連帶／防穿層、Shift／V／E／R
-- [ ] S　raster 與 delta
-- [ ] M　`profile` Op、逐片套用、報告、被擋標紅與「看這些片」
-- [ ] S　手勢→Op 對應表（push／translate／level 優先）
-- [ ] S　三級即時回饋
-- [ ] S　大操作確認、排隊
-- [ ] S　範圍四項提示（位置列文字、3D 藍色、訊息、按鈕文字）
+- [x] M　trace（含內環、多環）、節點、SVG 編輯層
+- [x] M　手勢狀態機、三種拖法、連帶／防穿層、Shift／V／E／R
+- [x] S　raster 與 delta
+- [x] M　`profile` Op、逐片套用、報告、被擋標紅與「看這些片」
+- [x] S　手勢→Op 對應表（push／translate／level 優先）
+- [x] S　三級即時回饋
+- [x] S　大操作確認、排隊
+- [x] S　範圍四項提示（位置列文字、3D 藍色、訊息、按鈕文字；按鈕文字在 M3 浮動工具列）
+
+狀態：完成。`scripts/e2e/m2.cjs` 全部步驟通過（方頭在範例上改 1,650 格，不是 768；其他照腳本）；`trace.test.ts`、`profile.test.ts`。排隊沒有另寫單元測試，由 m2.cjs 第 7 步驗。連帶襯層由核心規則處理（follow），防穿層＝follow 關時被厚材質擋住、訊息說被擋幾格。
 
 驗收腳本（Playwright，範例 ×1）：
 

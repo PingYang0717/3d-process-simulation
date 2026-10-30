@@ -569,6 +569,11 @@ export function useEditor() {
         setActiveId(ids[(at + (e.key === ']' ? 1 : ids.length - 1)) % ids.length]);
         return;
       }
+      // 焦點在按鈕、滑桿、分頁等控制項上時，方向鍵留給它們，不動模型
+      const ae = document.activeElement as HTMLElement | null;
+      const onControl =
+        !!ae && ae !== document.body && !!ae.closest('button,a,[role=slider],[role=radio],[role=tab],[role=switch],[role=menuitem],[role=option],.ant-select,.ant-segmented');
+      if (onControl) return;
       const step = e.shiftKey ? 10 : 1;
       const moves: Record<string, Vec3> = {
         ArrowLeft: [-step, 0, 0],

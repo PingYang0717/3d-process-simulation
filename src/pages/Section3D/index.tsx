@@ -194,6 +194,18 @@ export default function Section3DPage() {
     if (mode === 'diff' && !ed.diff.count) setMode('now');
   }, [mode, ed.diff.count]);
 
+  // 有還沒匯出的改動時，關閉或重新整理前先問一下（全部狀態都只在記憶體）
+  const dirty = ed.splits.some((s) => s.ops.length > 0);
+  useEffect(() => {
+    if (!dirty) return;
+    const ask = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', ask);
+    return () => window.removeEventListener('beforeunload', ask);
+  }, [dirty]);
+
   const peek = mode === 'orig';
   const shown = peek ? ed.orig.vol : ed.vol;
   const clip: Clip | null = clipOn ? { axis: clipAxis, at: Math.min(axisMax(clipAxis), clipPos[clipAxis]), side: clipSide } : null;
@@ -430,6 +442,8 @@ export default function Section3DPage() {
   const brushLabel = `${br.mode === 'push' ? '筆刷' : '補平'} ${br.shape === 'square' ? '方' : '圓'}${br.radius ?? 6}`;
 
   const selName = ed.selComps.length === 1 ? ed.selComps[0].label : `${ed.selComps.length} 個結構`;
+  /** Worker 計算中：改體素的按鈕先 disabled，點了不會無聲被吞掉。 */
+  const working = !!ed.busy;
   const firstMat = ed.selComps.length ? matOf(ed, ed.selComps[0].mat) : null;
   const oneMat = ed.selComps.every((c) => c.mat === ed.selComps[0]?.mat);
   const whole = ed.zRange[0] === 0 && ed.zRange[1] === ed.vol.Z - 1;
@@ -448,16 +462,16 @@ export default function Section3DPage() {
         {ed.sel.size > 0 && (
           <Space.Compact size="small" className="tb">
             <Tooltip title="頂面往上 1 voxel，可以一直按">
-              <Button icon={<ArrowUpOutlined />} onClick={() => ed.push([0, -1, 0], 1)}>
+              <Button icon={<ArrowUpOutlined />} disabled={working} onClick={() => ed.push([0, -1, 0], 1)}>
                 長高
               </Button>
             </Tooltip>
             <Tooltip title="頂面往下 1 voxel">
-              <Button icon={<ArrowDownOutlined />} onClick={() => ed.push([0, -1, 0], -1)}>
+              <Button icon={<ArrowDownOutlined />} disabled={working} onClick={() => ed.push([0, -1, 0], -1)}>
                 縮短
               </Button>
             </Tooltip>
-            <Dropdown menu={{ items: matItems }} trigger={['click']}>
+            <Dropdown menu={{ items: matItems }} trigger={['click']} disabled={working}>
               <Button>
                 {oneMat && firstMat && <Swatch fill={firstMat.color} isVoid={isVoid(firstMat.id)} />}
                 {oneMat ? firstMat?.name : '多種材質'}
@@ -473,12 +487,12 @@ export default function Section3DPage() {
         )}
         <Space.Compact size="small" className="tb">
           <Tooltip title="復原上一步（Ctrl+Z）">
-            <Button icon={<UndoOutlined />} disabled={!ed.hist.length} onClick={ed.undo}>
+            <Button icon={<UndoOutlined />} disabled={!ed.hist.length || working} onClick={ed.undo} aria-label="復原">
               <span className="tb-text">復原</span>
             </Button>
           </Tooltip>
           <Tooltip title="丟掉這個 split 的所有改動">
-            <Button icon={<RollbackOutlined />} disabled={!ed.diff.count} onClick={ed.resetAll}>
+            <Button icon={<RollbackOutlined />} disabled={!ed.diff.count || working} onClick={ed.resetAll} aria-label="回到原始">
               <span className="tb-text">回到原始</span>
             </Button>
           </Tooltip>
@@ -751,7 +765,7 @@ export default function Section3DPage() {
           {ed.meta.spacing ? ` · spacing ${ed.meta.spacing.join('×')} ${ed.meta.unit === 'um' ? 'µm' : 'nm'}` : ''}
         </Text>
         <div className="grow" />
-        <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
+        <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)} aria-label="上傳 .vti">
           <span className="btn-text">上傳 .vti</span>
         </Button>
         <Dropdown
@@ -771,7 +785,7 @@ export default function Section3DPage() {
             ],
           }}
         >
-          <Button type="primary" icon={<DownloadOutlined />}>
+          <Button type="primary" icon={<DownloadOutlined />} aria-label="匯出">
             <span className="btn-text">匯出</span>
           </Button>
         </Dropdown>

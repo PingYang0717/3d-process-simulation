@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button, Dropdown, Input, Modal, Typography } from 'antd';
+import { App, Button, Dropdown, Input, Modal, Typography } from 'antd';
 import { AppstoreOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { BASE_ID, type Editor, type Split } from './editor';
 
@@ -17,8 +17,18 @@ export function SplitBar({
   setCompare: (v: boolean) => void;
   onSweep: () => void;
 }) {
+  const { modal } = App.useApp();
   const [renaming, setRenaming] = useState<Split | null>(null);
   const [name, setName] = useState('');
+  const confirmRemove = (s: Split) =>
+    modal.confirm({
+      title: `刪除「${s.name}」？`,
+      content: s.ops.length ? `這個 split 有 ${s.ops.length} 步改動，刪除後無法復原。` : '這個 split 還沒有改動。',
+      okText: '刪除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => ed.removeSplit(s.id),
+    });
   const startRename = (s: Split) => {
     setRenaming(s);
     setName(s.name);
@@ -58,7 +68,7 @@ export function SplitBar({
                         icon: <DeleteOutlined />,
                         label: '刪除',
                         danger: true,
-                        onClick: () => ed.removeSplit(s.id),
+                        onClick: () => confirmRemove(s),
                       },
                     ],
                   }}

@@ -291,7 +291,9 @@ span.group-caret { display: inline-block; width: 22px; flex: none; }
 .dim-table .ant-table-cell { padding: 6px 8px !important; }
 
 /* 計算中（Worker）、3D 拖拉提示 */
-.busy-bar { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 16px; background: #e8f1ff; color: #0b57d0; font-size: 12px; flex: none; }
+.stage { position: relative; }
+/* 計算中：浮在 Split 列下方的小膠囊，不推動 3D 與切面的版面 */
+.busy-bar { position: absolute; top: 48px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 14px; background: #e8f1ff; color: #0b57d0; font-size: 12px; border-radius: 14px; box-shadow: 0 2px 8px rgba(11,87,208,.18); pointer-events: none; white-space: nowrap; }
 .busy-dot { width: 8px; height: 8px; border-radius: 4px; background: #1677ff; animation: pulse 1s infinite; }
 @keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
 .mesh-busy { position: absolute; right: 12px; bottom: 12px; z-index: 3; padding: 3px 10px; background: rgba(255, 255, 255, .92); border-radius: 6px; font-size: 12px; color: #646a73; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); pointer-events: none; }
@@ -325,3 +327,15 @@ span.group-caret { display: inline-block; width: 22px; flex: none; }
 .canvas-area[class*="focus-"] .pane-3d .viewbar, .canvas-area[class*="focus-"] .pane-3d .sectionbar, .canvas-area[class*="focus-"] .pane-3d .pane-foot,
 .canvas-area[class*="focus-"] .pane-3d .tb-text, .canvas-area[class*="focus-"] .pane-3d .pane-sub, .canvas-area[class*="focus-"] .pane-3d .gizmo { display: none !important; }
 @media (max-width: 1599px) { .tb-text { display: none; } .pane-head .tb .ant-btn-icon { margin-inline-end: 0 !important; } }
+
+/* ---- 左欄：名稱優先，操作圖示 hover 才浮出，已改用小點 ---- */
+.group-head { position: relative; }
+.group-name { min-width: 56px; }
+.chg-dot { width: 7px; height: 7px; border-radius: 4px; background: #fa8c16; flex: none; display: inline-block; }
+.group-count { min-width: 0; }
+.group-acts { position: absolute; right: 2px; top: 0; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; padding-left: 6px; background: #fff; }
+.group-head:hover .group-acts, .group-acts:focus-within, .group.hid .group-acts { opacity: 1; }
+.group-head:hover .group-count, .group-head:hover .chg-dot { visibility: hidden; }
+.group-acts .ant-btn-sm { width: 24px; min-width: 24px; padding: 0; }
+.group-head.sel .group-acts { background: #e6f4ff; }
+@media (hover: none) { .group-acts { position: static; opacity: 1; padding-left: 0; background: none; } }

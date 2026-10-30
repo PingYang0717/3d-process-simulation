@@ -35,7 +35,7 @@ function PushRow({ ed }: { ed: Editor }) {
           <InputNumber value={n} onChange={setN} step={1} precision={0} addonAfter="vx" style={{ width: '100%' }} onPressEnter={apply} />
         </label>
       </Flex>
-      <Button type="primary" block onClick={apply} disabled={!steps}>
+      <Button type="primary" block onClick={apply} disabled={!steps || !!ed.busy} loading={!!ed.busy}>
         {steps < 0 ? `${dir.name}縮 ${-steps} 格` : `${dir.name}長 ${steps} 格`}（{(Math.abs(steps) * ed.nmPerVoxel).toFixed(1)} nm）
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
@@ -67,7 +67,7 @@ function MoveRow({ ed }: { ed: Editor }) {
           </label>
         ))}
       </Flex>
-      <Button block onClick={apply} disabled={!any}>
+      <Button block onClick={apply} disabled={!any || !!ed.busy}>
         整塊移動
         {any
           ? `（${['x', 'y', 'z']
@@ -90,10 +90,13 @@ function MaterialRow({ ed, value, onMaterial }: { ed: Editor; value?: number; on
         style={{ flex: 1 }}
         value={value}
         placeholder="多種材質"
+        disabled={!!ed.busy}
         onChange={(m) => onMaterial(m)}
         options={ed.materials.filter((m) => m.id !== 0).map((m) => ({ value: m.id, label: <MatLabel mat={m} /> }))}
       />
-      <Button onClick={() => onMaterial(254)}>設為 VOID</Button>
+      <Button onClick={() => onMaterial(254)} disabled={!!ed.busy}>
+        設為 VOID
+      </Button>
     </Space.Compact>
   );
 }

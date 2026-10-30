@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Button, ColorPicker, Input, Tag, Tooltip, Typography } from 'antd';
+import { Button, ColorPicker, Input, Tooltip, Typography } from 'antd';
 import { EditOutlined, EyeInvisibleOutlined, EyeOutlined, RightOutlined } from '@ant-design/icons';
 import { type Comp, isVoid } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
@@ -108,31 +108,26 @@ export function StructureList({ ed, width }: { ed: Editor; width: number }) {
                   </button>
                 )}
                 {changed > 0 && (
-                  <Tag color="orange" bordered={false} className="mini-tag">
-                    {only ? '已改' : `已改 ${changed}`}
-                  </Tag>
+                  <Tooltip title={only ? '和原始不同' : `已改 ${changed} 塊`}>
+                    <span className="chg-dot" aria-label="已改" />
+                  </Tooltip>
                 )}
-                {!only && <span className="group-count">{regions.length} 塊</span>}
-                <Tooltip title="改名稱">
-                  <Button
-                    type="text"
-                    size="small"
-                    className="group-eye"
-                    icon={<EditOutlined />}
-                    onClick={() => setEditing(mat.id)}
-                    aria-label="改名稱"
-                  />
-                </Tooltip>
-                <Tooltip title={hid ? '顯示' : '隱藏（看裡面用）'}>
-                  <Button
-                    type="text"
-                    size="small"
-                    className={'group-eye' + (hid ? ' show' : '')}
-                    icon={hid ? <EyeInvisibleOutlined /> : <EyeOutlined />}
-                    onClick={() => ed.toggleHidden(mat.id)}
-                    aria-label="顯示／隱藏"
-                  />
-                </Tooltip>
+                {!only && <span className="group-count">×{regions.length}</span>}
+                <span className="group-acts">
+                  <Tooltip title="改名稱">
+                    <Button type="text" size="small" icon={<EditOutlined />} onClick={() => setEditing(mat.id)} aria-label="改名稱" />
+                  </Tooltip>
+                  <Tooltip title={hid ? '顯示' : '隱藏（看裡面用）'}>
+                    <Button
+                      type="text"
+                      size="small"
+                      className={hid ? 'show' : ''}
+                      icon={hid ? <EyeInvisibleOutlined /> : <EyeOutlined />}
+                      onClick={() => ed.toggleHidden(mat.id)}
+                      aria-label="顯示／隱藏"
+                    />
+                  </Tooltip>
+                </span>
               </div>
               {!only &&
                 expanded &&
@@ -144,11 +139,7 @@ export function StructureList({ ed, width }: { ed: Editor; width: number }) {
                     onClick={(e) => ed.selectKeys([c.key], selectModeOf(e))}
                   >
                     <span className="item-name">{c.label}</span>
-                    {ed.changedKeys.has(c.key) && (
-                      <Tag color="orange" bordered={false} className="mini-tag">
-                        已改
-                      </Tag>
-                    )}
+                    {ed.changedKeys.has(c.key) && <span className="chg-dot" title="和原始不同" aria-label="已改" />}
                     <Text type="secondary" style={{ fontSize: 11 }}>
                       {c.count.toLocaleString()}
                     </Text>

@@ -61,6 +61,9 @@ export function SettingsDrawer({
           <Row label="選到結構時自動放大到它" sub="2D 編輯的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />
           </Row>
+          <Row label="多選時對應到長得一樣的結構" sub="在一根 fin 上拖，其他長得一樣的 fin 一起改（同材質、長寬比與面積相近）">
+            <Switch checked={ed.mirror} onChange={ed.setMirror} />
+          </Row>
           <Row label="大操作先確認（進階）" sub="一步會動到的範圍超過這麼多格就先問">
             <InputNumber
               min={10}

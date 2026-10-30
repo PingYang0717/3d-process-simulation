@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, Tooltip } from 'antd';
 import { AimOutlined, ExpandOutlined } from '@ant-design/icons';
 import { type Axis, type BBox, type Backfill, type Labeled, type Material, type Vec3, type Volume, hexToRgb } from '../../volume/volume';
@@ -7,13 +7,14 @@ import type { Op } from '../../volume/ops';
 import { type Scope, axisIndex, axisLen, planeAxes, to3D } from '../../volume/scope';
 import { type Ring, type XY, traceRings } from '../../slice/trace';
 import { editRing } from '../../slice/raster';
-import { type GestureCtx, type Handle, type HandleKind, dragDisp, edgeAmount, gestureToOp, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
+import { type Handle, type HandleKind, dragDisp, edgeAmount, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
+import { opOfGesture, sliceContext } from './handleOps';
 import { type SelectMode, selectModeOf } from './editor';
 import { drawSlice } from './views';
-import { typingIn } from '../../ui/persist';
+import { typingIn, usePersisted } from '../../ui/persist';
 
 /** 選到的把手（節點／邊）：右欄數值輸入、方向鍵用。 */
-export type PickedHandle = Handle & { axis: Axis; at: number; p: XY };
+export type PickedHandle = Handle & { axis: Axis; at: number; p: XY; origin: XY };
 
 /** 手勢要的設定（editor 給）。 */
 export interface GestureOpts {
@@ -124,6 +125,10 @@ export function SliceEditor({
   handle,
   setHandle,
   onDragState,
+  mirror = false,
+  onNote,
+  overlay,
+  onMenu,
 }: {
   vol: Volume;
   axis: Axis;
@@ -158,6 +163,14 @@ export function SliceEditor({
   handle?: PickedHandle | null;
   setHandle?: (h: PickedHandle | null) => void;
   onDragState?: (dragging: boolean) => void;
+  /** 多選時對應到長得一樣的結構。 */
+  mirror?: boolean;
+  /** 「Si fin 3 找不到對應的邊，未改」之類的提醒。 */
+  onNote?: (text: string) => void;
+  /** 貼在選取外框右上角的浮動工具列。 */
+  overlay?: ReactNode;
+  /** 右鍵（沒有拖）：選單。 */
+  onMenu?: (p: Vec3 | null, clientX: number, clientY: number) => void;
 }) {
   const [W, H] = planeDims(vol, axis);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -183,31 +196,29 @@ export function SliceEditor({
     },
     [L, axis, at, vol],
   );
-  const sliceBox = useCallback(
-    (key: string) => {
-      const rs = rings.get(key);
-      if (!rs) return null;
-      let u0 = Infinity;
-      let v0 = Infinity;
-      let u1 = -Infinity;
-      let v1 = -Infinity;
-      for (const r of rs)
-        if (!r.hole)
-          for (const [u, v] of r.pts) {
-            u0 = Math.min(u0, u);
-            v0 = Math.min(v0, v);
-            u1 = Math.max(u1, u - 1);
-            v1 = Math.max(v1, v - 1);
-          }
-      return u0 <= u1 ? { u0, v0, u1, v1 } : null;
-    },
-    [rings],
+  const sctx = useMemo(
+    () => (L && gesture ? sliceContext(L, vol, axis, at, selKeys ?? [], gesture, rings) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [L, vol, axis, at, rings, gesture?.scope, gesture?.follow, gesture?.backfill, gesture?.nm],
   );
-  const gctx = (): GestureCtx | null =>
-    gesture ? { axis, at, scope: gesture.scope, follow: gesture.follow, backfill: gesture.backfill, nm: gesture.nm, selKeys: selKeys ?? [], inside: insideKey, sliceBox } : null;
+  /** 手勢 → Op（多選＋對應時一起改長得一樣的結構）。 */
+  const opFor = (h: Handle, delta: XY, shift: boolean) => (sctx ? opOfGesture(sctx, h, delta, shift, mirror) : { op: null, missed: [] as string[] });
+  const labelOf = (key: string) => L?.comps.find((c) => c.key === key)?.label ?? key;
+  const noteMissed = (missed: string[], h: Handle) => {
+    if (missed.length) onNote?.(`${missed.map(labelOf).join('、')} 找不到對應的${h.kind === 'node' ? '節點' : '邊'}，未改`);
+  };
+  /** 第一次用：選到結構後左下角三行提示，成功拖一次之後不再顯示。 */
+  const [hintsSeen, setHintsSeen] = usePersisted('hintsSeen', false);
+  /** 浮動工具列的實際寬度（貼右邊時不要超出畫面）。 */
+  const tbRef = useRef<HTMLDivElement>(null);
+  const [tbW, setTbW] = useState(520);
+  useLayoutEffect(() => {
+    const w = tbRef.current?.offsetWidth;
+    if (w && Math.abs(w - tbW) > 2) setTbW(w);
+  });
   const [hover, setHover] = useState<Handle | null>(null);
   /** 拖動中：抓到的把手、位移（切面格）、Shift。 */
-  const [drag, setDrag] = useState<{ h: Handle; delta: XY; shift: boolean; op: Op | null } | null>(null);
+  const [drag, setDrag] = useState<{ h: Handle; delta: XY; shift: boolean; op: Op | null; missed: string[] } | null>(null);
   const dragRef = useRef(drag);
   dragRef.current = drag;
   /** 按住 V／E／R：只抓節點／邊／區域。 */
@@ -343,7 +354,7 @@ export function SliceEditor({
     const v = Math.floor((clientY - r.top - p.ty) / p.zoom);
     return u >= 0 && v >= 0 && u < W && v < H ? [u, v] : null;
   };
-  const press = useRef<{ x: number; y: number; pan: boolean; tx: number; ty: number; id: number; hit: Handle | null; dragging: boolean } | null>(null);
+  const press = useRef<{ x: number; y: number; pan: boolean; tx: number; ty: number; id: number; hit: Handle | null; dragging: boolean; button: number } | null>(null);
   /** 螢幕座標 → 切面座標（格子角＝整數，可以有小數）。 */
   const planeAt = (clientX: number, clientY: number): XY | null => {
     const p = xfRef.current;
@@ -404,9 +415,8 @@ export function SliceEditor({
       if (arrows[e.key]) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        const g = gctx();
         const r = rings.get(handle.key)?.[handle.ring];
-        if (!g || !r) return;
+        if (!sctx || !r) return;
         let delta = arrows[e.key];
         if (handle.kind === 'edge') {
           // 邊：沿它的法線推；按跟法線同側的方向鍵＝往外
@@ -414,8 +424,9 @@ export function SliceEditor({
           const sgn = delta[0] * nrm[0] + delta[1] * nrm[1] >= 0 ? 1 : -1;
           delta = [nrm[0] * step * sgn, nrm[1] * step * sgn];
         }
-        const op = gestureToOp(rings, handle, delta, false, g);
+        const { op, missed } = opFor(handle, delta, false);
         if (op) {
+          noteMissed(missed, handle);
           onCommit?.(op);
           // 把手跟著走：下一次方向鍵還抓得到同一個節點／邊
           setHandle?.({ ...handle, p: [handle.p[0] + Math.round(delta[0]), handle.p[1] + Math.round(delta[1])] });
@@ -446,7 +457,7 @@ export function SliceEditor({
     if (!handle || handle.axis !== axis || handle.at !== at || !rings.size) return;
     const h2 = hitTest(rings, handle.p, 8 / 3, insideKey, handle.kind);
     if (!h2) setHandle?.(null);
-    else if (h2.key !== handle.key || h2.ring !== handle.ring || h2.index !== handle.index) setHandle?.({ ...h2, axis, at, p: handle.p });
+    else if (h2.key !== handle.key || h2.ring !== handle.ring || h2.index !== handle.index) setHandle?.({ ...h2, axis, at, p: handle.p, origin: handle.origin });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rings]);
   const cursorFor = (h: Handle | null) => {
@@ -517,7 +528,7 @@ export function SliceEditor({
         const pan = e.button === 1 || e.button === 2 || (e.button === 0 && (space.current || e.altKey));
         if (e.button !== 0 && !pan) return;
         e.currentTarget.setPointerCapture(e.pointerId);
-        press.current = { x: e.clientX, y: e.clientY, pan, tx: p.tx, ty: p.ty, id: e.pointerId, hit: pan ? null : hitAt(e.clientX, e.clientY), dragging: false };
+        press.current = { x: e.clientX, y: e.clientY, pan, tx: p.tx, ty: p.ty, id: e.pointerId, hit: pan ? null : hitAt(e.clientX, e.clientY), dragging: false, button: e.button };
         if (pan) e.currentTarget.style.cursor = 'grabbing';
       }}
       onPointerMove={(e) => {
@@ -535,9 +546,8 @@ export function SliceEditor({
           }
           const z = xfRef.current!.zoom;
           const delta: XY = [(e.clientX - pr.x) / z, (e.clientY - pr.y) / z];
-          const g = gctx();
-          const op = g ? gestureToOp(rings, pr.hit, delta, e.shiftKey, g) : null;
-          setDrag({ h: pr.hit, delta, shift: e.shiftKey, op });
+          const { op, missed } = opFor(pr.hit, delta, e.shiftKey);
+          setDrag({ h: pr.hit, delta, shift: e.shiftKey, op, missed });
           onLive?.(op);
           const r = hostRef.current!.getBoundingClientRect();
           setTip({ text: tipText(pr.hit, delta, e.shiftKey, op), x: e.clientX - r.left + 14, y: e.clientY - r.top + 16 });
@@ -556,6 +566,12 @@ export function SliceEditor({
         const pr = press.current;
         press.current = null;
         e.currentTarget.style.cursor = space.current ? 'grab' : '';
+        if (pr?.pan && pr.button === 2 && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < CLICK_PX) {
+          // 右鍵沒拖＝選單
+          const uv = uvAt(e.clientX, e.clientY);
+          onMenu?.(uv ? toVoxel(uv[0], uv[1]) : null, e.clientX, e.clientY);
+          return;
+        }
         if (!pr || pr.pan) return;
         if (pr.dragging) {
           // 放開＝一步（立刻套用到範圍）
@@ -564,7 +580,11 @@ export function SliceEditor({
           setTip(null);
           onLive?.(null);
           onDragState?.(false);
-          if (d?.op) onCommit?.(d.op);
+          if (d?.op) {
+            noteMissed(d.missed, d.h);
+            onCommit?.(d.op);
+            setHintsSeen(true);
+          }
           return;
         }
         if (Math.hypot(e.clientX - pr.x, e.clientY - pr.y) >= CLICK_PX) return;
@@ -572,7 +592,7 @@ export function SliceEditor({
         if (pr.hit && pr.hit.kind !== 'region') {
           const r = rings.get(pr.hit.key)![pr.hit.ring];
           const q = pr.hit.kind === 'node' ? r.pts[pr.hit.index] : planeAt(e.clientX, e.clientY)!;
-          setHandle?.({ ...pr.hit, axis, at, p: [q[0], q[1]] });
+          setHandle?.({ ...pr.hit, axis, at, p: [q[0], q[1]], origin: [q[0], q[1]] });
           return;
         }
         if (!pr.hit && handle) {
@@ -713,6 +733,34 @@ export function SliceEditor({
       {tip && (
         <div className="drag-tip" style={{ left: tip.x, top: tip.y }}>
           {tip.text}
+        </div>
+      )}
+      {overlay && xf && sb && !drag && (
+        <div
+          className="float-tb"
+          ref={tbRef}
+          style={(() => {
+            // 先放外框右上角；右邊放不下就放到外框上方（右緣對齊），不要蓋住結構
+            const hw = hostRef.current?.clientWidth ?? 600;
+            const hh = hostRef.current?.clientHeight ?? 400;
+            const right = xf.tx + (sb.u1 + 1) * xf.zoom + 10;
+            const fits = right + tbW + 8 <= hw;
+            const left = fits ? right : Math.max(8, Math.min(hw - tbW - 8, xf.tx + (sb.u1 + 1) * xf.zoom - tbW));
+            const top = fits ? xf.ty + sb.v0 * xf.zoom : xf.ty + sb.v0 * xf.zoom - 44;
+            return { left, top: Math.max(8, Math.min(hh - 48, top)) };
+          })()}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          {overlay}
+        </div>
+      )}
+      {!hintsSeen && !!selKeys?.length && !drag && (
+        <div className="sedit-first">
+          <div>靠近<b>點</b>可以拖</div>
+          <div>靠近<b>邊</b>可以推</div>
+          <div>在<b>裡面</b>可以搬</div>
         </div>
       )}
       <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>

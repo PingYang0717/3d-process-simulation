@@ -87,7 +87,7 @@ const ok = (cond, msg) => {
   ok(lo > 8 && hi < 151 && lo < hi, `自訂範圍從結構中間三分之一開始（x ${lo}～${hi}）`);
   await page.getByRole('button', { name: /往上長 1 格/ }).click();
   await page.waitForSelector('.busy-bar', { state: 'detached', timeout: 60000 });
-  await page.locator('.ant-message').getByText(`（x ${lo}～${hi}）`).first().waitFor({ timeout: 10000 });
+  await page.locator('.ant-message').getByText(`已套用到 x ${lo}～${hi}`).first().waitFor({ timeout: 10000 });
   ok(true, `套用訊息帶範圍「x ${lo}～${hi}」`);
   await page.waitForFunction(() => /已改動/.test(document.querySelector('.insp-foot')?.textContent ?? ''), null, { timeout: 30000 });
   const changed = Number((await page.locator('.insp-foot').innerText()).replace(/[^0-9]/g, ''));

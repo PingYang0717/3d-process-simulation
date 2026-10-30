@@ -7,6 +7,9 @@ import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
 import { ScopeControl } from './PositionBar';
+import { opOfGesture, resolveHandle, sliceContext } from './handleOps';
+import { groupNormal, smoothEdgeGroup } from '../../slice/gestures';
+import { Checkbox } from 'antd';
 
 const { Text } = Typography;
 
@@ -134,6 +137,93 @@ function MaterialRow({ ed, value, onMaterial }: { ed: Editor; value?: number; on
   );
 }
 
+/** 選到節點或邊時：數值輸入（和拖拉產生完全相同的 Op，§5.5）。 */
+function HandleRow({ ed }: { ed: Editor }) {
+  const h = ed.handle!;
+  const [uName, vName] = h.axis === 'z' ? ['x', 'y'] : h.axis === 'y' ? ['x', 'z'] : ['z', 'y'];
+  const [pos, setPos] = useState<[number | null, number | null]>([h.p[0], h.p[1]]);
+  const [n, setN] = useState<number | null>(1);
+  const [single, setSingle] = useState(false);
+  const [lastP, setLastP] = useState(h.p);
+  if (lastP !== h.p) {
+    setLastP(h.p);
+    setPos([h.p[0], h.p[1]]);
+  }
+  const ctx = () => sliceContext(ed.L, ed.vol, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel });
+  const run = (delta: [number, number], shift = false) => {
+    const c = ctx();
+    const hh = resolveHandle(c, h);
+    if (!hh) return;
+    const { op } = opOfGesture(c, hh, delta, shift, ed.mirror);
+    if (op) {
+      ed.commit(op);
+      ed.setHandle({ ...h, p: [h.p[0] + Math.round(delta[0]), h.p[1] + Math.round(delta[1])] });
+    }
+  };
+  if (h.kind === 'node')
+    return (
+      <Flex vertical gap={10}>
+        <Flex gap={10} align="end">
+          <label className="field">
+            <span>{uName}</span>
+            <InputNumber value={pos[0]} onChange={(v) => setPos([v, pos[1]])} precision={0} style={{ width: '100%' }} onPressEnter={() => run([(pos[0] ?? h.p[0]) - h.p[0], (pos[1] ?? h.p[1]) - h.p[1]])} />
+          </label>
+          <label className="field">
+            <span>{vName}</span>
+            <InputNumber value={pos[1]} onChange={(v) => setPos([pos[0], v])} precision={0} style={{ width: '100%' }} onPressEnter={() => run([(pos[0] ?? h.p[0]) - h.p[0], (pos[1] ?? h.p[1]) - h.p[1]])} />
+          </label>
+          <Button onClick={() => run([(pos[0] ?? h.p[0]) - h.p[0], (pos[1] ?? h.p[1]) - h.p[1]])} disabled={pos[0] === h.p[0] && pos[1] === h.p[1]}>
+            套用
+          </Button>
+        </Flex>
+        <Flex gap={8}>
+          <Button size="small" onClick={() => run([h.origin[0] - h.p[0], h.origin[1] - h.p[1]])} disabled={h.origin[0] === h.p[0] && h.origin[1] === h.p[1]}>
+            回到原位（{h.origin[0]}, {h.origin[1]}）
+          </Button>
+          <Button size="small" type="text" onClick={() => ed.setHandle(null)}>
+            取消選把手（Esc）
+          </Button>
+        </Flex>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          節點在 {h.axis} = {h.at} 那一片；Enter 套用到範圍，和拖這個節點產生同一個步驟。方向鍵一次 1 格（Shift 10）。
+        </Text>
+      </Flex>
+    );
+  const c = ctx();
+  const hh = resolveHandle(c, h);
+  const r = hh ? c.rings.get(hh.key)![hh.ring] : null;
+  const group = r && hh ? smoothEdgeGroup(r, hh.index, single) : [];
+  let len = 0;
+  if (r) for (let k = 0; k + 1 < group.length; k++) len += Math.hypot(r.pts[group[k + 1]][0] - r.pts[group[k]][0], r.pts[group[k + 1]][1] - r.pts[group[k]][1]);
+  const push = () => {
+    if (!r || !hh || !n) return;
+    const nrm = groupNormal(r, group);
+    run([nrm[0] * n, nrm[1] * n], single);
+  };
+  return (
+    <Flex vertical gap={10}>
+      <Text style={{ fontSize: 12 }}>
+        長度 {len.toFixed(1)} vx（{(len * ed.nmPerVoxel).toFixed(1)} nm）
+      </Text>
+      <Flex gap={10} align="end">
+        <label className="field">
+          <span>往外推（負＝往內）</span>
+          <InputNumber value={n} onChange={setN} precision={0} suffix="vx" style={{ width: '100%' }} onPressEnter={push} />
+        </label>
+        <Button type="primary" onClick={push} disabled={!n || !r}>
+          推（{(Math.abs(n ?? 0) * ed.nmPerVoxel).toFixed(1)} nm）
+        </Button>
+      </Flex>
+      <Checkbox checked={single} onChange={(e) => setSingle(e.target.checked)}>
+        只推這一小段（同 Shift＋拖）
+      </Checkbox>
+      <Button size="small" type="text" onClick={() => ed.setHandle(null)} style={{ alignSelf: 'flex-start' }}>
+        取消選把手（Esc）
+      </Button>
+    </Flex>
+  );
+}
+
 /** 右欄「選取與調整」。 */
 export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: number) => void }) {
   const nm = ed.nmPerVoxel;
@@ -245,6 +335,11 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
       <Section title="材質">
         <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} onMaterial={onMaterial} />
       </Section>
+      {ed.handle && (
+        <Section title={ed.handle.kind === 'node' ? '選到的節點' : '選到的邊'}>
+          <HandleRow ed={ed} key={`${ed.handle.kind}${ed.handle.origin.join()}`} />
+        </Section>
+      )}
       <Section title="範圍（要改哪裡）">
         <ScopeControl ed={ed} showAxis />
       </Section>

@@ -32,6 +32,7 @@ import { download } from '../../ui/download';
 import { MatLabel, Swatch } from '../../ui/Swatch';
 import { type Op, type SelectMode, slicesWith, useEditor } from './editor';
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
+import { FloatingToolbar } from './FloatingToolbar';
 import { axisIndex, clipBox } from '../../volume/scope';
 import { type Preview, previewOp } from '../../volume/preview';
 import { sidOf } from '../../volume/client';
@@ -531,6 +532,13 @@ export default function Section3DPage() {
     ed.pickVoxel((p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0], mode);
   };
   const selKey = [...ed.sel].sort().join(',');
+  /** 頁籤提示：這個方向可以改什麼（例如「上視 XZ · TiN 可改 x、z」）。 */
+  const tabHint = (a: Axis) => {
+    const [u, v] = a === 'z' ? ['x', 'y'] : a === 'y' ? ['x', 'z'] : ['z', 'y'];
+    const dims: Record<string, string> = { x: '寬 W', y: '高 H', z: '深 D' };
+    const who = ed.selComps.length === 1 ? ed.selComps[0].label : ed.selComps.length ? `已選的 ${ed.selComps.length} 個` : '結構';
+    return `${AXIS_TAB[a]}：${who} 可改 ${u}、${v}（${dims[u]}、${dims[v]}），沿 ${a} 套用到範圍`;
+  };
   /** 編輯狀態的主切面：頁籤、位置列、可縮放的切面編輯器。 */
   const mainSlice = (axis: Axis) => {
     const at = cursorAt(axis);
@@ -548,7 +556,7 @@ export default function Section3DPage() {
             size="small"
             value={axis}
             onChange={(v) => pickAxis(v as Axis)}
-            options={(['z', 'y', 'x'] as Axis[]).map((a) => ({ label: AXIS_TAB[a], value: a }))}
+            options={(['z', 'y', 'x'] as Axis[]).map((a) => ({ label: <Tooltip title={tabHint(a)}>{AXIS_TAB[a]}</Tooltip>, value: a }))}
           />
           <span className="grow" />
           {hov && (
@@ -587,6 +595,14 @@ export default function Section3DPage() {
             setHandle={ed.setHandle}
             onDragState={(d) => {
               if (d) draggedSinceE.current = true;
+            }}
+            mirror={ed.mirror && ed.sel.size > 1}
+            onNote={(t) => message.warning({ key: 'mirror', content: t })}
+            overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} onMaterial={changeMaterial} /> : undefined}
+            onMenu={(p, x, y) => {
+              const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
+              setMenuAt({ x, y });
+              ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
             }}
           />
         </div>

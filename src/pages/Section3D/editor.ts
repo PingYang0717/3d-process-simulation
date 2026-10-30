@@ -195,6 +195,8 @@ export function useEditor() {
   const [autoZoom, setAutoZoom] = usePersisted('autoZoom', true);
   /** 大操作確認門檻（體素數）：一步會動到的範圍超過就先問。 */
   const [bigOp, setBigOp] = usePersisted('bigOp', 4_000_000, (v): v is number => typeof v === 'number' && v > 0);
+  /** 多選時把手勢也做在長得一樣的結構上（§7.7）。 */
+  const [mirror, setMirror] = usePersisted('mirror', true);
   /** 主切面上選到的把手（節點／邊）：右欄數值輸入、方向鍵。 */
   const [handle, setHandle] = useState<PickedHandle | null>(null);
   // 跨次記住：襯層跟推、nm 比例（載入有 spacing 的 .vti 會覆蓋）、筆刷
@@ -366,6 +368,20 @@ export function useEditor() {
     return n;
   };
   const blockedText = (r: OpReport) => blockedPhrase(r, matName);
+  /** 「已套用到整根（z 0～127）」「已套用到此片（z = 64）」「已套用到 z 40～80」。 */
+  const appliedText = (op: Op, from: EditState) => {
+    const a = op.scope.axis;
+    if (op.scope.lo === op.scope.hi) return `已套用到此片（${a} = ${op.scope.lo}）`;
+    if (isFullScope(op.scope, from.vol)) {
+      const keys = new Set(op.keys);
+      const b = unionBBox(from.L.comps.filter((c) => keys.has(c.key)));
+      const r = b ? boxRange(b, a) : null;
+      return `已套用到${op.keys.length > 1 ? '整個結構' : '整根'}${r ? `（${a} ${r[0]}～${r[1]}）` : ''}`;
+    }
+    return `已套用到 ${a} ${op.scope.lo}～${op.scope.hi}`;
+  };
+  /** 訊息前半：結構＋動作（範圍放在 appliedText，不重複）。 */
+  const headText = (op: Op, from: EditState) => `${describe({ ...op, scope: fullScope(from.vol, op.scope.axis) } as Op, from.L)} · ${appliedText(op, from)}`;
   /** 訊息後半：「· 1,152 格 · 4 片有 12 格被 Poly-Si 擋住 · 3 片沒有這個結構，略過」。 */
   const resultText = (r: StepReport & { changed?: number }) =>
     `${r.changed !== undefined ? ` · ${r.changed.toLocaleString()} 格` : ''}${r.total.blocked ? ` · ${blockedText(r)}` : ''}${
@@ -431,7 +447,7 @@ export function useEditor() {
     const rep: StepReport & { changed: number } = { ...summarize(r.report, op, from.vol), op, changed: changedCount(r.step) };
     setReport(rep);
     if (!r.next) {
-      setLast({ text: `${describe(op, from.L)} · 沒有改到任何體素${rep.total.blocked ? `（${blockedText(rep)}）` : ''}`, at: Date.now() });
+      setLast({ text: `${headText(op, from)} · 沒有改到任何體素${rep.total.blocked ? `（${blockedText(rep)}）` : ''}`, at: Date.now() });
       return;
     }
     const next = r.next;
@@ -443,14 +459,14 @@ export function useEditor() {
       setSplits((all) => [...all, { id, name, cur: next, ops: [op], hist: [entry], future: [] }]);
       setActiveId(id);
       keepSel(next);
-      setLast({ text: `原始保持不變，已自動建立 ${name}：${describe(op, o.L)}${resultText(rep)}`, at: Date.now() });
+      setLast({ text: `原始保持不變，已自動建立 ${name}：${headText(op, o)}${resultText(rep)}`, at: Date.now() });
       return;
     }
     setSplits((all) =>
       all.map((x) => (x.id === active.id ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)),
     );
     keepSel(next);
-    setLast({ text: `${describe(op, from.L)}${resultText(rep)}`, at: Date.now() });
+    setLast({ text: `${headText(op, from)}${resultText(rep)}`, at: Date.now() });
   };
 
   const drain = async () => {
@@ -458,7 +474,8 @@ export function useEditor() {
     setBusy('計算中…');
     try {
       while (queue.current.length) {
-        await commitOne(queue.current[0]);
+        // 每一步都用最新一次 render 的 commitOne（材質名稱、nm 比例等才是最新的）
+        await latest.current.commitOne(queue.current[0]);
         queue.current.shift();
         setQueued(Math.max(0, queue.current.length - 1));
       }
@@ -485,7 +502,7 @@ export function useEditor() {
     if (!running.current) previewHook.current?.(op);
     queue.current.push(op);
     setQueued(Math.max(0, queue.current.length - 1));
-    if (!running.current) void drain();
+    if (!running.current) void latest.current.drain();
   };
   /** 這一步大概會動到多少體素（選取外框 ∩ 範圍）。 */
   const opVoxels = (op: Op) => {
@@ -496,6 +513,8 @@ export function useEditor() {
     const c = b && clipScopeBox(b, op.scope);
     return c ? boxVoxels(c) : 0;
   };
+  const latest = useRef({ enqueue, drain, commitOne });
+  latest.current = { enqueue, drain, commitOne };
   const bigRef = useRef(bigOp);
   bigRef.current = bigOp;
   const commit = useCallback(
@@ -510,13 +529,13 @@ export function useEditor() {
           content: `這一步會改到約 ${Math.round(n / 1e4).toLocaleString()} 萬格（整個 ${who}），可能要幾秒。繼續？`,
           okText: '繼續',
           cancelText: '取消',
-          onOk: () => enqueue(op),
+          onOk: () => latest.current.enqueue(op),
         });
         return;
       }
-      enqueue(op);
+      latest.current.enqueue(op);
     },
-    // enqueue／drain 每次 render 都是新的閉包，但只讀 ref，所以不必放進依賴
+    // enqueue／drain／commitOne 每次 render 都換新的，經由 latest 取用最新的那一份
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [message, modal],
   );
@@ -693,9 +712,9 @@ export function useEditor() {
   // ---- 調整 ----
 
   const translate = useCallback(
-    (d: Vec3) => {
+    (d: Vec3, withShell = false) => {
       if (!sel.size || (!d[0] && !d[1] && !d[2])) return;
-      commit({ kind: 'translate', keys: [...sel], scope, d, backfill });
+      commit({ kind: 'translate', keys: [...sel], scope, d, backfill, ...(withShell ? { follow: true } : {}) });
     },
     [sel, scope, backfill, commit],
   );
@@ -959,6 +978,8 @@ export function useEditor() {
     setReport,
     handle,
     setHandle,
+    mirror,
+    setMirror,
     bigOp,
     setBigOp,
     queued,

@@ -41,10 +41,16 @@ export function SplitBar({
 
   return (
     <div className="splitbar">
-      <div className="split-tabs" role="tablist">
-        {tabs.map((t) => {
+      <div className="split-tabs" role="tablist" aria-label="Split">
+        {tabs.map((t, i) => {
           const on = t.id === ed.activeId;
           const s = ed.splits.find((x) => x.id === t.id);
+          // 標準頁籤鍵盤：只有目前的能 Tab 到，左右鍵／Home／End 換頁籤並移焦點
+          const go = (el: HTMLElement, j: number) => {
+            const k = (j + tabs.length) % tabs.length;
+            ed.setActiveId(tabs[k].id);
+            (el.parentElement?.children[k] as HTMLElement | undefined)?.focus();
+          };
           return (
             <div
               key={t.id}
@@ -55,11 +61,18 @@ export function SplitBar({
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   ed.setActiveId(t.id);
+                } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  go(e.currentTarget, i + (e.key === 'ArrowRight' ? 1 : -1));
+                } else if (e.key === 'Home' || e.key === 'End') {
+                  e.preventDefault();
+                  go(e.currentTarget, e.key === 'Home' ? 0 : tabs.length - 1);
                 } else if (e.key === 'F2' && s) startRename(s);
               }}
               role="tab"
-              tabIndex={0}
+              tabIndex={on ? 0 : -1}
               aria-selected={on}
+              aria-controls="stage"
             >
               <span className="split-name">{t.name}</span>
               {s && <span className="split-ops">{s.ops.length ? `${s.ops.length} 步` : '未改'}</span>}
@@ -117,7 +130,7 @@ export function SplitBar({
       <span className="grow" />
       {ed.splits.length > 0 && (
         <>
-          <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+          <Text type="secondary" className="split-hint" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
             <kbd>[</kbd>
             <kbd>]</kbd> 切換
           </Text>
@@ -126,7 +139,7 @@ export function SplitBar({
           </Button>
         </>
       )}
-      <Modal title="重新命名" open={!!renaming} onCancel={() => setRenaming(null)} onOk={finishRename} okText="確定" width={360} destroyOnClose>
+      <Modal title="重新命名" open={!!renaming} onCancel={() => setRenaming(null)} onOk={finishRename} okText="確定" width={360} destroyOnHidden>
         <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} onPressEnter={finishRename} />
       </Modal>
     </div>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { App, Button, Flex, Progress, Segmented, Typography, Upload } from 'antd';
+import { App, Button, Flex, Segmented, Steps, Typography, Upload } from 'antd';
 import { InboxOutlined } from '@ant-design/icons';
 import { decodeNpy } from '../../volume/volume';
 import { decodeVti } from '../../volume/vti';
@@ -7,19 +7,24 @@ import type { Editor } from './editor';
 
 const { Text } = Typography;
 
+const STEPS = ['讀取', '解碼', '分析結構'];
+
 /** 上傳 .vti（或 .npy），或用內建範例；大範例用來看 4,000 萬級的速度。 */
 export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) {
   const { message } = App.useApp();
-  const [busy, setBusy] = useState<string | null>(null);
+  /** 進行中的階段（0 讀取、1 解碼、2 分析結構）與說明；null = 閒置。 */
+  const [progress, setProgress] = useState<{ step: number; text: string } | null>(null);
+  const busy = progress?.text ?? null;
+  const setBusy = (text: string | null, step = 0) => setProgress(text === null ? null : { step, text });
   const [unit, setUnit] = useState<'nm' | 'um'>('nm');
   const load = async (file: File) => {
     setBusy(`讀取 ${file.name}（${(file.size / 1048576).toFixed(1)} MB）…`);
     try {
       const buf = await file.arrayBuffer();
       if (/\.vti$/i.test(file.name)) {
-        setBusy('解碼 .vti…');
+        setBusy('解碼 .vti…', 1);
         const { vol, info } = await decodeVti(buf);
-        setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`);
+        setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`, 2);
         await ed.loadVolume(vol, {
           name: file.name,
           format: 'vti',
@@ -33,8 +38,9 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
           `已載入 ${file.name}：${vol.X}×${vol.Y}×${vol.Z} voxels，${info.source}「${info.arrayName}」${info.dtype}${info.compressed ? '，zlib' : ''}`,
         );
       } else {
+        setBusy('解碼 .npy…', 1);
         const vol = decodeNpy(buf);
-        setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`);
+        setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`, 2);
         await ed.loadVolume(vol, { name: file.name, format: 'npy' });
         message.success(`已載入 ${file.name}，shape (${vol.Z}, ${vol.Y}, ${vol.X})`);
       }
@@ -46,7 +52,7 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
     }
   };
   const demo = async (scale: number) => {
-    setBusy(scale > 1 ? `產生大範例 ×${scale} 並分析結構（要幾秒）…` : '產生範例…');
+    setBusy(scale > 1 ? `產生大範例 ×${scale} 並分析結構（要幾秒）…` : '產生範例…', 2);
     try {
       await ed.demo(scale);
       onDone();
@@ -56,16 +62,16 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
   };
   return (
     <Flex vertical gap={16}>
-      {busy && (
-        <Flex vertical gap={4} className="load-progress">
+      {progress && (
+        <div className="load-progress" role="status" aria-live="polite">
+          <Steps size="small" current={progress.step} items={STEPS.map((title) => ({ title }))} />
           <Text strong style={{ fontSize: 13 }}>
-            {busy}
+            {progress.text}
           </Text>
-          <Progress percent={100} status="active" showInfo={false} strokeColor="#1677ff" size={['100%', 6]} />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            大檔案會分成讀取、解碼、分析結構三步；4,000 萬 voxel 約需十幾秒。
+            第 {progress.step + 1} 步，共 {STEPS.length} 步；4,000 萬 voxel 約需十幾秒。
           </Text>
-        </Flex>
+        </div>
       )}
       <Upload.Dragger
         accept=".vti,.npy"

@@ -1324,7 +1324,7 @@ export function View3D({
           {hoverTag.text}
         </div>
       ) : null}
-      {(meshing || busy) && <div className="mesh-busy">{busy ? '計算中…' : '更新 3D 中…'}</div>}
+      {(meshing || busy) && <div className="mesh-busy" role="status">{busy ? '計算中…' : '更新 3D 中…'}</div>}
     </div>
   );
 }
@@ -1407,7 +1407,7 @@ export function SliceView({
   const partial = axis !== 'z' && (zRange[0] > 0 || zRange[1] < vol.Z - 1);
   const z0 = zRange[0];
   const z1 = zRange[1] + 1;
-  const frame = { fill: '#1677ff', fillOpacity: 0.08, stroke: '#1677ff', strokeWidth: 1, strokeDasharray: '3 3', vectorEffect: 'non-scaling-stroke' } as const;
+  const frame = { fill: 'var(--c-primary)', fillOpacity: 0.08, stroke: 'var(--c-primary)', strokeWidth: 1, strokeDasharray: '3 3', vectorEffect: 'non-scaling-stroke' } as const;
 
   return (
     <div className="slice-fit" ref={fitRef}>

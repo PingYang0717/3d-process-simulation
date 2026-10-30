@@ -25,6 +25,7 @@ export interface Brush {
   shape: BrushShape;
 }
 import { call, ensure, loadOrig, replayIn, retain } from '../../volume/client';
+import { overlayOpen, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
 
@@ -101,10 +102,15 @@ export function useEditor() {
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<Vec3>([0, 0, 0]);
   const [zRange, setZRangeRaw] = useState<ZRange>([0, 0]);
-  const [follow, setFollow] = useState(true);
+  // 跨次記住：襯層跟推、nm 比例（載入有 spacing 的 .vti 會覆蓋）、筆刷
+  const [follow, setFollow] = usePersisted('follow', true);
   const [backfill, setBackfill] = useState<Backfill>('orig');
-  const [nmPerVoxel, setNmPerVoxel] = useState(0.5);
-  const [brush, setBrush] = useState<Brush>({ mode: 'push', radius: 6, shape: 'round' });
+  const [nmPerVoxel, setNmPerVoxel] = usePersisted('nmPerVoxel', 0.5, (v): v is number => typeof v === 'number' && v > 0);
+  const [brush, setBrush] = usePersisted<Brush>(
+    'brush',
+    { mode: 'push', radius: 6, shape: 'round' },
+    (v): v is Brush => !!v && typeof v === 'object' && ['push', 'level'].includes((v as Brush).mode) && ['round', 'square'].includes((v as Brush).shape),
+  );
   const [last, setLast] = useState<{ text: string; at: number } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   /** 計算中的說明（例如「計算中…」）；有值時其他改體素的動作先擋下。 */
@@ -550,6 +556,8 @@ export function useEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement | null)?.closest?.('input,select,textarea,[contenteditable]')) return;
+      // Modal／Drawer 開著：Esc 關它、Ctrl+Z 留給輸入框，不動模型
+      if (overlayOpen()) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
       if (mod && k === 'z') {

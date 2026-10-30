@@ -2,7 +2,7 @@ import { Alert, Segmented, Tag, Typography } from 'antd';
 import { type Axis, bboxDims, sliceHasAny } from '../../volume/volume';
 import { signed } from '../../ui/format';
 import { BASE_ID, type Editor, useSplitDiffs } from './editor';
-import { SliceView } from './views';
+import { SliceView } from './views.lazy';
 
 const { Text } = Typography;
 

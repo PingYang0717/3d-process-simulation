@@ -32,7 +32,7 @@ function PushRow({ ed }: { ed: Editor }) {
         </label>
         <label className="field">
           <span>幾格（負＝縮）</span>
-          <InputNumber value={n} onChange={setN} step={1} precision={0} addonAfter="vx" style={{ width: '100%' }} onPressEnter={apply} />
+          <InputNumber value={n} onChange={setN} step={1} precision={0} suffix="vx" style={{ width: '100%' }} onPressEnter={apply} />
         </label>
       </Flex>
       <Button type="primary" block onClick={apply} disabled={!steps || !!ed.busy} loading={!!ed.busy}>

@@ -67,7 +67,9 @@ export function HelpDrawer({ open, onClose }: { open: boolean; onClose: () => vo
       <div className="help">
         {HELP.map(([title, items]) => (
           <section key={title}>
-            <Typography.Title level={5}>{title}</Typography.Title>
+            <Typography.Title level={4} style={{ fontSize: 14, marginTop: 0 }}>
+              {title}
+            </Typography.Title>
             <dl>
               {items.map(([k, v]) => (
                 <div key={k}>

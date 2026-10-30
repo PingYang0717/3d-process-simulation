@@ -31,7 +31,9 @@ import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel, Swatch } from '../../ui/Swatch';
 import { type SelectMode, useEditor } from './editor';
-import { type Clip, type ViewMode, type ViewPreset, View3D, type View3DHandle, SliceView } from './views';
+import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
+import { SliceView, View3D } from './views.lazy';
+import { overlayOpen, usePersisted } from '../../ui/persist';
 import { Inspector, matOf } from './Inspector';
 import { ChangesTab } from './ChangesTab';
 import { SplitsTab } from './SplitsTab';
@@ -56,10 +58,23 @@ function useMedia(query: string) {
   return match;
 }
 
-function Resizer({ onDrag }: { onDrag: (dx: number) => void }) {
+/** 左右欄寬度的分隔線：滑鼠拖，或 Tab 到它用左右鍵（一次 16px，Shift 48px）。 */
+function Resizer({ onDrag, label, value, min, max }: { onDrag: (dx: number) => void; label: string; value: number; min: number; max: number }) {
   return (
     <div
       className="resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuenow={value}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        onDrag((e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 48 : 16));
+      }}
       onPointerDown={(e) => {
         e.preventDefault();
         const el = e.currentTarget;
@@ -92,7 +107,7 @@ function Brand() {
           <path d="M2 13h12M4 13V8a4 4 0 0 1 8 0v5" />
         </svg>
       </span>
-      <span className="brand-name">Section Editor</span>
+      <h1 className="brand-name">Section Editor</h1>
       <Tag bordered={false}>3D</Tag>
     </div>
   );
@@ -101,8 +116,8 @@ function Brand() {
 export default function Section3DPage() {
   const ed = useEditor();
   const { message, modal } = App.useApp();
-  const [leftW, setLeftW] = useState(240);
-  const [rightW, setRightW] = useState(350);
+  const [leftW, setLeftW] = usePersisted('leftW', 240);
+  const [rightW, setRightW] = usePersisted('rightW', 350);
   const narrow = useMedia('(max-width: 1199px)');
   const tiny = useMedia('(max-width: 799px)');
   const [leftOpen, setLeftOpen] = useState(false);
@@ -116,7 +131,7 @@ export default function Section3DPage() {
   const [clipAxis, setClipAxis] = useState<Axis>('z');
   const [clipSide, setClipSide] = useState<1 | -1>(1);
   const [clipPos, setClipPos] = useState<Record<Axis, number>>({ x: 0, y: 0, z: 0 });
-  const [showDiff, setShowDiff] = useState(true);
+  const [showDiff, setShowDiff] = usePersisted('showDiff', true);
   /** 現在／原始／差異。 */
   const [mode, setMode] = useState<ViewMode>('now');
   /** 放大哪一張切面當主畫面（null = 3D 大）。 */
@@ -152,6 +167,8 @@ export default function Section3DPage() {
     const down = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement | null)?.closest?.('input,textarea,select,[contenteditable]')) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // 說明、設定、Modal 開著時單鍵留給它們，不動 3D
+      if (overlayOpen()) return;
       const k = e.key.toLowerCase();
       const views: Record<string, ViewPreset> = { f: 'fit', h: 'home', home: 'home', '1': 'front', '2': 'top', '3': 'side', '4': 'iso' };
       if (k === 'b') setMode((m) => (m === 'orig' ? 'now' : 'orig'));
@@ -236,7 +253,7 @@ export default function Section3DPage() {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
     modal.confirm({
       title: `打包 ${ed.splits.length} 個 split 成 zip（.${fmt}）`,
-      icon: <DownloadOutlined style={{ color: '#1677ff' }} />,
+      icon: <DownloadOutlined style={{ color: 'var(--c-primary)' }} />,
       width: 520,
       okText: '匯出 zip',
       cancelText: '取消',
@@ -390,8 +407,8 @@ export default function Section3DPage() {
               value={at}
               onChange={(v) => v !== null && setCursorAxis(axis, v)}
               precision={0}
-              prefix={<span style={{ color: '#8f959e' }}>{axis} =</span>}
-              style={{ width: 88 }}
+              prefix={<span style={{ color: 'var(--c-text-3)' }}>{axis} =</span>}
+              style={{ width: 84 }}
             />
             <Button icon={<RightOutlined />} onClick={() => ed.stepCursor(axis, 1)} aria-label="下一片" />
           </Space.Compact>
@@ -405,7 +422,7 @@ export default function Section3DPage() {
             </Text>
           )}
           <Tooltip title={big ? '還原（Esc）' : '放大這張切面'}>
-            <Button type="text" size="small" icon={big ? <CompressOutlined /> : <ExpandOutlined />} onClick={() => setFocus(big ? null : axis)} aria-label="放大" />
+            <Button type="text" size="small" className="slice-zoom" icon={big ? <CompressOutlined /> : <ExpandOutlined />} onClick={() => setFocus(big ? null : axis)} aria-label={big ? '還原' : '放大'} />
           </Tooltip>
         </div>
         <div className="slice-body">
@@ -449,7 +466,7 @@ export default function Section3DPage() {
       <Flex align="center" gap={10}>
         <span style={{ fontSize: 12, width: 64 }}>半徑</span>
         <Slider min={0} max={60} value={br.radius ?? 6} onChange={(v) => ed.setBrush({ ...br, radius: v })} style={{ flex: 1, margin: '0 4px' }} />
-        <InputNumber size="small" min={0} max={500} value={br.radius ?? 6} onChange={(v) => v !== null && ed.setBrush({ ...br, radius: Math.round(v) })} addonAfter="vx" style={{ width: 96 }} />
+        <InputNumber size="small" min={0} max={500} value={br.radius ?? 6} onChange={(v) => v !== null && ed.setBrush({ ...br, radius: Math.round(v) })} suffix="vx" style={{ width: 96 }} />
       </Flex>
       <Flex align="center" gap={10}>
         <span style={{ fontSize: 12, width: 64 }}>形狀</span>
@@ -645,20 +662,20 @@ export default function Section3DPage() {
               style={{ flex: 1, margin: '0 10px' }}
             />
             <InputNumber size="small" min={0} max={axisMax(clipAxis)} value={clip!.at} onChange={(v) => v !== null && setClipAt(clipAxis, v)} precision={0} style={{ width: 72 }} />
-            <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+            <Text type="secondary" className="sb-nm" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
               {(clip!.at * ed.nmPerVoxel).toFixed(1)} nm
             </Text>
             <Tooltip title={`現在留 ${clipAxis} ${clipSide > 0 ? '≤' : '≥'} ${clip!.at} 的那一半；按一下翻面`}>
-              <Button size="small" icon={<SwapOutlined />} onClick={() => setClipSide(clipSide > 0 ? -1 : 1)}>
-                翻面
+              <Button size="small" icon={<SwapOutlined />} onClick={() => setClipSide(clipSide > 0 ? -1 : 1)} aria-label="翻面">
+                <span className="sb-text">翻面</span>
               </Button>
             </Tooltip>
             <Tooltip title="把剖面移到橘色十字的位置">
-              <Button size="small" icon={<AimOutlined />} disabled={clip!.at === cursorAt(clipAxis)} onClick={() => setClipAt(clipAxis, cursorAt(clipAxis))}>
-                對齊十字
+              <Button size="small" icon={<AimOutlined />} disabled={clip!.at === cursorAt(clipAxis)} onClick={() => setClipAt(clipAxis, cursorAt(clipAxis))} aria-label="對齊十字">
+                <span className="sb-text">對齊十字</span>
               </Button>
             </Tooltip>
-            <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+            <Text type="secondary" className="sb-hint" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
               <kbd>,</kbd>
               <kbd>.</kbd> 前後一片
             </Text>
@@ -724,7 +741,7 @@ export default function Section3DPage() {
             label: (
               <Flex align="center" gap={6}>
                 改動
-                {ed.changedKeys.size > 0 && <Badge count={ed.changedKeys.size} size="small" color="#1677ff" />}
+                {ed.changedKeys.size > 0 && <Badge count={ed.changedKeys.size} size="small" color="var(--c-primary)" />}
               </Flex>
             ),
             children: (
@@ -738,7 +755,7 @@ export default function Section3DPage() {
             label: (
               <Flex align="center" gap={6}>
                 Split
-                {ed.splits.length > 1 && <Badge count={ed.splits.length} size="small" color="#8c8c8c" />}
+                {ed.splits.length > 1 && <Badge count={ed.splits.length} size="small" color="var(--c-text-3)" />}
               </Flex>
             ),
             children: (
@@ -821,7 +838,7 @@ export default function Section3DPage() {
           </Button>
         </Dropdown>
         {tiny && (
-          <Badge count={ed.sel.size} size="small" color="#1677ff">
+          <Badge count={ed.sel.size} size="small" color="var(--c-primary)">
             <Button icon={<SlidersOutlined />} onClick={() => setRightOpen(true)}>
               調整
             </Button>
@@ -842,13 +859,13 @@ export default function Section3DPage() {
         ) : (
           <>
             <StructureList ed={ed} width={leftW} />
-            <Resizer onDrag={(dx) => setLeftW((w) => Math.max(180, Math.min(420, w + dx)))} />
+            <Resizer label="左欄寬度" value={leftW} min={180} max={420} onDrag={(dx) => setLeftW((w) => Math.max(180, Math.min(420, w + dx)))} />
           </>
         )}
-        <main className="stage">
+        <main className="stage" id="stage">
           <SplitBar ed={ed} compare={compare} setCompare={setCompare} onSweep={() => setSweepOpen(true)} />
           {ed.busy && (
-            <div className="busy-bar">
+            <div className="busy-bar" role="status">
               <span className="busy-dot" />
               {ed.busy}
             </div>
@@ -878,14 +895,14 @@ export default function Section3DPage() {
           </Drawer>
         ) : (
           <>
-            <Resizer onDrag={(dx) => setRightW((w) => Math.max(300, Math.min(560, w - dx)))} />
+            <Resizer label="右欄寬度" value={rightW} min={300} max={560} onDrag={(dx) => setRightW((w) => Math.max(300, Math.min(560, w - dx)))} />
             <aside className="inspector" style={{ width: narrow ? 300 : rightW }}>
               {inspector}
             </aside>
           </>
         )}
       </div>
-      <Modal title="上傳 .vti / .npy" open={uploadOpen} onCancel={() => setUploadOpen(false)} footer={null} width={640} destroyOnClose>
+      <Modal title="上傳 .vti / .npy" open={uploadOpen} onCancel={() => setUploadOpen(false)} footer={null} width={640} destroyOnHidden>
         <UploadPanel ed={ed} onDone={() => setUploadOpen(false)} />
       </Modal>
       <SettingsDrawer

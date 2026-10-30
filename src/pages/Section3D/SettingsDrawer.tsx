@@ -64,7 +64,7 @@ export function SettingsDrawer({
               step={0.05}
               value={ed.nmPerVoxel}
               onChange={(v) => v && v > 0 && ed.setNmPerVoxel(v)}
-              addonAfter="nm"
+              suffix="nm"
               style={{ width: 130 }}
             />
           </Row>

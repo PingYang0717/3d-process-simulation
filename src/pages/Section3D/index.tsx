@@ -180,8 +180,9 @@ export default function Section3DPage() {
   const encode = (v: Volume, fmt: Fmt) => (fmt === 'vti' ? encodeVti(v, spacing, origin, ed.meta.arrayName || 'material') : encodeNpy(v));
   const exportOne = (fmt: Fmt = 'vti') => {
     const name = ed.isBase || !ed.active ? `${stem}.${fmt}` : `${stem}__${safeName(ed.active.name)}.${fmt}`;
-    download(encode(ed.vol, fmt), name);
-    message.success(`已匯出 ${name}`);
+    download(encode(ed.vol, fmt), name)
+      .then((saved) => message.success(`已匯出 ${saved}`))
+      .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
   };
   const exportAll = async (fmt: Fmt = 'vti') => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
@@ -205,8 +206,9 @@ export default function Section3DPage() {
     };
     files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
     const name = `${stem}__splits.zip`;
-    download(zipStore(files), name, 'application/zip');
-    message.success(`已匯出 ${name}`);
+    download(zipStore(files), name, 'application/zip')
+      .then((saved) => message.success(`已匯出 ${saved}`))
+      .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
   };
 
   // ---- 右鍵選單：只做選取相關 ----

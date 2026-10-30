@@ -1,10 +1,11 @@
 // 把整個 app 打成一個 .html（prototype 用）：esbuild 打包主程式與 Worker，Worker 原始碼放在
-// globalThis.__WORKER_SRC__，client.ts 看到就用 Blob URL 建 Worker。用法：node scripts/build-proto.mjs [out.html]
+// globalThis.__WORKER_SRC__，client.ts 看到就用 Blob URL 建 Worker。用法：node scripts/build-proto.mjs [out.html] [title]
 import { build } from 'esbuild';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 const out = resolve(process.argv[2] ?? 'dist/prototype.html');
+const title = process.argv[3] ?? 'Section Editor 3D';
 const common = { bundle: true, minify: true, target: 'es2020', logLevel: 'warning', define: { 'process.env.NODE_ENV': '"production"' } };
 
 const worker = await build({ ...common, entryPoints: ['src/volume/worker.ts'], format: 'iife', write: false });
@@ -26,7 +27,7 @@ const html = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Section Editor 3D</title>
+<title>${title}</title>
 <style>
 ${css}
 </style>

@@ -30,7 +30,8 @@ import { encodeVti } from '../../volume/vti';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel, Swatch } from '../../ui/Swatch';
-import { type SelectMode, useEditor } from './editor';
+import { type Op, type SelectMode, useEditor } from './editor';
+import { type Preview, previewOp } from '../../volume/preview';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceView, View3D } from './views.lazy';
 import { overlayOpen, usePersisted } from '../../ui/persist';
@@ -97,6 +98,14 @@ function Resizer({ onDrag, label, value, min, max }: { onDrag: (dx: number) => v
 
 const voxelCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : `${(n / 1e3).toFixed(0)} K`);
 
+/**
+ * 即時預覽的上限（裁切範圍的體素數）：拖拉中每改一格就算一次，要在幾十毫秒內；
+ * 放開／按鈕套用只算一次，幾百毫秒也比等 Worker 幾秒好。超過就只畫橘色塊、等正式結果。
+ */
+const LIVE_PREVIEW_CAP = 400_000;
+const COMMIT_PREVIEW_CAP = 6_000_000;
+type PV = Preview & { base: Uint8Array; committed: boolean };
+
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
 
 function Brand() {
@@ -147,6 +156,25 @@ export default function Section3DPage() {
   const [cmpAxis, setCmpAxis] = useState<Axis>('z');
   const tagRef = useRef<HTMLDivElement>(null);
   const view = useRef<View3DHandle | null>(null);
+  /** 即時預覽：這一步在主執行緒裁切重算的結果；3D 與切面先畫它，Worker 的正式結果到了再換掉。 */
+  const [pv, setPv] = useState<PV | null>(null);
+  const makePreview = (op: Op, cap: number, committed: boolean) => {
+    if (mode !== 'now' || op.kind === 'material') return false;
+    const p = previewOp(ed.cur, ed.orig.vol, op, cap);
+    setPv(p ? { ...p, base: ed.cur.vol.data, committed } : null);
+    return !!p;
+  };
+  // 每一步送 Worker 前先預覽（按鈕、方向鍵、筆刷放開都走 commit）
+  useEffect(() => {
+    ed.previewHook.current = (op) => void makePreview(op, COMMIT_PREVIEW_CAP, true);
+  });
+  // 計算結束但狀態沒變（失敗或沒改到）：預覽收掉；換檔案也收掉
+  useEffect(() => {
+    if (!ed.busy && pv?.committed && pv.base === ed.cur.vol.data) setPv(null);
+  }, [ed.busy, ed.cur, pv]);
+  useEffect(() => setPv(null), [ed.orig, mode]);
+  /** 切面要畫的預覽：只有根據的陣列還是現在這份才有效（正式結果到了切面本來就會重畫）。 */
+  const slicePv = pv && pv.base === ed.cur.vol.data && mode === 'now' ? pv : null;
 
   const cursorAt = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
   const axisMax = (a: Axis) => (a === 'x' ? ed.vol.X : a === 'y' ? ed.vol.Y : ed.vol.Z) - 1;
@@ -436,6 +464,7 @@ export default function Section3DPage() {
             cursor={ed.cursor}
             zRange={ed.zRange}
             diff={diffShown}
+            preview={slicePv}
             onPick={pickInSlice}
             onStep={(d) => ed.stepCursor(axis, d)}
             onHover={big ? setSliceHover : undefined}
@@ -452,16 +481,19 @@ export default function Section3DPage() {
       <Segmented
         block
         value={br.mode}
-        onChange={(v) => ed.setBrush({ ...br, mode: v as 'push' | 'level' })}
+        onChange={(v) => ed.setBrush({ ...br, mode: v as 'push' | 'level' | 'off' })}
         options={[
           { label: '推拉', value: 'push' },
           { label: '補平', value: 'level' },
+          { label: '關閉（只轉視角）', value: 'off' },
         ]}
       />
       <Text type="secondary" style={{ fontSize: 12 }}>
         {br.mode === 'push'
-          ? '按住已選結構的面往外拉＝長、往回推＝縮，只改筆刷範圍。'
-          : '點已選結構的一個面，筆刷範圍內每一排都補到（或削到）跟它一樣高；圓頭變方頭用這個。'}
+          ? '按住已選結構的面往外拉＝長、往回推＝縮，只改筆刷範圍，拖的時候就看得到結果。轉視角：中鍵拖，或 Alt＋左鍵拖。'
+          : br.mode === 'level'
+            ? '點已選結構的一個面，筆刷範圍內每一排都補到（或削到）跟它一樣高。整根要變方頭請用右欄「補平（圓頭變方頭）」。'
+            : '關閉時在 3D 上怎麼拖都只轉視角、不會改到體素；長縮、移動、換材質仍可在右欄輸入。'}
       </Text>
       <Flex align="center" gap={10}>
         <span style={{ fontSize: 12, width: 64 }}>半徑</span>
@@ -488,7 +520,7 @@ export default function Section3DPage() {
       </Text>
     </Flex>
   );
-  const brushLabel = `${br.mode === 'push' ? '筆刷' : '補平'} ${br.shape === 'square' ? '方' : '圓'}${br.radius ?? 6}`;
+  const brushLabel = br.mode === 'off' ? '筆刷 關' : `${br.mode === 'push' ? '筆刷' : '補平'} ${br.shape === 'square' ? '方' : '圓'}${br.radius ?? 6}`;
 
   const selName = ed.selComps.length === 1 ? ed.selComps[0].label : `${ed.selComps.length} 個結構`;
   /** Worker 計算中：改體素的按鈕先 disabled，點了不會無聲被吞掉。 */
@@ -528,8 +560,10 @@ export default function Section3DPage() {
               </Button>
             </Dropdown>
             <Popover content={brushPop} trigger="click" placement="bottomLeft">
-              <Tooltip title="3D 上拖拉面只改筆刷範圍；整面長縮與移動在右欄輸入">
-                <Button icon={<FormatPainterOutlined />}>{brushLabel}</Button>
+              <Tooltip title={br.mode === 'off' ? '筆刷已關閉：3D 上拖拉只轉視角' : '3D 上拖拉面只改筆刷範圍；整面長縮與移動在右欄輸入。關閉筆刷就只轉視角'}>
+                <Button icon={<FormatPainterOutlined />} type={br.mode === 'off' ? 'dashed' : 'default'}>
+                  {brushLabel}
+                </Button>
               </Tooltip>
             </Popover>
           </Space.Compact>
@@ -602,6 +636,14 @@ export default function Section3DPage() {
           mode={mode}
           brush={ed.brush}
           nmPerVoxel={ed.nmPerVoxel}
+          orig={ed.orig.vol}
+          preview={pv}
+          onPreview={(op) => {
+            if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
+            setPv((p) => (p && !p.committed ? null : p));
+            return false;
+          }}
+          toOp={ed.opFor}
           onPick={(v, m) => {
             if (v === null) {
               if (m === 'set') ed.clearSel();
@@ -616,10 +658,7 @@ export default function Section3DPage() {
             const l = h.voxel !== null ? ed.L.labels[h.voxel] : -1;
             ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, along: h.along });
           }}
-          onSculpt={(s) => {
-            if (s.kind === 'level') ed.level(s.dir, s.to, s.local);
-            else ed.push(s.dir, s.n, s.local);
-          }}
+          onSculpt={ed.sculpt}
           onHover={setHover}
           floatRef={tagRef}
           handle={view}
@@ -709,7 +748,9 @@ export default function Section3DPage() {
             ? ed.last!.text
             : hover ||
               (ed.sel.size
-                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`} · 按住它的面拖＝筆刷雕刻（Alt 拖＝只轉視角）；整面長縮、移動在右欄`
+                ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 z ${ed.zRange[0]}～${ed.zRange[1]}`}${
+                    br.mode === 'off' ? ' · 筆刷已關閉，拖拉只轉視角' : ' · 按住它的面拖＝筆刷雕刻；轉視角用中鍵或 Alt＋左鍵拖'
+                  }；整面長縮、移動在右欄`
                 : '點一塊結構開始；Shift 多選；雙擊模型＝繞著那點轉；F 對準、H 全貌')}
         </span>
         <span className="grow" />

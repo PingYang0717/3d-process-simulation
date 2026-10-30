@@ -14,16 +14,19 @@ import {
   maskOf,
   materialsFor,
   nameComponents,
+  unionBBox,
 } from '../../volume/volume';
 import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
 import type { BrushShape } from '../../volume/volume';
 
-/** 3D 筆刷：推拉（沿法線長／縮 n 格）或補平（補到／削到點到的那一面）；半徑 null = 整面。 */
+/** 3D 筆刷：推拉（沿法線長／縮 n 格）、補平（補到／削到點到的那一面）或關閉（拖拉一律轉視角）；半徑 null = 整面。 */
 export interface Brush {
-  mode: 'push' | 'level';
+  mode: 'push' | 'level' | 'off';
   radius: number | null;
   shape: BrushShape;
 }
+/** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
+export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
 import { call, ensure, loadOrig, replayIn, retain } from '../../volume/client';
 import { overlayOpen, usePersisted } from '../../ui/persist';
 
@@ -109,8 +112,10 @@ export function useEditor() {
   const [brush, setBrush] = usePersisted<Brush>(
     'brush',
     { mode: 'push', radius: 6, shape: 'round' },
-    (v): v is Brush => !!v && typeof v === 'object' && ['push', 'level'].includes((v as Brush).mode) && ['round', 'square'].includes((v as Brush).shape),
+    (v): v is Brush => !!v && typeof v === 'object' && ['push', 'level', 'off'].includes((v as Brush).mode) && ['round', 'square'].includes((v as Brush).shape),
   );
+  /** 每一步送 Worker 前先叫它：View3D 在主執行緒用裁切的小塊立刻畫出結果（正式結果幾秒後覆蓋）。 */
+  const previewHook = useRef<((op: Op) => void) | null>(null);
   const [last, setLast] = useState<{ text: string; at: number } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   /** 計算中的說明（例如「計算中…」）；有值時其他改體素的動作先擋下。 */
@@ -257,6 +262,7 @@ export function useEditor() {
   const commit = useCallback(
     async (op: Op) => {
       if (!origState || running.current) return;
+      previewHook.current?.(op);
       if (!active) {
         // 原始保持唯讀：自動開一個新 split 來放這一步，復原可回到原始
         const next = await run(orig, [op], '計算中…');
@@ -459,9 +465,51 @@ export function useEditor() {
   const level = useCallback(
     (dir: Vec3, to: number, local: Local) => {
       if (!sel.size) return;
-      commit({ kind: 'level', keys: [...sel], zRange, dir, to, local, backfill });
+      commit({ kind: 'level', keys: [...sel], zRange, dir, to, local, backfill, follow });
     },
-    [sel, zRange, backfill, commit],
+    [sel, zRange, backfill, follow, commit],
+  );
+  /** 3D 筆刷的一筆 → Op（即時預覽和正式套用用同一個）；沒選取或 n = 0 回傳 null。 */
+  const opFor = useCallback(
+    (s: Sculpt): Op | null => {
+      if (!sel.size) return null;
+      const keys = [...sel];
+      if (s.kind === 'level') return { kind: 'level', keys, zRange, dir: s.dir, to: s.to, local: s.local, backfill, follow };
+      if (!s.n) return null;
+      return { kind: 'push', keys, zRange, dir: s.dir, n: s.n, follow, backfill, local: s.local };
+    },
+    [sel, zRange, follow, backfill],
+  );
+  const sculpt = useCallback(
+    (s: Sculpt) => {
+      const op = opFor(s);
+      if (op) commit(op);
+    },
+    [opFor, commit],
+  );
+  /**
+   * 整個選取沿 dir 補平到最外側那一點：每一排都補到和最高點一樣高（圓頭、斜角變方頭）。
+   * 只填空氣與可跟推的襯層，不吃厚的鄰居。回傳目標座標；沒選取回傳 null。
+   */
+  const levelTarget = useCallback(
+    (dir: Vec3) => {
+      const b = unionBBox(selComps);
+      if (!b) return null;
+      const a = dir[0] ? 0 : dir[1] ? 1 : 2;
+      const sum = dir[0] + dir[1] + dir[2];
+      return sum < 0 ? [b.x0, b.y0, b.z0][a] : [b.x1, b.y1, b.z1][a];
+    },
+    [selComps],
+  );
+  const levelWhole = useCallback(
+    (dir: Vec3) => {
+      const b = unionBBox(selComps);
+      const to = levelTarget(dir);
+      if (!b || to === null) return;
+      const center: Vec3 = [(b.x0 + b.x1) >> 1, (b.y0 + b.y1) >> 1, (b.z0 + b.z1) >> 1];
+      commit({ kind: 'level', keys: [...sel], zRange, dir, to, local: { center, radius: null }, backfill, follow });
+    },
+    [selComps, levelTarget, sel, zRange, backfill, follow, commit],
   );
   const setMaterial = useCallback(
     (m: number) => {
@@ -679,6 +727,11 @@ export function useEditor() {
     translate,
     push,
     level,
+    opFor,
+    sculpt,
+    levelTarget,
+    levelWhole,
+    previewHook,
     setMaterial,
     loadVolume,
     demo,

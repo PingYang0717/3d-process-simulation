@@ -45,6 +45,36 @@ function PushRow({ ed }: { ed: Editor }) {
   );
 }
 
+/** 整個選取沿一個方向補平到最外側：圓頭、斜角變方頭，一鍵完成。 */
+function LevelRow({ ed }: { ed: Editor }) {
+  const [dirId, setDirId] = useState('up');
+  const dir = DIRECTIONS.find((d) => d.id === dirId)!;
+  const to = ed.levelTarget(dir.d);
+  const axisName = dir.axis;
+  return (
+    <Flex vertical gap={10}>
+      <Flex gap={10} align="end">
+        <label className="field" style={{ flex: 1 }}>
+          <span>哪一面</span>
+          <Select
+            value={dirId}
+            onChange={setDirId}
+            optionLabelProp="label"
+            options={DIRECTIONS.map((d) => ({ value: d.id, label: `${d.arrow} ${d.name}`, title: d.hint }))}
+          />
+        </label>
+        <Button block style={{ flex: 1.3 }} onClick={() => ed.levelWhole(dir.d)} disabled={to === null || !!ed.busy} loading={!!ed.busy}>
+          補平成方頭（{axisName} = {to ?? '–'}）
+        </Button>
+      </Flex>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        選取裡每一排都補到{dir.name}最外側那一點（{axisName} = {to ?? '–'}，{to === null ? '' : `${(to * ed.nmPerVoxel).toFixed(1)} nm`}）。只填空氣；薄襯層
+        {ed.follow ? '跟著往外推' : '會擋住（設定裡開「襯層一起推」才跟著走）'}，厚的鄰居不吃。只補一小塊請在 3D 上用「補平」筆刷點。
+      </Text>
+    </Flex>
+  );
+}
+
 function MoveRow({ ed }: { ed: Editor }) {
   const [v, setV] = useState<(number | null)[]>([0, 0, 0]);
   const set = (i: number) => (x: number | null) =>
@@ -276,6 +306,9 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
       </Section>
       <Section title="長高／縮短">
         <PushRow ed={ed} />
+      </Section>
+      <Section title="補平（圓頭變方頭）">
+        <LevelRow ed={ed} />
       </Section>
       <Collapse
         ghost

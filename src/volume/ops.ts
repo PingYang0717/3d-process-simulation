@@ -29,8 +29,8 @@ export type Op =
   | { kind: 'push'; keys: string[]; zRange: ZRange; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local }
   | { kind: 'translate'; keys: string[]; zRange: ZRange; d: Vec3; backfill: Backfill }
   | { kind: 'material'; keys: string[]; zRange: ZRange; m: number }
-  /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）。 */
-  | { kind: 'level'; keys: string[]; zRange: ZRange; dir: Vec3; to: number; local: Local; backfill: Backfill };
+  /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）；follow = 襯層跟推（同 push）。 */
+  | { kind: 'level'; keys: string[]; zRange: ZRange; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean };
 
 export interface EditState {
   vol: Volume;
@@ -56,7 +56,7 @@ export function applyOp(s: EditState, op: Op, ctx: OpContext): EditState {
     vol = growMask(s.vol, ctx.orig, mask, op.zRange, op.dir, op.n, op.backfill, op.follow);
   } else if (op.kind === 'level') {
     const l = op.local;
-    vol = levelMask(s.vol, ctx.orig, mask, op.zRange, op.dir, l.center, radiusOf(l), l.shape ?? 'round', op.to, op.backfill);
+    vol = levelMask(s.vol, ctx.orig, mask, op.zRange, op.dir, l.center, radiusOf(l), l.shape ?? 'round', op.to, op.backfill, !!op.follow);
   } else if (op.kind === 'translate') {
     vol = translateMask(s.vol, ctx.orig, mask, op.zRange, op.d, op.backfill);
     shift = op.d;

@@ -13,6 +13,7 @@ import {
   LineDashedMaterial,
   LineLoop,
   LineSegments,
+  MOUSE,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -36,15 +37,20 @@ import {
   type Vec3,
   type Volume,
   type ZRange,
+  DIFF_BIT,
   VOID,
   directionName,
+  greedyMesh,
   hexToRgb,
   idx,
   voxelFromHit,
 } from '../../volume/volume';
 import { call, ensure, sidOf } from '../../volume/client';
-import type { EditState, Local } from '../../volume/ops';
-import { type Brush, type SelectMode, selectModeOf } from './editor';
+import type { EditState, Local, Op } from '../../volume/ops';
+import type { Preview } from '../../volume/preview';
+import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
+
+export type { Sculpt } from './editor';
 
 const SEL_RGB: Vec3 = [22, 119, 255];
 /** 選取層沿法線外推的量：固定值，相機再遠也不會和主網格共面閃爍。 */
@@ -68,7 +74,6 @@ export interface Clip {
   side: 1 | -1;
 }
 export type ViewMode = 'now' | 'orig' | 'diff';
-export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
 
 export interface View3DHandle {
   setView: (preset: ViewPreset) => void;
@@ -97,6 +102,9 @@ interface Ctx {
   voidEdges: LineSegments<EdgesGeometry, LineBasicMaterial>;
   selBox: LineSegments<BufferGeometry, LineBasicMaterial>;
   hoverBox: LineSegments<BufferGeometry, LineBasicMaterial>;
+  /** 即時預覽：裁切範圍重算的網格；主網格在同一個範圍裡的片段由 shader 挖掉（hole）。 */
+  previewMesh: Mesh<BufferGeometry, MeshLambertMaterial>;
+  hole: { min: { value: Vector3 }; max: { value: Vector3 } };
   ghost: LineSegments<BufferGeometry, LineDashedMaterial>;
   ghostFill: Mesh<BoxGeometry, MeshBasicMaterial>;
   ring: LineLoop<BufferGeometry, LineBasicMaterial>;
@@ -176,9 +184,50 @@ const cached = async <T,>(key: string, make: () => Promise<T>): Promise<T> => {
 const boxEdges = (b: BBox) => new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1));
 const axisOf = (d: Vec3) => (d[0] ? 0 : d[1] ? 1 : 2);
 const AXIS_RGB: Record<Axis, string> = { x: '#e5484d', y: '#30a46c', z: '#3e63dd' };
+/** 挖洞的邊界多留一點點，剛好落在範圍邊界平面上的面也挖掉（預覽網格會重畫它們）。 */
+const HOLE_EPS = 1e-3;
 
 /**
- * 把一個切面畫到 canvas：材質顏色、隱藏材質淡灰、選取混藍、差異描紅邊。
+ * 主網格與選取層的材質：加一個 uniform 盒子，落在盒子裡的片段 discard。
+ * 即時預覽把裁切範圍挖空、再疊上重算的小網格，不必等 Worker 重算整個網格。
+ */
+const withHole = <M extends MeshLambertMaterial>(m: M, hole: Ctx['hole']) => {
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.holeMin = hole.min;
+    shader.uniforms.holeMax = hole.max;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vHolePos;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHolePos = position;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vHolePos;\nuniform vec3 holeMin;\nuniform vec3 holeMax;')
+      .replace(
+        '#include <clipping_planes_fragment>',
+        '#include <clipping_planes_fragment>\nif (all(greaterThan(vHolePos, holeMin)) && all(lessThan(vHolePos, holeMax))) discard;',
+      );
+  };
+  m.customProgramCacheKey = () => 'hole';
+  return m;
+};
+
+/** 收掉即時預覽：預覽網格藏起來、主網格不再挖洞。 */
+const hidePreview = (c: Ctx) => {
+  c.previewMesh.visible = false;
+  c.hole.min.value.set(1, 1, 1);
+  c.hole.max.value.set(0, 0, 0);
+};
+
+/** 預覽裡的體素值：在裁切範圍內取預覽結果，否則取原本的陣列。 */
+const patched = (vol: Volume, p: Preview | null | undefined, x: number, y: number, z: number) => {
+  if (p) {
+    const b = p.box;
+    if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1 && z >= b.z0 && z <= b.z1)
+      return p.data[((z - b.z0) * (b.y1 - b.y0 + 1) + (y - b.y0)) * (b.x1 - b.x0 + 1) + (x - b.x0)];
+  }
+  return vol.data[idx(vol, x, y, z)];
+};
+
+/**
+ * 把一個切面畫到 canvas：材質顏色、隱藏材質淡灰、選取混藍、差異描紅邊；patch = 即時預覽蓋上去。
  * 下方切面與 3D 剖面貼圖共用，所以兩邊逐像素相同。
  */
 export function drawSlice(
@@ -190,6 +239,7 @@ export function drawSlice(
   hidden: Set<number>,
   selMask: Uint8Array | null,
   diff: Uint8Array | null,
+  patch?: Preview | null,
 ) {
   const [W, H] = axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
   cv.width = W;
@@ -200,7 +250,7 @@ export function drawSlice(
     for (let u = 0; u < W; u++) {
       const [x, y, z] = toVoxel(u, v);
       const i = idx(vol, x, y, z);
-      const m = vol.data[i];
+      const m = patched(vol, patch, x, y, z);
       const c = hidden.has(m) ? [245, 245, 245] : (rgb.get(m) ?? [255, 0, 255]);
       const o = (v * W + u) * 4;
       img.data[o] = c[0];
@@ -261,6 +311,10 @@ export function View3D({
   mode,
   brush,
   nmPerVoxel,
+  orig,
+  preview,
+  onPreview,
+  toOp,
   onPick,
   onMenu,
   onSculpt,
@@ -290,6 +344,14 @@ export function View3D({
   mode: ViewMode;
   brush: Brush;
   nmPerVoxel: number;
+  /** 原始陣列（預覽裡改過的體素混紅用）。 */
+  orig: Volume | null;
+  /** 即時預覽（主執行緒裁切重算的結果，base = 它根據的陣列）；null = 沒有。網格在這裡畫，正式網格到了就收掉。 */
+  preview: (Preview & { base: Uint8Array }) | null;
+  /** 拖拉中每改一格就要一次預覽；null = 收掉。回傳 false 表示範圍太大沒算（改畫橘色塊）。 */
+  onPreview: (op: Op | null) => boolean;
+  /** 筆刷的一筆 → 完整 Op（補上選取、z 範圍、襯層設定）。 */
+  toOp: (s: Sculpt) => Op | null;
   onPick: (voxel: number | null, mode: SelectMode) => void;
   onMenu: (hit: MenuHit, x: number, y: number) => void;
   onSculpt: (s: Sculpt) => void;
@@ -304,6 +366,10 @@ export function View3D({
   const hostRef = useRef<HTMLDivElement>(null);
   const gizmoRef = useRef<SVGSVGElement>(null);
   const ctxRef = useRef<Ctx | null>(null);
+  /** 按下的處理（capture 階段的原生事件呼叫；每次 render 換成最新的閉包）。 */
+  const downHandler = useRef<((e: PointerEvent) => void) | null>(null);
+  const origRef = useRef(orig);
+  origRef.current = orig;
   const bboxRef = useRef(selBBox);
   bboxRef.current = selBBox;
   const selRef = useRef(selMask);
@@ -348,6 +414,8 @@ export function View3D({
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
     controls.screenSpacePanning = true;
+    // 中鍵也能轉視角：選取的結構佔滿畫面時，左鍵是筆刷，還有中鍵（或 Alt＋左鍵）可以轉
+    controls.mouseButtons = { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.ROTATE, RIGHT: MOUSE.PAN };
     // 滾輪朝游標縮放；不能縮到模型裡面、也不能退到看不見
     controls.zoomToCursor = true;
     controls.minDistance = size * 0.08;
@@ -431,11 +499,14 @@ export function View3D({
       scene.add(o);
       return o;
     };
-    const mesh = voxelSpace(
-      new Mesh(new BufferGeometry(), new MeshLambertMaterial({ vertexColors: true, side: DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 })),
-    );
+    // 沒有預覽時盒子是空的（min > max），什麼都不挖
+    const hole: Ctx['hole'] = { min: { value: new Vector3(1, 1, 1) }, max: { value: new Vector3(0, 0, 0) } };
+    const mainParams = { vertexColors: true, side: DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 } as const;
+    const mesh = voxelSpace(new Mesh(new BufferGeometry(), withHole(new MeshLambertMaterial(mainParams), hole)));
     // 點選與滑過提示走 BVH（three-mesh-bvh），不必每次掃過全部三角形
     mesh.raycast = acceleratedRaycast;
+    const previewMesh = voxelSpace(new Mesh(new BufferGeometry(), new MeshLambertMaterial(mainParams)));
+    previewMesh.visible = false;
     const ghostMesh = voxelSpace(
       new Mesh(new BufferGeometry(), new MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.38, depthWrite: false, side: DoubleSide })),
       1,
@@ -445,7 +516,7 @@ export function View3D({
     const changedEdges = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0xff4d4f })), 2);
     changedEdges.visible = false;
     const selFill = voxelSpace(
-      new Mesh(new BufferGeometry(), new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide })),
+      new Mesh(new BufferGeometry(), withHole(new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide }), hole)),
       2,
     );
     const voidMesh = voxelSpace(
@@ -485,7 +556,12 @@ export function View3D({
     const capEdges = new LineSegments(new EdgesGeometry(cap.geometry), new LineBasicMaterial({ color: 0xd46b08 }));
     capEdges.visible = false;
     scene.add(capEdges);
-    ctxRef.current = { renderer, scene, camera, controls, mesh, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
+    ctxRef.current = { renderer, scene, camera, controls, mesh, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
+    // 按下要在 OrbitControls（掛在 canvas 上）之前決定是不是筆刷：capture 階段先跑，筆刷就先把 controls 關掉，
+    // OrbitControls 連這一下都不會記到。之前是 React 的 onPointerDown 事後才關，OrbitControls 已經記了一個指標、
+    // 又因為指標被我們捕捉而收不到放開，之後滾輪縮放就一直沒反應（視角像被鎖住）。
+    const onDown = (e: PointerEvent) => downHandler.current?.(e);
+    host.addEventListener('pointerdown', onDown, { capture: true });
     let flashTimer: ReturnType<typeof setTimeout>[] = [];
     const flash = () => {
       flashTimer.forEach(clearTimeout);
@@ -608,6 +684,7 @@ export function View3D({
       cancelAnimationFrame(raf);
       flashTimer.forEach(clearTimeout);
       ro.disconnect();
+      host.removeEventListener('pointerdown', onDown, { capture: true });
       controls.dispose();
       scene.traverse((o) => {
         if (o instanceof Mesh || o instanceof LineSegments || o instanceof LineLoop) {
@@ -635,6 +712,8 @@ export function View3D({
       if (m.quads) g.boundsTree = new MeshBVH(g);
       c.mesh.geometry.dispose();
       c.mesh.geometry = g;
+      // 正式網格到了，預覽收掉
+      hidePreview(c);
     };
     const req =
       mode === 'diff'
@@ -663,13 +742,78 @@ export function View3D({
   }, [state, materials, hidden, showDiff, mode]);
 
   useEffect(() => {
-    const mat = ctxRef.current?.mesh.material;
-    if (!mat) return;
-    mat.transparent = translucent;
-    mat.opacity = translucent ? 0.3 : 1;
-    mat.depthWrite = !translucent;
-    mat.needsUpdate = true;
+    const c = ctxRef.current;
+    if (!c) return;
+    for (const mat of [c.mesh.material, c.previewMesh.material]) {
+      mat.transparent = translucent;
+      mat.opacity = translucent ? 0.3 : 1;
+      mat.depthWrite = !translucent;
+      mat.needsUpdate = true;
+    }
   }, [translucent]);
+
+  // 即時預覽：裁切範圍（外加一圈鄰居）在主執行緒 greedy mesh，主網格同一範圍挖掉；正式網格 swap 時收掉
+  useEffect(() => {
+    const c = ctxRef.current;
+    if (!c) return;
+    if (!preview || preview.base !== state.vol.data || mode === 'diff') {
+      hidePreview(c);
+      return;
+    }
+    const b = preview.box;
+    const bx = b.x1 - b.x0 + 1;
+    const by = b.y1 - b.y0 + 1;
+    const bz = b.z1 - b.z0 + 1;
+    const hx = bx + 2;
+    const hy = by + 2;
+    const hz = bz + 2;
+    const codes = new Uint16Array(hx * hy * hz);
+    const o = origRef.current;
+    for (let z = 0; z < hz; z++) {
+      const vz = b.z0 - 1 + z;
+      if (vz < 0 || vz >= vol.Z) continue;
+      for (let y = 0; y < hy; y++) {
+        const vy = b.y0 - 1 + y;
+        if (vy < 0 || vy >= vol.Y) continue;
+        for (let x = 0; x < hx; x++) {
+          const vx = b.x0 - 1 + x;
+          if (vx < 0 || vx >= vol.X) continue;
+          const i = (vz * vol.Y + vy) * vol.X + vx;
+          const inside = x >= 1 && x <= bx && y >= 1 && y <= by && z >= 1 && z <= bz;
+          const m = inside ? preview.data[((z - 1) * by + (y - 1)) * bx + (x - 1)] : vol.data[i];
+          if (!m || hidden.has(m)) continue;
+          codes[(z * hy + y) * hx + x] = showDiff && o && o.data[i] !== m ? m | DIFF_BIT : m;
+        }
+      }
+    }
+    const m = greedyMesh(hx, hy, hz, codes, (code) => {
+      const [r, g, bl] = rgb.get(code & 255) ?? [255, 0, 255];
+      return code & DIFF_BIT ? [(r / 255) * 0.35 + 0.65, (g / 255) * 0.35 + 0.2, (bl / 255) * 0.35 + 0.2] : [r / 255, g / 255, bl / 255];
+    });
+    // 只留重心落在裁切範圍（含邊界面）裡的三角形：外圈鄰居之間的面與外圈最外面的面主網格本來就有
+    const keep: number[] = [];
+    for (let t = 0; t < m.positions.length; t += 9) {
+      const cx = (m.positions[t] + m.positions[t + 3] + m.positions[t + 6]) / 3;
+      const cy = (m.positions[t + 1] + m.positions[t + 4] + m.positions[t + 7]) / 3;
+      const cz = (m.positions[t + 2] + m.positions[t + 5] + m.positions[t + 8]) / 3;
+      if (cx >= 1 - HOLE_EPS && cx <= bx + 1 + HOLE_EPS && cy >= 1 - HOLE_EPS && cy <= by + 1 + HOLE_EPS && cz >= 1 - HOLE_EPS && cz <= bz + 1 + HOLE_EPS) keep.push(t);
+    }
+    const positions = new Float32Array(keep.length * 9);
+    const normals = new Float32Array(keep.length * 9);
+    const colors = new Float32Array(keep.length * 9);
+    keep.forEach((t, k) => {
+      for (let j = 0; j < 9; j++) {
+        positions[k * 9 + j] = m.positions[t + j] + [b.x0 - 1, b.y0 - 1, b.z0 - 1][j % 3];
+        normals[k * 9 + j] = m.normals[t + j];
+        colors[k * 9 + j] = m.colors[t + j];
+      }
+    });
+    c.previewMesh.geometry.dispose();
+    c.previewMesh.geometry = toGeometry({ positions, normals, colors, quads: keep.length / 2 });
+    c.previewMesh.visible = true;
+    c.hole.min.value.set(b.x0 - HOLE_EPS, b.y0 - HOLE_EPS, b.z0 - HOLE_EPS);
+    c.hole.max.value.set(b.x1 + 1 + HOLE_EPS, b.y1 + 1 + HOLE_EPS, b.z1 + 1 + HOLE_EPS);
+  }, [preview]);
 
   // 空洞透視：VOID 永遠畫在最上面（深色面＋紅邊）
   const voidSeq = useRef(0);
@@ -734,13 +878,14 @@ export function View3D({
     if (!c) return;
     const plane = clipPlane(clip);
     const planes = plane ? [plane] : [];
-    for (const o of [c.mesh, c.ghostMesh, c.selFill, c.voidMesh, c.voidEdges]) o.material.clippingPlanes = planes;
+    for (const o of [c.mesh, c.previewMesh, c.ghostMesh, c.selFill, c.voidMesh, c.voidEdges]) o.material.clippingPlanes = planes;
     if (!clip) {
       c.cap.visible = c.capEdges.visible = false;
       return;
     }
     const cv = document.createElement('canvas');
-    drawSlice(cv, vol, clip.axis, clip.at, rgb, hidden, mode === 'orig' ? null : selMask, mode === 'orig' ? null : diffMask);
+    const patch = preview && preview.base === vol.data && mode === 'now' ? preview : null;
+    drawSlice(cv, vol, clip.axis, clip.at, rgb, hidden, mode === 'orig' ? null : selMask, mode === 'orig' ? null : diffMask, patch);
     const tex = new CanvasTexture(cv);
     tex.magFilter = NearestFilter;
     tex.minFilter = NearestFilter;
@@ -767,7 +912,7 @@ export function View3D({
     c.capEdges.position.copy(c.cap.position);
     c.capEdges.rotation.copy(c.cap.rotation);
     c.cap.visible = c.capEdges.visible = true;
-  }, [clip, vol, rgb, hidden, selMask, diffMask, mode]);
+  }, [clip, vol, rgb, hidden, selMask, diffMask, mode, preview]);
 
   // 十字
   useEffect(() => {
@@ -1040,13 +1185,33 @@ export function View3D({
     }
     return Math.max(-d.maxN, Math.min(d.maxN, n));
   };
-  const endDrag = (d: Drag | null) => {
+  /** 拖拉結束：keep = 這一筆會套用，拖拉中的預覽留著等正式結果；否則連預覽一起收掉。 */
+  const endDrag = (d: Drag | null, keep = false) => {
     const c = ctxRef.current;
     if (!c) return;
     c.controls.enabled = true;
     hideGhost();
     setDragTip(null);
+    if (!keep) onPreview(null);
     if (d && hostRef.current) hostRef.current.style.cursor = 'default';
+  };
+  /** 拖拉中的那一筆（放開時送出的也是它）。 */
+  const sculptOf = (d: Drag): Sculpt => {
+    const br = brushRef.current;
+    const local: Local = { center: d.hitVoxel, radius: br.radius, ...(br.radius !== null ? { shape: br.shape } : {}) };
+    if (d.mode === 'level') {
+      const a = axisOf(d.dir);
+      return { kind: 'level', dir: d.dir, to: d.hitVoxel[a] + d.dir[a] * d.n, local };
+    }
+    return { kind: 'push', dir: d.dir, n: d.n, local };
+  };
+  /** 拖拉中即時預覽：算得出來就把橘色塊換成真正的結果（虛線框留著）；太大就只畫橘色塊。 */
+  const livePreview = (d: Drag) => {
+    const c = ctxRef.current;
+    if (!c) return;
+    const op = d.n || d.mode === 'level' ? toOp(sculptOf(d)) : null;
+    const ok = op ? onPreview(op) : (onPreview(null), false);
+    if (ok) c.ghostFill.visible = false;
   };
 
   // 拖拉中按 Esc：丟掉這一次，不清選取（capture 搶在其他 Esc 處理前）
@@ -1135,23 +1300,22 @@ export function View3D({
     onHover(null);
   };
 
-  return (
-    <div
-      ref={hostRef}
-      className="view3d"
-      onPointerDown={(e) => {
-        const c = ctxRef.current;
-        if (!c) return;
-        if (e.button === 2) {
-          downRef.current = { x: e.clientX, y: e.clientY, button: 2 };
-          return;
-        }
-        if (e.button !== 0) return;
-        downRef.current = { x: e.clientX, y: e.clientY, button: 0 };
-        // Alt 拖＝只轉視角；計算中、重畫中、看原始時不雕刻（還是可以點選）
-        if (e.altKey || busyRef.current || meshingRef.current || mode === 'orig') return;
-        const h = hit(e.clientX, e.clientY);
-        if (!h || h.onCap || !selRef.current?.[h.p]) return;
+  // 按下（capture 階段的原生事件，見掛載時的註解）：決定是點選、轉視角還是筆刷
+  downHandler.current = (e: PointerEvent) => {
+    const c = ctxRef.current;
+    const host = hostRef.current;
+    if (!c || !host) return;
+    if ((e.target as Element | null)?.closest?.('.gizmo')) return;
+    if (e.button === 2) {
+      downRef.current = { x: e.clientX, y: e.clientY, button: 2 };
+      return;
+    }
+    if (e.button !== 0) return;
+    downRef.current = { x: e.clientX, y: e.clientY, button: 0 };
+    // Alt 拖＝只轉視角；筆刷關閉、計算中、重畫中、看原始時不雕刻（還是可以點選）
+    if (e.altKey || brushRef.current.mode === 'off' || busyRef.current || meshingRef.current || mode === 'orig') return;
+    const h = hit(e.clientX, e.clientY);
+    if (!h || h.onCap || !selRef.current?.[h.p]) return;
         // 按在已選結構的面上：準備筆刷；拖過死區才算拖拉
         const { vx, vy, pxPerVoxel } = screenVectors(h.point, h.n);
         const ax = axisOf(h.n);
@@ -1173,14 +1337,23 @@ export function View3D({
           hitVoxel: coordsOf(h.p),
           mode: brushRef.current.mode,
         };
-        dragRef.current = d;
-        c.controls.enabled = false;
-        c.ring.visible = c.arrow.visible = false;
-        setHoverTag(null);
-        if (d.mode === 'level') showGhost(d);
-        setDragTip({ text: tipOf(d), ...tipPos(e.clientX, e.clientY) });
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
+    dragRef.current = d;
+    // 先關掉 controls，OrbitControls 的 pointerdown 就會直接略過這一下
+    c.controls.enabled = false;
+    c.ring.visible = c.arrow.visible = false;
+    setHoverTag(null);
+    if (d.mode === 'level') {
+      showGhost(d);
+      livePreview(d);
+    }
+    setDragTip({ text: tipOf(d), ...tipPos(e.clientX, e.clientY) });
+    host.setPointerCapture(e.pointerId);
+  };
+
+  return (
+    <div
+      ref={hostRef}
+      className="view3d"
       onPointerMove={(e) => {
         const d = dragRef.current;
         if (d) {
@@ -1193,6 +1366,7 @@ export function View3D({
             d.n = n;
             if (d.n || d.mode === 'level') showGhost(d);
             else hideGhost();
+            livePreview(d);
           }
           setDragTip({ text: tipOf(d), ...tipPos(e.clientX, e.clientY) });
           return;
@@ -1207,8 +1381,8 @@ export function View3D({
           return;
         }
         const h = hit(e.clientX, e.clientY);
-        const onSel = !!h && !h.onCap && !!selRef.current?.[h.p];
         const br = brushRef.current;
+        const onSel = !!h && !h.onCap && !!selRef.current?.[h.p] && br.mode !== 'off';
         const pos = tipPos(e.clientX, e.clientY);
         if (onSel) {
           showRing(coordsOf(h.p), h.n);
@@ -1218,25 +1392,28 @@ export function View3D({
           if (br.mode === 'level') {
             host.style.cursor = 'crosshair';
             setHoverTag({ text: `點一下：圈內補平到這面（${dirName}）`, ...pos });
-            onHover(`補平（${who}）：點一下把範圍內補到這一面；按住再拖可以多 ±n 格；Alt 拖＝只轉視角`);
+            onHover(`補平（${who}）：點一下把範圍內補到這一面；按住再拖可以多 ±n 格；轉視角用中鍵或 Alt＋左鍵拖`);
           } else {
             const { vx, vy } = screenVectors(h.point, h.n);
             host.style.cursor = Math.hypot(vx, vy) < HEAD_ON_PX || Math.abs(vy) >= Math.abs(vx) ? 'ns-resize' : 'ew-resize';
             setHoverTag({ text: `拖：${dirName}長／縮`, ...pos });
-            onHover(`推拉（${who}）：按住${dirName}拉＝長、往回推＝縮，放開才套用，Esc 取消；Alt 拖＝只轉視角`);
+            onHover(`推拉（${who}）：按住${dirName}拉＝長、往回推＝縮，放開套用（拖的時候就看得到結果），Esc 取消；轉視角用中鍵或 Alt＋左鍵拖`);
           }
           return;
         }
         showRing(null, null);
         const comp = h ? compAt(h.p) : null;
+        const selected = !!h && !h.onCap && !!selRef.current?.[h.p];
         showHoverBox(comp && !h?.onCap ? comp.bbox : null);
-        host.style.cursor = comp ? 'pointer' : 'default';
-        setHoverTag(comp ? { text: comp.label, ...pos } : null);
+        host.style.cursor = comp && !selected ? 'pointer' : 'default';
+        setHoverTag(comp && !selected ? { text: comp.label, ...pos } : null);
         onHover(
           comp
             ? h?.onCap
               ? `剖面：點一下選取 ${comp.label}`
-              : `點一下選取 ${comp.label}；同一處再點一次＝選它後面的結構；Shift 多選`
+              : selected
+                ? `筆刷已關閉：拖拉只轉視角，不會改到 ${comp.label}；要雕刻請在上方「筆刷」切回推拉或補平`
+                : `點一下選取 ${comp.label}；同一處再點一次＝選它後面的結構；Shift 多選`
             : null,
         );
       }}
@@ -1259,19 +1436,14 @@ export function View3D({
         }
         if (e.button !== 0) return;
         if (d) {
-          endDrag(d);
-          const br = brushRef.current;
-          const local: Local = { center: d.hitVoxel, radius: br.radius, ...(br.radius !== null ? { shape: br.shape } : {}) };
-          if (d.mode === 'level') {
-            // 補平：點一下就套用到那一面；拖過的話再加減 n 格
-            const a = axisOf(d.dir);
-            onSculpt({ kind: 'level', dir: d.dir, to: d.hitVoxel[a] + d.dir[a] * d.n, local });
+          // 補平：點一下就套用到那一面（拖過的話再加減 n 格）；推拉：拖過死區且 n ≠ 0 才套用
+          const apply = d.mode === 'level' || (d.armed && d.n !== 0);
+          endDrag(d, apply);
+          if (apply) {
+            onSculpt(sculptOf(d));
             return;
           }
-          if (d.armed) {
-            if (d.n !== 0) onSculpt({ kind: 'push', dir: d.dir, n: d.n, local });
-            return;
-          }
+          if (d.armed) return;
           pick(e);
           return;
         }
@@ -1343,6 +1515,7 @@ export function SliceView({
   cursor,
   zRange,
   diff,
+  preview,
   onPick,
   onStep,
   onHover,
@@ -1356,6 +1529,8 @@ export function SliceView({
   cursor: Vec3;
   zRange: ZRange;
   diff: Uint8Array | null;
+  /** 即時預覽蓋在切面上（index 只在它根據的陣列還是這份時才傳）。 */
+  preview?: Preview | null;
   onPick: (p: Vec3, mode: SelectMode) => void;
   onStep: (delta: number) => void;
   onHover?: (p: Vec3 | null) => void;
@@ -1370,8 +1545,8 @@ export function SliceView({
   const toVoxel = (u: number, v: number): Vec3 => (axis === 'z' ? [u, v, at] : axis === 'y' ? [u, at, v] : [at, v, u]);
 
   useEffect(() => {
-    drawSlice(canvasRef.current!, vol, axis, at, rgb, hidden, selMask, diff);
-  }, [vol, axis, at, rgb, hidden, selMask, diff, W, H]);
+    drawSlice(canvasRef.current!, vol, axis, at, rgb, hidden, selMask, diff, preview);
+  }, [vol, axis, at, rgb, hidden, selMask, diff, preview, W, H]);
 
   const [cu, cv] = axis === 'z' ? [cursor[0], cursor[1]] : axis === 'y' ? [cursor[0], cursor[2]] : [cursor[2], cursor[1]];
   const imgRef = useRef<HTMLDivElement>(null);

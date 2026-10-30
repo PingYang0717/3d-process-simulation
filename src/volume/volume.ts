@@ -184,25 +184,29 @@ export function greedyMesh(
   const nor: number[] = [];
   const col: number[] = [];
   let quads = 0;
-  const get = (x: number, y: number, z: number) =>
-    x < 0 || y < 0 || z < 0 || x >= X || y >= Y || z >= Z ? 0 : codes[(z * Y + y) * X + x];
+  const stride = [1, X, X * Y];
   const BOTH = 1 << 30;
   const mask = new Int32Array(Math.max(X * Y, Y * Z, X * Z));
   for (let d = 0; d < 3; d++) {
     const u = (d + 1) % 3;
     const v = (d + 2) % 3;
-    const q = [0, 0, 0];
-    q[d] = 1;
     const x = [0, 0, 0];
     for (x[d] = -1; x[d] < dims[d]; ) {
-      // 這一片的面：正值 = 朝 +d 的面、負值 = 朝 −d、BOTH = 兩面都有
+      // 這一片的面：正值 = 朝 +d 的面、負值 = 朝 −d、BOTH = 兩面都有（直接算 index，不逐格判斷出界）
       let n = 0;
-      for (x[v] = 0; x[v] < dims[v]; x[v]++)
-        for (x[u] = 0; x[u] < dims[u]; x[u]++) {
-          const a = get(x[0], x[1], x[2]);
-          const b = get(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
+      const t = x[d];
+      const hasA = t >= 0;
+      const hasB = t < dims[d] - 1;
+      const sd = stride[d];
+      const su = stride[u];
+      for (let j = 0; j < dims[v]; j++) {
+        let i0 = j * stride[v] + t * sd;
+        for (let i = 0; i < dims[u]; i++, i0 += su) {
+          const a = hasA ? codes[i0] : 0;
+          const b = hasB ? codes[i0 + sd] : 0;
           mask[n++] = a === b ? 0 : a && !b ? a : !a && b ? -b : BOTH | (a << 15) | b;
         }
+      }
       x[d]++;
       n = 0;
       for (let j = 0; j < dims[v]; j++)
@@ -569,79 +573,86 @@ export function decodeNpy(buf: ArrayBuffer): Volume {
   return { X, Y, Z, data };
 }
 
-/** 6 鄰接 flood fill（Int32Array 堆疊），順便算 bbox、count、seed。 */
-export function labelComponents(vol: Volume): { labels: Int32Array; raw: RawComp[] } {
+/** flood fill 用的堆疊；不夠時自動加倍，跨元件重複使用。 */
+interface Stack {
+  buf: Int32Array;
+}
+
+/** 從 seed 起把同材質、labels 還是 −1 的 6 鄰接體素標成 id；回傳這塊的 count、bbox。 */
+function floodFill(vol: Volume, labels: Int32Array, seed: number, id: number, st: Stack): RawComp {
   const { X, Y, Z, data } = vol;
-  const N = X * Y * Z;
   const plane = X * Y;
+  const mat = data[seed];
+  let stack = st.buf;
+  let count = 0;
+  let x0 = X;
+  let x1 = -1;
+  let y0 = Y;
+  let y1 = -1;
+  let z0 = Z;
+  let z1 = -1;
+  let top = 0;
+  stack[top++] = seed;
+  labels[seed] = id;
+  while (top) {
+    const i = stack[--top];
+    count++;
+    const x = i % X;
+    const y = ((i - x) / X) % Y;
+    const z = (i - x - y * X) / plane;
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+    if (z < z0) z0 = z;
+    if (z > z1) z1 = z;
+    if (top + 6 >= stack.length) {
+      const bigger = new Int32Array(stack.length * 2);
+      bigger.set(stack);
+      stack = st.buf = bigger;
+    }
+    // 六個鄰居直接展開（大陣列時比共用一個 closure 快約兩成）
+    let j = i - 1;
+    if (x > 0 && labels[j] < 0 && data[j] === mat) {
+      labels[j] = id;
+      stack[top++] = j;
+    }
+    j = i + 1;
+    if (x < X - 1 && labels[j] < 0 && data[j] === mat) {
+      labels[j] = id;
+      stack[top++] = j;
+    }
+    j = i - X;
+    if (y > 0 && labels[j] < 0 && data[j] === mat) {
+      labels[j] = id;
+      stack[top++] = j;
+    }
+    j = i + X;
+    if (y < Y - 1 && labels[j] < 0 && data[j] === mat) {
+      labels[j] = id;
+      stack[top++] = j;
+    }
+    j = i - plane;
+    if (z > 0 && labels[j] < 0 && data[j] === mat) {
+      labels[j] = id;
+      stack[top++] = j;
+    }
+    j = i + plane;
+    if (z < Z - 1 && labels[j] < 0 && data[j] === mat) {
+      labels[j] = id;
+      stack[top++] = j;
+    }
+  }
+  return { mat, count, bbox: { x0, x1, y0, y1, z0, z1 }, seed };
+}
+
+/** 6 鄰接同材質連通塊：每個體素屬於哪一塊，順便算 bbox、count、seed。 */
+export function labelComponents(vol: Volume): { labels: Int32Array; raw: RawComp[] } {
+  const N = vol.X * vol.Y * vol.Z;
   const labels = new Int32Array(N).fill(-1);
   const raw: RawComp[] = [];
-  let stack = new Int32Array(1 << 16);
-  for (let s = 0; s < N; s++) {
-    if (labels[s] >= 0 || data[s] === AIR) continue;
-    const mat = data[s];
-    const id = raw.length;
-    let count = 0;
-    let x0 = X;
-    let x1 = -1;
-    let y0 = Y;
-    let y1 = -1;
-    let z0 = Z;
-    let z1 = -1;
-    let top = 0;
-    stack[top++] = s;
-    labels[s] = id;
-    while (top) {
-      const i = stack[--top];
-      count++;
-      const x = i % X;
-      const y = ((i - x) / X) % Y;
-      const z = (i - x - y * X) / plane;
-      if (x < x0) x0 = x;
-      if (x > x1) x1 = x;
-      if (y < y0) y0 = y;
-      if (y > y1) y1 = y;
-      if (z < z0) z0 = z;
-      if (z > z1) z1 = z;
-      if (top + 6 >= stack.length) {
-        const bigger = new Int32Array(stack.length * 2);
-        bigger.set(stack);
-        stack = bigger;
-      }
-      // 六個鄰居直接展開（大陣列時比共用一個 closure 快約兩成）
-      let j = i - 1;
-      if (x > 0 && labels[j] < 0 && data[j] === mat) {
-        labels[j] = id;
-        stack[top++] = j;
-      }
-      j = i + 1;
-      if (x < X - 1 && labels[j] < 0 && data[j] === mat) {
-        labels[j] = id;
-        stack[top++] = j;
-      }
-      j = i - X;
-      if (y > 0 && labels[j] < 0 && data[j] === mat) {
-        labels[j] = id;
-        stack[top++] = j;
-      }
-      j = i + X;
-      if (y < Y - 1 && labels[j] < 0 && data[j] === mat) {
-        labels[j] = id;
-        stack[top++] = j;
-      }
-      j = i - plane;
-      if (z > 0 && labels[j] < 0 && data[j] === mat) {
-        labels[j] = id;
-        stack[top++] = j;
-      }
-      j = i + plane;
-      if (z < Z - 1 && labels[j] < 0 && data[j] === mat) {
-        labels[j] = id;
-        stack[top++] = j;
-      }
-    }
-    raw.push({ mat, count, bbox: { x0, x1, y0, y1, z0, z1 }, seed: s });
-  }
+  const st: Stack = { buf: new Int32Array(1 << 16) };
+  for (let s = 0; s < N; s++) if (labels[s] < 0 && vol.data[s] !== AIR) raw.push(floodFill(vol, labels, s, raw.length, st));
   return { labels, raw };
 }
 
@@ -669,42 +680,18 @@ export function initialLabeled(vol: Volume, matName: (id: number) => string): La
 const labelNumber = (label: string) => parseInt(label.split(' ').pop() ?? '0', 10) || 0;
 
 /**
- * 名稱延續：舊結構的體素（已選的照位移平移）落在哪個新結構最多，新結構就沿用它的 key 與名字。
- * 大的先認領；同材質或重疊過半才繼承；被切出來的那一塊取新名。
+ * 舊結構 → 新結構的認領：votes[新][舊] = 舊結構有幾個體素（已選的照位移平移）落在新結構。
+ * 大的先認領；同材質或重疊過半才繼承 key 與名字；沒人認領的取新名（同材質最大編號 ＋1）。
  */
-export function relabel(
-  prevVol: Volume,
+function nameByVotes(
   prev: Labeled,
-  movedMask: Uint8Array | null,
-  shift: Vec3,
-  next: Volume,
+  fresh: RawComp[],
+  votes: Map<number, number>,
   matName: (id: number) => string,
   newKey: () => string,
-): Labeled {
-  const { labels, raw } = labelComponents(next);
-  const { X, Y, Z } = next;
-  const owner = new Int32Array(raw.length).fill(-1);
+): Comp[] {
   const nOld = prev.comps.length;
-  const votes = new Map<number, number>();
-  for (let i = 0; i < prevVol.data.length; i++) {
-    const o = prev.labels[i];
-    if (o < 0) continue;
-    let j = i;
-    if (movedMask?.[i]) {
-      const x = i % X;
-      const y = ((i - x) / X) % Y;
-      const z = (i - x - y * X) / (X * Y);
-      const tx = x + shift[0];
-      const ty = y + shift[1];
-      const tz = z + shift[2];
-      if (tx < 0 || ty < 0 || tz < 0 || tx >= X || ty >= Y || tz >= Z) continue;
-      j = (tz * Y + ty) * X + tx;
-    }
-    const nw = labels[j];
-    if (nw < 0) continue;
-    const k = nw * nOld + o;
-    votes.set(k, (votes.get(k) ?? 0) + 1);
-  }
+  const owner = new Int32Array(fresh.length).fill(-1);
   const byOld = new Map<number, { n: number; c: number }[]>();
   votes.forEach((c, k) => {
     const n = Math.floor(k / nOld);
@@ -718,7 +705,7 @@ export function relabel(
     list.sort((a, b) => b.c - a.c);
     for (const { n, c } of list) {
       if (taken.has(n)) continue;
-      if (raw[n].mat === prev.comps[o].mat || c * 2 > raw[n].count) {
+      if (fresh[n].mat === prev.comps[o].mat || c * 2 > fresh[n].count) {
         owner[n] = o;
         taken.add(n);
         break;
@@ -730,7 +717,7 @@ export function relabel(
     const n = labelNumber(c.label);
     if (n > (maxNum.get(c.mat) ?? 0)) maxNum.set(c.mat, n);
   });
-  const comps = raw.map((r, i): Comp => {
+  return fresh.map((r, i): Comp => {
     if (owner[i] >= 0) {
       const p = prev.comps[owner[i]];
       return {
@@ -743,18 +730,171 @@ export function relabel(
     maxNum.set(r.mat, n);
     return { ...r, key: newKey(), label: `${matName(r.mat)} ${n}` };
   });
+}
+
+/** 已選的體素照位移平移後的位置；出界回傳 −1。 */
+const movedTo = (vol: Volume, i: number, movedMask: Uint8Array | null, shift: Vec3) => {
+  if (!movedMask?.[i]) return i;
+  const { X, Y, Z } = vol;
+  const x = i % X;
+  const y = ((i - x) / X) % Y;
+  const z = (i - x - y * X) / (X * Y);
+  const tx = x + shift[0];
+  const ty = y + shift[1];
+  const tz = z + shift[2];
+  return tx < 0 || ty < 0 || tz < 0 || tx >= X || ty >= Y || tz >= Z ? -1 : (tz * Y + ty) * X + tx;
+};
+
+/** 名稱延續（整個陣列重算）：relabel 的對照版本，測試用來驗證只重算局部的結果相同。 */
+export function relabelFull(
+  prevVol: Volume,
+  prev: Labeled,
+  movedMask: Uint8Array | null,
+  shift: Vec3,
+  next: Volume,
+  matName: (id: number) => string,
+  newKey: () => string,
+): Labeled {
+  const { labels, raw } = labelComponents(next);
+  const nOld = prev.comps.length;
+  const votes = new Map<number, number>();
+  for (let i = 0; i < prevVol.data.length; i++) {
+    const o = prev.labels[i];
+    if (o < 0) continue;
+    const j = movedTo(next, i, movedMask, shift);
+    if (j < 0 || labels[j] < 0) continue;
+    const k = labels[j] * nOld + o;
+    votes.set(k, (votes.get(k) ?? 0) + 1);
+  }
+  return { labels, comps: nameByVotes(prev, raw, votes, matName, newKey) };
+}
+
+/**
+ * 名稱延續，只重算被改到的地方：
+ * 1. 找出和上一步不同的體素外框 R；
+ * 2. 外框（多留 1 格）碰到的舊結構才重算，其他結構的體素、count、bbox 原封不動；
+ * 3. 在「R ∪ 這些結構的外框」裡重新 flood fill，新結構和舊結構投票認領 key 與名字。
+ * 沒碰到的結構不可能和改過的地方相連（相鄰的體素都沒變），所以結果和整個重算相同。
+ */
+export function relabel(
+  prevVol: Volume,
+  prev: Labeled,
+  movedMask: Uint8Array | null,
+  shift: Vec3,
+  next: Volume,
+  matName: (id: number) => string,
+  newKey: () => string,
+): Labeled {
+  const { X, Y, Z } = next;
+  const N = X * Y * Z;
+  const a = prevVol.data;
+  const b = next.data;
+  // 1. 改到的外框
+  let rx0 = X;
+  let rx1 = -1;
+  let ry0 = Y;
+  let ry1 = -1;
+  let rz0 = Z;
+  let rz1 = -1;
+  for (let i = 0; i < N; i++) {
+    if (a[i] === b[i]) continue;
+    const x = i % X;
+    const y = ((i - x) / X) % Y;
+    const z = (i - x - y * X) / (X * Y);
+    if (x < rx0) rx0 = x;
+    if (x > rx1) rx1 = x;
+    if (y < ry0) ry0 = y;
+    if (y > ry1) ry1 = y;
+    if (z < rz0) rz0 = z;
+    if (z > rz1) rz1 = z;
+  }
+  if (rx1 < 0) return prev;
+  // 2. 碰到外框（多留 1 格）的舊結構；S = R ∪ 它們的外框
+  const touched = new Uint8Array(prev.comps.length);
+  const S: BBox = { x0: rx0, x1: rx1, y0: ry0, y1: ry1, z0: rz0, z1: rz1 };
+  prev.comps.forEach((c, k) => {
+    const bb = c.bbox;
+    if (bb.x0 > rx1 + 1 || bb.x1 < rx0 - 1 || bb.y0 > ry1 + 1 || bb.y1 < ry0 - 1 || bb.z0 > rz1 + 1 || bb.z1 < rz0 - 1) return;
+    touched[k] = 1;
+    S.x0 = Math.min(S.x0, bb.x0);
+    S.x1 = Math.max(S.x1, bb.x1);
+    S.y0 = Math.min(S.y0, bb.y0);
+    S.y1 = Math.max(S.y1, bb.y1);
+    S.z0 = Math.min(S.z0, bb.z0);
+    S.z1 = Math.max(S.z1, bb.z1);
+  });
+  // 3. 清掉這些結構的標記，在 S 裡重新 flood fill；新結構暫用編號 nOld 起
+  const nOld = prev.comps.length;
+  const labels = new Int32Array(prev.labels);
+  for (let z = S.z0; z <= S.z1; z++)
+    for (let y = S.y0; y <= S.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + S.x0; i <= row + S.x1; i++) if (labels[i] >= 0 && touched[labels[i]]) labels[i] = -1;
+    }
+  const fresh: RawComp[] = [];
+  const st: Stack = { buf: new Int32Array(1 << 16) };
+  for (let z = S.z0; z <= S.z1; z++)
+    for (let y = S.y0; y <= S.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + S.x0; i <= row + S.x1; i++)
+        if (labels[i] < 0 && b[i] !== AIR) fresh.push(floodFill(next, labels, i, nOld + fresh.length, st));
+    }
+  // 4. 投票：重算的舊結構 → 新結構（計數用 typed array，最後才轉成 nameByVotes 要的 Map）
+  const tOf = new Int32Array(nOld).fill(-1);
+  const tList: number[] = [];
+  touched.forEach((t, k) => {
+    if (t) {
+      tOf[k] = tList.length;
+      tList.push(k);
+    }
+  });
+  const T = tList.length;
+  const tally = new Float64Array(fresh.length * T);
+  for (let z = S.z0; z <= S.z1; z++)
+    for (let y = S.y0; y <= S.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + S.x0; i <= row + S.x1; i++) {
+        const o = prev.labels[i];
+        if (o < 0 || !touched[o]) continue;
+        const j = movedTo(next, i, movedMask, shift);
+        if (j < 0 || labels[j] < nOld) continue;
+        tally[(labels[j] - nOld) * T + tOf[o]]++;
+      }
+    }
+  const votes = new Map<number, number>();
+  tally.forEach((c, k) => {
+    if (c) votes.set(Math.floor(k / T) * nOld + tList[k % T], c);
+  });
+  const named = nameByVotes(prev, fresh, votes, matName, newKey);
+  // 5. 編號壓緊：沒碰到的舊結構在前、新結構在後
+  const remap = new Int32Array(nOld + fresh.length);
+  const comps: Comp[] = [];
+  prev.comps.forEach((c, k) => {
+    if (!touched[k]) {
+      remap[k] = comps.length;
+      comps.push(c);
+    }
+  });
+  named.forEach((c, k) => {
+    remap[nOld + k] = comps.length;
+    comps.push(c);
+  });
+  for (let i = 0; i < N; i++) if (labels[i] >= 0) labels[i] = remap[labels[i]];
   return { labels, comps };
 }
 
 /** 一組結構 key 的體素 mask；沒選取回傳 null。 */
 export function maskOf(L: Labeled, keys: Set<string>): Uint8Array | null {
   if (!keys.size) return null;
-  const ids = new Set<number>();
+  const on = new Uint8Array(L.comps.length);
   L.comps.forEach((c, i) => {
-    if (keys.has(c.key)) ids.add(i);
+    if (keys.has(c.key)) on[i] = 1;
   });
   const mask = new Uint8Array(L.labels.length);
-  for (let i = 0; i < mask.length; i++) if (L.labels[i] >= 0 && ids.has(L.labels[i])) mask[i] = 1;
+  for (let i = 0; i < mask.length; i++) {
+    const l = L.labels[i];
+    if (l >= 0 && on[l]) mask[i] = 1;
+  }
   return mask;
 }
 

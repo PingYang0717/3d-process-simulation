@@ -8,7 +8,10 @@ import {
   diffMask,
   greedyMesh,
   initialLabeled,
+  localMask,
+  maskOf,
   materialsFor,
+  relabelFull,
   voxelFromHit,
 } from './volume';
 import { decodeVti, encodeVti } from './vti';
@@ -268,4 +271,53 @@ describe('局部凸起', () => {
       expect((x - center[0]) ** 2 + (z - center[2]) ** 2).toBeLessThanOrEqual(9);
     }
   });
+});
+
+describe('relabel 只重算局部', () => {
+  it('和整個重算逐體素相同（key、名字、count、bbox）', () => {
+    const vol = demoVolume();
+    const matName = matNameOf(MATERIALS);
+    const base: EditState = { vol, L: initialLabeled(vol, matName) };
+    const poly = base.L.comps.filter((c) => c.mat === 6);
+    const fin = base.L.comps.find((c) => c.mat === 3)!;
+    const full: [number, number] = [0, vol.Z - 1];
+    const ops: Op[] = [
+      { kind: 'push', keys: [poly[0].key], zRange: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' },
+      { kind: 'translate', keys: [poly[1].key, poly[2].key], zRange: full, d: [3, 0, 0], backfill: 'orig' },
+      // 把 fin 中間一段換成 Air：fin 被切成兩塊，一塊沿用 key、一塊取新名
+      { kind: 'material', keys: [fin.key], zRange: [60, 64], m: 0 },
+      { kind: 'push', keys: [poly[2].key], zRange: full, dir: [1, 0, 0], n: -3, follow: false, backfill: 'orig', local: { center: [120, 30, 100], radius: 5 } },
+    ];
+    let a = base;
+    let b = base;
+    let seqA = 1000;
+    let seqB = 1000;
+    for (const op of ops) {
+      a = applyOp(a, op, { orig: vol, matName, newKey: () => `c${seqA++}` });
+      const mask = maskOf(b.L, new Set(op.keys))!;
+      // b 用整個重算的版本，體素結果相同
+      b = {
+        vol: a.vol,
+        L: relabelFull(b.vol, b.L, op.kind === 'push' && op.local ? localMask(b.vol, mask, op.dir, op.local.center, op.local.radius) : mask, op.kind === 'translate' ? op.d : [0, 0, 0], a.vol, matName, () => `c${seqB++}`),
+      };
+      expect(a.L.comps.length).toBe(b.L.comps.length);
+      for (let i = 0; i < vol.data.length; i++) {
+        const la = a.L.labels[i];
+        const lb = b.L.labels[i];
+        if (la < 0 || lb < 0) {
+          expect(la).toBe(lb);
+          continue;
+        }
+        const ca = a.L.comps[la];
+        const cb = b.L.comps[lb];
+        if (ca.key !== cb.key || ca.label !== cb.label) expect([ca.key, ca.label]).toEqual([cb.key, cb.label]);
+      }
+      const byKey = new Map(b.L.comps.map((c) => [c.key, c]));
+      for (const c of a.L.comps) {
+        expect(c.count).toBe(byKey.get(c.key)!.count);
+        expect(c.bbox).toEqual(byKey.get(c.key)!.bbox);
+      }
+    }
+    expect(a.L.comps.filter((c) => c.mat === 3).length).toBe(4);
+  }, 60_000);
 });

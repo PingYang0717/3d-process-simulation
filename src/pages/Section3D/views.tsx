@@ -23,6 +23,7 @@ import {
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 import {
   type Axis,
   type BBox,
@@ -37,7 +38,8 @@ import {
   idx,
   voxelFromHit,
 } from '../../volume/volume';
-import { call } from '../../volume/client';
+import { call, ensure, sidOf } from '../../volume/client';
+import type { EditState } from '../../volume/ops';
 import { type SelectMode, selectModeOf } from './editor';
 
 const SEL_RGB: Vec3 = [22, 119, 255];
@@ -95,6 +97,22 @@ const toGeometry = (m: MeshData) => {
   g.computeBoundingSphere();
   return g;
 };
+/** 最近幾個主網格（依狀態、隱藏、標紅、配色）：復原、看原始、切 split 時不必重算。 */
+const meshCache = new Map<string, MeshData>();
+const MESH_CACHE_SIZE = 6;
+const cachedMesh = async (key: string, make: () => Promise<MeshData>) => {
+  const hit = meshCache.get(key);
+  if (hit) {
+    meshCache.delete(key);
+    meshCache.set(key, hit);
+    return hit;
+  }
+  const m = await make();
+  meshCache.set(key, m);
+  if (meshCache.size > MESH_CACHE_SIZE) meshCache.delete(meshCache.keys().next().value!);
+  return m;
+};
+
 const boxEdges = (b: BBox) => new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1));
 
 /**
@@ -105,14 +123,16 @@ const boxEdges = (b: BBox) => new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1,
  * 體素 y 向下，所以網格 scale y = −1 再平移，讓畫面上方 = y 索引小。
  */
 export function View3D({
-  vol,
+  state,
   materials,
   hidden,
   selMask,
+  selComps,
+  zRange,
   selBBox,
   cursor,
   clipZ,
-  diffMask,
+  showDiff,
   onPick,
   onMenu,
   onDrag,
@@ -124,14 +144,20 @@ export function View3D({
   bumpRadius,
   busy,
 }: {
-  vol: Volume;
+  /** 要畫的狀態；網格在 Worker 裡用它常駐的那一份算，不必把陣列送過去。 */
+  state: EditState;
   materials: Material[];
   hidden: Set<number>;
+  /** 選取 ∩ z 範圍（主執行緒的那份，判斷滑鼠是不是在已選結構上）。 */
   selMask: Uint8Array | null;
+  /** 選取結構的編號（L.comps 的 index），Worker 依它畫選取層。 */
+  selComps: number[] | null;
+  zRange: ZRange;
   selBBox: BBox | null;
   cursor: Vec3;
   clipZ: number | null;
-  diffMask: Uint8Array | null;
+  /** 改過的體素混紅（和原始比，Worker 算）。 */
+  showDiff: boolean;
   onPick: (voxel: number | null, mode: SelectMode) => void;
   onMenu: (voxel: number | null, x: number, y: number) => void;
   onDrag: (kind: 'push' | 'move', dir: Vec3, n: number, local?: Vec3) => void;
@@ -143,6 +169,7 @@ export function View3D({
   bumpRadius: number;
   busy: boolean;
 }) {
+  const vol = state.vol;
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<Ctx | null>(null);
   const bboxRef = useRef(selBBox);
@@ -197,6 +224,8 @@ export function View3D({
       return o;
     };
     const mesh = voxelSpace(new Mesh(new BufferGeometry(), new MeshLambertMaterial({ vertexColors: true, side: DoubleSide })));
+    // 點選與滑過提示走 BVH（three-mesh-bvh），不必每次掃過全部三角形
+    mesh.raycast = acceleratedRaycast;
     const selFill = voxelSpace(
       new Mesh(new BufferGeometry(), new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.45, side: DoubleSide })),
       2,
@@ -293,15 +322,18 @@ export function View3D({
     if (!c) return;
     const seq = ++meshSeq.current;
     setMeshing(true);
-    call('mesh', { vol, hidden: hiddenTable(hidden), diff: diffMask ?? undefined, palette: palette(materials) })
+    const key = [sidOf(state.vol.data), [...hidden].sort().join(','), showDiff, materials.map((m) => m.color).join('')].join('|');
+    cachedMesh(key, () => call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials) }))
       .then((m) => {
         if (seq !== meshSeq.current || !ctxRef.current) return;
+        const g = toGeometry(m);
+        if (m.quads) g.boundsTree = new MeshBVH(g);
         c.mesh.geometry.dispose();
-        c.mesh.geometry = toGeometry(m);
+        c.mesh.geometry = g;
         setMeshing(false);
       })
       .catch(() => setMeshing(false));
-  }, [vol, materials, hidden, diffMask]);
+  }, [state, materials, hidden, showDiff]);
 
   useEffect(() => {
     const mat = ctxRef.current?.mesh.material;
@@ -322,23 +354,17 @@ export function View3D({
       c.voidMesh.visible = c.voidEdges.visible = false;
     };
     if (!xray || hidden.has(VOID)) return off();
-    const only = new Uint8Array(vol.data.length);
-    let n = 0;
-    for (let i = 0; i < only.length; i++)
-      if (vol.data[i] === VOID) {
-        only[i] = 1;
-        n++;
-      }
-    if (!n) return off();
-    call('mesh', { vol, hidden: hiddenTable(hidden), only, palette: palette(materials), tint: [0.15, 0.15, 0.15] }).then((m) => {
+    const only = { mat: VOID };
+    call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint: [0.15, 0.15, 0.15] }).then((m) => {
       if (seq !== voidSeq.current || !ctxRef.current) return;
       c.voidMesh.geometry.dispose();
       c.voidMesh.geometry = toGeometry(m);
       c.voidEdges.geometry.dispose();
       c.voidEdges.geometry = new EdgesGeometry(c.voidMesh.geometry, 30);
-      c.voidMesh.visible = c.voidEdges.visible = true;
+      // 沒有空洞時網格是空的
+      c.voidMesh.visible = c.voidEdges.visible = m.quads > 0;
     });
-  }, [vol, hidden, xray]);
+  }, [state, hidden, xray]);
 
   // 選取：半透明網格（只含 affMask）＋ bbox 線框
   const selSeq = useRef(0);
@@ -346,7 +372,7 @@ export function View3D({
     const c = ctxRef.current;
     if (!c) return;
     const seq = ++selSeq.current;
-    if (!selMask || !selBBox) {
+    if (!selComps?.length || !selBBox) {
       c.selFill.visible = c.selBox.visible = false;
       return;
     }
@@ -356,13 +382,14 @@ export function View3D({
     c.selBox.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
     c.selBox.visible = true;
     const tint = SEL_RGB.map((v) => v / 255) as Vec3;
-    call('mesh', { vol, hidden: hiddenTable(hidden), only: selMask, palette: palette(materials), tint }).then((m) => {
+    const only = { comps: selComps, zRange, box: b };
+    call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint }).then((m) => {
       if (seq !== selSeq.current || !ctxRef.current) return;
       c.selFill.geometry.dispose();
       c.selFill.geometry = toGeometry(m);
       c.selFill.visible = true;
     });
-  }, [vol, selMask, selBBox]);
+  }, [state, selComps, zRange, selBBox]);
 
   // 剖開：只畫到 z ≤ clipZ
   useEffect(() => {
@@ -399,6 +426,8 @@ export function View3D({
     const ndc = new Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     const ray = new Raycaster();
     ray.setFromCamera(ndc, c.camera);
+    // 剖開時要濾掉剖面後面的命中，所以只有沒剖開才只取第一個
+    ray.firstHitOnly = clipZ === null;
     const h = ray.intersectObject(c.mesh, false).find((h) => clipZ === null || h.point.z <= clipZ + 1);
     if (!h?.face) return null;
     const pt = c.mesh.worldToLocal(h.point.clone());

@@ -25,10 +25,10 @@ npm run build      # 型別檢查 + 打包
 
 | 檔案 | 內容 |
 | --- | --- |
-| `src/volume/volume.ts` | Volume、材質（`materialsFor`、調色盤）、範例 `demoVolume(scale)`、`translateMask`、`setMaskMaterial`、`growMask`、`localMask`、`fillAt`、`greedyMesh`、`voxelFromHit`、`encodeNpy`／`decodeNpy`、`labelComponents`、`nameComponents`、`relabel`、`maskOf` |
+| `src/volume/volume.ts` | Volume、材質（`materialsFor`、調色盤）、範例 `demoVolume(scale)`、`translateMask`、`setMaskMaterial`、`growMask`、`localMask`、`fillAt`、`greedyMesh`、`voxelFromHit`、`encodeNpy`／`decodeNpy`、`labelComponents`、`nameComponents`、`relabel`（只重算改到的範圍）、`relabelFull`（對照用）、`maskOf` |
 | `src/volume/ops.ts` | `Op`、`applyOp`／`replay`／`opText`／`sweepOps`（純函式，主執行緒與 Worker 共用） |
 | `src/volume/vti.ts` | `decodeVti`（各種編碼、zlib 用 `DecompressionStream`）、`encodeVti`（UInt8 CellData、appended raw） |
-| `src/volume/worker.ts`、`client.ts` | Worker 入口（label／replay／mesh／diff／count）與主執行緒的 `call()` |
+| `src/volume/worker.ts`、`client.ts` | Worker 入口（load／put／retain／replay／mesh／diff／count）與主執行緒的 `call()`；原始與每個 split 目前的結果常駐在 Worker，主執行緒只送編號 |
 | `src/volume/zip.ts` | `zipStore`（CRC32，store only） |
 | `src/pages/Section3D/editor.ts` | `useEditor`（async）：splits、選取、z 範圍、commit → Worker、undo／redo（每 split 10 步）、busy、diff／ledger、鍵盤、`loadVolume(vol, meta)` |
 | `src/pages/Section3D/views.tsx` | `View3D`（Worker greedy mesh、選取／空洞層、剖開、命中、面拖拉與虛線預覽、hover 提示）、`SliceView` |
@@ -36,6 +36,15 @@ npm run build      # 型別檢查 + 打包
 | `src/ui/` | Swatch、StatTile、download、theme（antd 主題） |
 
 面板不直接碰 Volume；所有改體素的路徑都經過 `useEditor` 的 `commit`，所以每一步都有 Op 記錄、都能復原、都能在別的 split 重播。
+
+## 大陣列的效能
+
+- **Worker 常駐狀態**：原始與每個 split 目前的結果放在 Worker，一步操作只送編號、ops 與結構清單；結果在 Worker 複製後 transfer 回來。復原用的舊步驟只在主執行緒，要用時才補送。
+- **relabel 只重算改到的地方**：找出和上一步不同的外框，只重算碰到它的結構；測試驗證和整個重算逐體素相同。
+- **網格**：選取層、空洞層只在外框裡做 greedy mesh；主網格保留最近 6 個（復原、看原始、切 split 不重算）。
+- **點選**：three-mesh-bvh。
+
+大範例 ×3（5,300 萬 voxels），雲端容器 4 核心、headless Chromium：長高一次（含 relabel）約 5～7 秒、重畫 3D 約 4.5 秒，「改動」數字在操作完成後 1 秒內出現（優化前長高約 26 秒）。
 
 ## 匯出
 

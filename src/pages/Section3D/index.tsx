@@ -160,7 +160,7 @@ export default function Section3DPage() {
   const exportAll = async (fmt: Fmt = 'vti') => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
     const files = ed.splits.map((s) => ({ name: fileOf(s), data: encode(s.cur.vol, fmt) }));
-    const diffs = await Promise.all(ed.splits.map((s) => ed.diffOf(s.cur.vol)));
+    const diffs = await Promise.all(ed.splits.map((s) => ed.diffOf(s.cur)));
     const manifest = {
       source: ed.meta.name ?? 'demo',
       format: fmt,
@@ -369,14 +369,16 @@ export default function Section3DPage() {
       </div>
       <div className="canvas-wrap" ref={wrapRef}>
         <View3D
-          vol={shown}
+          state={peek ? ed.orig : ed.cur}
           materials={ed.materials}
           hidden={ed.hidden}
           selMask={peek ? null : ed.affMask}
+          selComps={peek ? null : ed.selIdx}
+          zRange={ed.zRange}
           selBBox={peek ? null : selBBox}
           cursor={ed.cursor}
           clipZ={clip ? ed.cursor[2] : null}
-          diffMask={diffShown}
+          showDiff={showDiff && !peek}
           onPick={(v, mode) => {
             if (v === null) {
               if (mode === 'set') ed.clearSel();

@@ -15,7 +15,7 @@ import {
   nameComponents,
 } from '../../volume/volume';
 import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
-import { call } from '../../volume/client';
+import { call, ensure, loadOrig, replayIn, retain } from '../../volume/client';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
 
@@ -54,8 +54,17 @@ export const BASE_ID = 'base';
 const HISTORY_LIMIT = 10;
 const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] } };
 
-// diff 依體素陣列快取：同一個 split 的結果不重算
+// diff 與各材質體積依體素陣列快取：同一個 split 的結果不重算
 const diffCache = new WeakMap<Uint8Array, Promise<Diff>>();
+const countCache = new WeakMap<Uint8Array, Promise<number[]>>();
+const countOf = (s: EditState) => {
+  let p = countCache.get(s.vol.data);
+  if (!p) {
+    p = call('count', { sid: ensure(s) });
+    countCache.set(s.vol.data, p);
+  }
+  return p;
+};
 
 // ---- useEditor ----
 
@@ -110,6 +119,8 @@ export function useEditor() {
   const compByKey = useMemo(() => new Map(L.comps.map((c) => [c.key, c])), [L]);
   const origByKey = useMemo(() => new Map(orig.L.comps.map((c) => [c.key, c])), [orig]);
   const selComps = useMemo(() => L.comps.filter((c) => sel.has(c.key)), [L, sel]);
+  /** 選取結構在 L.comps 裡的 index（給 Worker 畫選取層）。 */
+  const selIdx = useMemo(() => L.comps.flatMap((c, i) => (sel.has(c.key) ? [i] : [])), [L, sel]);
   const selMask = useMemo(() => maskOf(L, sel), [L, sel]);
   /** 選取 ∩ z 範圍：所見即會被改。 */
   const affMask = useMemo(() => {
@@ -124,11 +135,12 @@ export function useEditor() {
 
   /** 和原始逐體素比對（Worker），依陣列快取。 */
   const diffOf = useCallback(
-    (v: Volume): Promise<Diff> => {
+    (s: EditState): Promise<Diff> => {
+      const v = s.vol;
       if (v.data === orig.vol.data) return Promise.resolve({ mask: new Uint8Array(v.data.length), count: 0 });
       let p = diffCache.get(v.data);
       if (!p) {
-        p = call('diff', { a: orig.vol.data, b: v.data });
+        p = call('diff', { sid: ensure(s) });
         diffCache.set(v.data, p);
       }
       return p;
@@ -136,24 +148,26 @@ export function useEditor() {
     [orig],
   );
 
+  // Worker 只留原始與每個 split 目前的結果；復原用的舊步驟要用時再補送
+  useEffect(() => {
+    if (origState) retain([origState, ...splits.map((s) => s.cur)]);
+  }, [origState, splits]);
+
   // 目前 split 的 diff 與各材質體積
   useEffect(() => {
     if (!origState) return;
     let alive = true;
     (async () => {
-      const d = await diffOf(vol);
-      const [before, after] = await Promise.all([
-        call('count', { data: origState.vol.data }),
-        vol === origState.vol ? null : call('count', { data: vol.data }),
-      ]);
+      // 三個請求一次送出（之後才發現過期也不會再補送陣列）
+      const [d, before, after] = await Promise.all([diffOf(cur), countOf(origState), countOf(cur)]);
       if (!alive) return;
       setDiff(d);
-      setCounts({ before, after: after ?? before });
+      setCounts({ before, after });
     })();
     return () => {
       alive = false;
     };
-  }, [vol, origState, diffOf]);
+  }, [cur, origState, diffOf]);
 
   const changedKeys = useMemo(() => {
     const out = new Set<string>();
@@ -203,15 +217,19 @@ export function useEditor() {
       setBusy(label);
       running.current = true;
       try {
-        const r = await call('replay', { from, orig: orig.vol, ops, matNames, keyCounter: keySeq.current });
+        const r = await replayIn(from, { ops, matNames, keyCounter: keySeq.current });
         keySeq.current = r.keyCounter;
-        return { vol: { X: from.vol.X, Y: from.vol.Y, Z: from.vol.Z, data: r.data }, L: r.L };
+        const next: EditState = { vol: { X: from.vol.X, Y: from.vol.Y, Z: from.vol.Z, data: r.data }, L: { labels: r.labels, comps: r.comps } };
+        // 先排 diff 與計數，讓「改動」數字比重畫 3D 早出來
+        diffOf(next);
+        countOf(next);
+        return next;
       } finally {
         setBusy(null);
         running.current = false;
       }
     },
-    [orig, matNames],
+    [orig, matNames, diffOf],
   );
 
   /** 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。 */
@@ -424,14 +442,13 @@ export function useEditor() {
   /** 載入一個陣列：Worker 標記結構，材質沒給就一律「材質 n」。 */
   const loadVolume = useCallback(async (v: Volume, m: Meta, mats?: Material[]) => {
     if (running.current) return;
-    const ids = new Set<number>();
-    for (let i = 0; i < v.data.length; i++) ids.add(v.data[i]);
-    let table = materialsFor(ids);
-    if (mats) table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
     setBusy('分析結構中…');
     running.current = true;
     try {
-      const { labels, raw } = await call('label', { vol: v });
+      const { labels, raw } = await loadOrig(v);
+      // 每個非 0 編號至少有一塊結構，所以從結構清單就知道有哪些材質
+      let table = materialsFor(raw.map((r) => r.mat));
+      if (mats) table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
       setMaterials(table);
       setMeta(m);
       setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) } });
@@ -558,6 +575,7 @@ export function useEditor() {
     materials,
     matName,
     meta,
+    cur,
     vol,
     orig,
     L,
@@ -584,6 +602,7 @@ export function useEditor() {
     diffOf,
     sel,
     selComps,
+    selIdx,
     selMask,
     affMask,
     selCount,
@@ -634,7 +653,7 @@ export function useSplitDiffs(ed: Editor) {
   const { splits, diffOf } = ed;
   useEffect(() => {
     let alive = true;
-    Promise.all(splits.map((s) => diffOf(s.cur.vol))).then((ds) => {
+    Promise.all(splits.map((s) => diffOf(s.cur))).then((ds) => {
       if (alive) setOut(new Map(splits.map((s, i) => [s.id, ds[i]])));
     });
     return () => {

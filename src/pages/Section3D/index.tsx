@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, InputNumber, Menu, Modal, Popover, Segmented, Slider, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, InputNumber, Menu, Modal, Popover, Segmented, Slider, Space, Tabs, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   AimOutlined,
@@ -353,39 +353,31 @@ export default function Section3DPage() {
           : '點已選結構的一個面，筆刷範圍內每一排都補到（或削到）跟它一樣高；圓頭變方頭用這個。'}
       </Text>
       <Flex align="center" gap={10}>
-        <span style={{ fontSize: 12, width: 64 }}>整面</span>
-        <Switch size="small" checked={br.radius === null} onChange={(on) => ed.setBrush({ ...br, radius: on ? null : 6 })} />
+        <span style={{ fontSize: 12, width: 64 }}>半徑</span>
+        <Slider min={0} max={60} value={br.radius ?? 6} onChange={(v) => ed.setBrush({ ...br, radius: v })} style={{ flex: 1, margin: '0 4px' }} />
+        <InputNumber size="small" min={0} max={500} value={br.radius ?? 6} onChange={(v) => v !== null && ed.setBrush({ ...br, radius: Math.round(v) })} addonAfter="vx" style={{ width: 96 }} />
+      </Flex>
+      <Flex align="center" gap={10}>
+        <span style={{ fontSize: 12, width: 64 }}>形狀</span>
+        <Segmented
+          size="small"
+          value={br.shape}
+          onChange={(v) => ed.setBrush({ ...br, shape: v as 'round' | 'square' })}
+          options={[
+            { label: '圓', value: 'round' },
+            { label: '方', value: 'square' },
+          ]}
+        />
         <Text type="secondary" style={{ fontSize: 12 }}>
-          不限範圍，等於整個面一起
+          {br.shape === 'square' ? `${2 * (br.radius ?? 6) + 1}×${2 * (br.radius ?? 6) + 1} 格` : `直徑 ${2 * (br.radius ?? 6) + 1} 格`}（{((2 * (br.radius ?? 6) + 1) * ed.nmPerVoxel).toFixed(1)} nm）
         </Text>
       </Flex>
-      {br.radius !== null && (
-        <>
-          <Flex align="center" gap={10}>
-            <span style={{ fontSize: 12, width: 64 }}>半徑</span>
-            <Slider min={0} max={60} value={br.radius} onChange={(v) => ed.setBrush({ ...br, radius: v })} style={{ flex: 1, margin: '0 4px' }} />
-            <InputNumber size="small" min={0} max={500} value={br.radius} onChange={(v) => v !== null && ed.setBrush({ ...br, radius: Math.round(v) })} addonAfter="vx" style={{ width: 96 }} />
-          </Flex>
-          <Flex align="center" gap={10}>
-            <span style={{ fontSize: 12, width: 64 }}>形狀</span>
-            <Segmented
-              size="small"
-              value={br.shape}
-              onChange={(v) => ed.setBrush({ ...br, shape: v as 'round' | 'square' })}
-              options={[
-                { label: '圓', value: 'round' },
-                { label: '方', value: 'square' },
-              ]}
-            />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {br.shape === 'square' ? `${2 * br.radius + 1}×${2 * br.radius + 1} 格` : `直徑 ${(2 * br.radius + 1)} 格`}（{((2 * br.radius + 1) * ed.nmPerVoxel).toFixed(1)} nm）
-            </Text>
-          </Flex>
-        </>
-      )}
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        整面長縮、整塊移動請用右欄輸入。
+      </Text>
     </Flex>
   );
-  const brushLabel = `${br.mode === 'push' ? '筆刷' : '補平'} ${br.radius === null ? '整面' : `${br.shape === 'square' ? '方' : '圓'}${br.radius}`}`;
+  const brushLabel = `${br.mode === 'push' ? '筆刷' : '補平'} ${br.shape === 'square' ? '方' : '圓'}${br.radius ?? 6}`;
 
   const selName = ed.selComps.length === 1 ? ed.selComps[0].label : `${ed.selComps.length} 個結構`;
   const firstMat = ed.selComps.length ? matOf(ed, ed.selComps[0].mat) : null;

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { App, Button, Flex, Segmented, Typography, Upload } from 'antd';
+import { App, Button, Flex, Progress, Segmented, Typography, Upload } from 'antd';
 import { InboxOutlined } from '@ant-design/icons';
 import { decodeNpy } from '../../volume/volume';
 import { decodeVti } from '../../volume/vti';
@@ -13,11 +13,13 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
   const [busy, setBusy] = useState<string | null>(null);
   const [unit, setUnit] = useState<'nm' | 'um'>('nm');
   const load = async (file: File) => {
-    setBusy(`讀取 ${file.name}…`);
+    setBusy(`讀取 ${file.name}（${(file.size / 1048576).toFixed(1)} MB）…`);
     try {
       const buf = await file.arrayBuffer();
       if (/\.vti$/i.test(file.name)) {
+        setBusy('解碼 .vti…');
         const { vol, info } = await decodeVti(buf);
+        setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`);
         await ed.loadVolume(vol, {
           name: file.name,
           format: 'vti',
@@ -32,6 +34,7 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
         );
       } else {
         const vol = decodeNpy(buf);
+        setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`);
         await ed.loadVolume(vol, { name: file.name, format: 'npy' });
         message.success(`已載入 ${file.name}，shape (${vol.Z}, ${vol.Y}, ${vol.X})`);
       }
@@ -43,7 +46,7 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
     }
   };
   const demo = async (scale: number) => {
-    setBusy('產生範例…');
+    setBusy(scale > 1 ? `產生大範例 ×${scale} 並分析結構（要幾秒）…` : '產生範例…');
     try {
       await ed.demo(scale);
       onDone();
@@ -53,6 +56,17 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
   };
   return (
     <Flex vertical gap={16}>
+      {busy && (
+        <Flex vertical gap={4} className="load-progress">
+          <Text strong style={{ fontSize: 13 }}>
+            {busy}
+          </Text>
+          <Progress percent={100} status="active" showInfo={false} strokeColor="#1677ff" size={['100%', 6]} />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            大檔案會分成讀取、解碼、分析結構三步；4,000 萬 voxel 約需十幾秒。
+          </Text>
+        </Flex>
+      )}
       <Upload.Dragger
         accept=".vti,.npy"
         showUploadList={false}

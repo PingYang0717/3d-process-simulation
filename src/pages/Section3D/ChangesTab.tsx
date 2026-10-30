@@ -33,10 +33,15 @@ export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void 
         if (was.x !== now.x && was.w === now.w) lines.push(`x ${was.x} → ${now.x}`);
         if (was.z !== now.z && was.d === now.d) lines.push(`z ${was.z} → ${now.z}`);
         if (!lines.length) lines.push('局部形狀改了（外框尺寸沒變）');
-        if (o.mat === c.mat && o.count === c.count) lines.push('體積不變：是被旁邊的結構推移（襯層跟著走）');
       }
-      return { c, mat, lines, delta: c.count - (o?.count ?? 0) };
+      // 體積、材質都沒變＝只是被旁邊的結構推著走（襯層），折成一列
+      const carried = !!o && o.mat === c.mat && o.count === c.count;
+      return { c, mat, lines, delta: c.count - (o?.count ?? 0), carried };
     });
+  const edited = changed.filter((x) => !x.carried);
+  const carried = changed.filter((x) => x.carried);
+  const carriedByMat = new Map<number, number>();
+  carried.forEach((x) => carriedByMat.set(x.c.mat, (carriedByMat.get(x.c.mat) ?? 0) + 1));
   const gone = ed.orig.L.comps.filter((c) => !ed.compByKey.has(c.key));
   const volumes = ed.ledger.filter((r) => r.before !== r.after);
 
@@ -63,8 +68,8 @@ export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void 
         </div>
         <div className="stat">
           <div className="stat-label">改到的結構</div>
-          <div className="stat-value">{changed.length}</div>
-          <div className="stat-sub">輸出 shape 不變</div>
+          <div className="stat-value">{edited.length}</div>
+          <div className="stat-sub">{carried.length ? `另 ${carried.length} 個襯層跟著位移` : '輸出 shape 不變'}</div>
         </div>
       </div>
       {warnings.length ? (
@@ -83,7 +88,7 @@ export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void 
         <Alert type="success" showIcon message="沒有結構被切斷或消失；沒碰到的體素一個都不變" />
       )}
       <Section title="改了哪些（原始 → 現在）">
-        {changed.map(({ c, mat, lines, delta }) => (
+        {edited.map(({ c, mat, lines, delta }) => (
           <button type="button" className="change-item" key={c.key} onClick={() => ed.selectKeys([c.key])}>
             <Swatch fill={mat.color} isVoid={isVoid(mat.id)} />
             <span className="change-name">
@@ -97,8 +102,19 @@ export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void 
             </span>
           </button>
         ))}
+        {carried.length > 0 && (
+          <button type="button" className="change-item carried" onClick={() => ed.selectKeys(carried.map((x) => x.c.key))}>
+            <span className="change-name">
+              跟著位移的襯層 {carried.length} 個
+              <small>
+                {[...carriedByMat].map(([m, n]) => `${ed.matName(m)} ×${n}`).join('、')}；體積與材質都沒變，只是被推著走。點一下全選。
+              </small>
+            </span>
+            <span className="change-d">±0</span>
+          </button>
+        )}
         <Text type="secondary" style={{ fontSize: 12 }}>
-          右邊的數字是體積增減。按住 3D 上方的「看原始」（或鍵盤 B）可以前後對照；切面上紅框是改到的體素。
+          右邊的數字是體積增減。3D 上方切到「原始」（鍵盤 B）可以前後對照；切面上紅框是改到的體素。
         </Text>
       </Section>
       {volumes.length > 0 && (

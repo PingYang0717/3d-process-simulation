@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Alert, Button, Empty, Flex, InputNumber, Segmented, Select, Slider, Space, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, Collapse, Empty, Flex, InputNumber, Segmented, Select, Slider, Space, Table, Tooltip, Typography } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
 import { DIRECTIONS, type Vec3, bboxDims, isVoid, unionBBox } from '../../volume/volume';
 import { MatLabel, Swatch } from '../../ui/Swatch';
@@ -53,10 +53,12 @@ function MoveRow({ ed }: { ed: Editor }) {
       next[i] = x;
       return next;
     });
-  const d: Vec3 = [Math.round(v[0] ?? 0), Math.round(v[1] ?? 0), Math.round(v[2] ?? 0)];
+  // 畫面上「往上」是 y 索引變小：輸入用正＝往上，送出時轉號
+  const d: Vec3 = [Math.round(v[0] ?? 0), -Math.round(v[1] ?? 0), Math.round(v[2] ?? 0)];
   const any = d.some(Boolean);
   const apply = () => ed.translate(d);
-  const labels = ['x', 'y（上為負）', 'z'];
+  const labels = ['左右 x（右＋）', '上下（上＋）', '前後 z（後＋）'];
+  const words = [d[0] > 0 ? '右' : '左', d[1] < 0 ? '上' : '下', d[2] > 0 ? '後' : '前'];
   return (
     <Flex vertical gap={10}>
       <Flex gap={10}>
@@ -70,14 +72,14 @@ function MoveRow({ ed }: { ed: Editor }) {
       <Button block onClick={apply} disabled={!any || !!ed.busy}>
         整塊移動
         {any
-          ? `（${['x', 'y', 'z']
-              .map((a, i) => (d[i] ? `${a} ${signed(d[i])}` : ''))
+          ? `（${d
+              .map((n, i) => (n ? `往${words[i]} ${Math.abs(n)}` : ''))
               .filter(Boolean)
               .join('、')} vx）`
           : ''}
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        x 右為正、y 上為負、z 後為正。方向鍵 1 格、<kbd>Shift</kbd> 10 格，<kbd>PgUp</kbd>／<kbd>PgDn</kbd> 走 z。
+        也可以用方向鍵：1 格、<kbd>Shift</kbd> 10 格，<kbd>PgUp</kbd>／<kbd>PgDn</kbd> 走前後。
       </Text>
     </Flex>
   );
@@ -184,11 +186,11 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
           <div>
             <span>{ed.materials.filter((m) => m.id !== 0 && !isVoid(m.id)).length}</span>種材質
           </div>
-          <div>
+          <div className="overview-wide">
             <span>
-              {ed.vol.X}×{ed.vol.Y}×{ed.vol.Z}
+              {ed.vol.X} × {ed.vol.Y} × {ed.vol.Z}
             </span>
-            voxels
+            voxels · 1 vx = {nm} nm
           </div>
         </div>
       </Flex>
@@ -266,18 +268,21 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
         )}
       </Section>
       {ed.isBase && <Alert type="info" showIcon message="直接調整會自動建立 Split 1；原始本身不會變。" />}
+      <Section title="材質">
+        <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} onMaterial={onMaterial} />
+      </Section>
       <Section title="要改哪裡">
         <ZRangeRow ed={ed} />
       </Section>
       <Section title="長高／縮短">
         <PushRow ed={ed} />
       </Section>
-      <Section title="移動">
-        <MoveRow ed={ed} />
-      </Section>
-      <Section title="材質">
-        <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} onMaterial={onMaterial} />
-      </Section>
+      <Collapse
+        ghost
+        size="small"
+        className="insp-collapse"
+        items={[{ key: 'move', label: <span className="insp-collapse-title">移動（整塊）</span>, children: <MoveRow ed={ed} /> }]}
+      />
     </>
   );
 }

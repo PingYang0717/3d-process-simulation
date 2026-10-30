@@ -100,7 +100,7 @@ function Brand() {
 
 export default function Section3DPage() {
   const ed = useEditor();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [leftW, setLeftW] = useState(240);
   const [rightW, setRightW] = useState(350);
   const narrow = useMedia('(max-width: 1199px)');
@@ -230,6 +230,38 @@ export default function Section3DPage() {
     download(encode(ed.vol, fmt), name)
       .then((saved) => message.success(`已匯出 ${saved}`))
       .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
+  };
+  /** 全部匯出前先列出會打包哪些 split（名稱、步數、檔名），確認了才寫檔。 */
+  const confirmExportAll = (fmt: Fmt = 'vti') => {
+    const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
+    modal.confirm({
+      title: `打包 ${ed.splits.length} 個 split 成 zip（.${fmt}）`,
+      icon: <DownloadOutlined style={{ color: '#1677ff' }} />,
+      width: 520,
+      okText: '匯出 zip',
+      cancelText: '取消',
+      content: (
+        <Flex vertical gap={6} style={{ marginTop: 8 }}>
+          {ed.splits.map((s) => (
+            <Flex key={s.id} justify="space-between" gap={12} style={{ fontSize: 13 }}>
+              <span>
+                {s.name}
+                <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                  {s.ops.length ? `${s.ops.length} 步` : '沒有改動'}
+                </Text>
+              </span>
+              <Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+                {fileOf(s)}
+              </Text>
+            </Flex>
+          ))}
+          <Text type="secondary" style={{ fontSize: 12, marginTop: 6 }}>
+            另附 manifest.json（材質名稱與顏色、每個 split 的步驟）；shape、spacing、origin 都和原始相同。
+          </Text>
+        </Flex>
+      ),
+      onOk: () => exportAll(fmt),
+    });
   };
   const exportAll = async (fmt: Fmt = 'vti') => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
@@ -497,21 +529,20 @@ export default function Section3DPage() {
             </Button>
           </Tooltip>
         </Space.Compact>
-        {ed.diff.count > 0 && (
-          <Tooltip title="B：現在 ⇄ 原始；D：現在 ⇄ 差異（沒改的半透明、改過的實色、拿掉的紅）">
-            <Segmented
-              size="small"
-              className="tb"
-              value={mode}
-              onChange={(v) => setMode(v as ViewMode)}
-              options={[
-                { label: '現在', value: 'now' },
-                { label: '原始', value: 'orig' },
-                { label: '差異', value: 'diff' },
-              ]}
-            />
-          </Tooltip>
-        )}
+        <Tooltip title={ed.diff.count > 0 ? 'B：現在 ⇄ 原始；D：現在 ⇄ 差異（沒改的半透明、改過的實色、拿掉的紅）' : '還沒有改動；改了之後可以切到「原始」「差異」對照'}>
+          <Segmented
+            size="small"
+            className="tb"
+            value={mode}
+            disabled={!ed.diff.count}
+            onChange={(v) => setMode(v as ViewMode)}
+            options={[
+              { label: '現在', value: 'now' },
+              { label: '原始', value: 'orig' },
+              { label: '差異', value: 'diff' },
+            ]}
+          />
+        </Tooltip>
         <Space.Compact size="small" className="tb">
           <Tooltip title="沿一個軸剖開 3D，剖口貼上切面圖；用滑桿或 , . 鍵移動">
             <Button type={clipOn ? 'primary' : 'default'} icon={<ScissorOutlined />} onClick={toggleClip} aria-label="剖面">
@@ -712,7 +743,7 @@ export default function Section3DPage() {
             ),
             children: (
               <div className="insp-body">
-                <SplitsTab ed={ed} onExportAll={() => exportAll('vti')} onSweep={() => setSweepOpen(true)} />
+                <SplitsTab ed={ed} onExportAll={() => confirmExportAll('vti')} onSweep={() => setSweepOpen(true)} />
               </div>
             ),
           },
@@ -777,11 +808,11 @@ export default function Section3DPage() {
               { type: 'divider' },
               {
                 key: 'all',
-                label: `全部 ${ed.splits.length} 個 split 打包 zip（.vti）`,
+                label: ed.splits.length > 1 ? `全部 ${ed.splits.length} 個 split 打包 zip（.vti ＋ manifest）` : '打包 zip（.vti ＋ manifest.json）',
                 disabled: !ed.splits.length,
-                onClick: () => exportAll('vti'),
+                onClick: () => confirmExportAll('vti'),
               },
-              { key: 'all-npy', label: '全部打包 zip（.npy）', disabled: !ed.splits.length, onClick: () => exportAll('npy') },
+              { key: 'all-npy', label: '打包 zip（.npy ＋ manifest.json）', disabled: !ed.splits.length, onClick: () => confirmExportAll('npy') },
             ],
           }}
         >

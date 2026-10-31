@@ -346,7 +346,7 @@ export { drawSlice } from './drawSlice';
 /**
  * 3D：Worker 做 greedy mesh（同材質同朝向的面合併成大矩形），改後模式不染色（plan v10 §4.3）；
  * 選取半透明網格（沿法線外推 0.03 避免共面）＋bbox 線框、橘色十字、剖面（三軸、剖口貼真正的切面圖）。
- * 滑鼠拖拉只做筆刷雕刻：按住已選結構的面沿法線拖＝局部長／縮；補平模式點一下＝補到那一面。
+ * 聚焦編輯（plan v10 §4.5）：拖把手＝整面長縮或圓角；筆刷工具＝局部長／縮、局部方頭（點一下＝補到那一面）。瀏覽時拖拉只轉視角。
  * 整面長縮、整塊移動都在右欄輸入。差異模式：沒改的半透明灰、改過的實色＋深藍邊、拿掉的紅。
  * 體素 y 向下，所以網格 scale y = −1 再平移，讓畫面上方 = y 索引小。
  */
@@ -1491,6 +1491,26 @@ export function View3D({
     }
     return out;
   };
+  /**
+   * 聚焦編輯時其他結構是半透明的：沿射線找第一個「已選」的體素（穿過前面淡掉的結構），右鍵與筆刷用它。
+   * 不在聚焦編輯或沒選取時＝hit。
+   */
+  const hitSel = (clientX: number, clientY: number) => {
+    const c = ctxRef.current;
+    const sm = selRef.current;
+    if (!c || !c.parts.size || !toolRef.current || !sm) return hit(clientX, clientY);
+    const first = hit(clientX, clientY);
+    if (first && (first.onCap || sm[first.p])) return first;
+    const ray = rayAt(clientX, clientY);
+    ray.firstHitOnly = false;
+    const plane = clipPlane(clipRef.current);
+    for (const h of ray.intersectObjects(pickables(), false)) {
+      if (plane && plane.distanceToPoint(h.point) < -1e-6) continue;
+      const v = voxelOf(h);
+      if (v && sm[v.p]) return v;
+    }
+    return first;
+  };
   /** 這個體素屬於哪個結構（hover 標籤用）。 */
   const compAt = (p: number) => {
     const l = state.L.labels[p];
@@ -1519,7 +1539,7 @@ export function View3D({
     return { lo, hi };
   };
 
-  /** 筆刷圈：畫在 hit 面上；推拉模式再加一支法線箭頭（往外＝長）。 */
+  /** 筆刷圈：畫在 hit 面上；局部長／縮再加一支法線箭頭（往外＝長）。 */
   const showRing = (v: Vec3 | null, dir: Vec3 | null) => {
     const c = ctxRef.current;
     if (!c) return;
@@ -1639,7 +1659,7 @@ export function View3D({
     if (d.mode === 'level') {
       const a = axisOf(d.dir);
       const to = d.hitVoxel[a] + d.dir[a] * d.n;
-      return `${who} 補平到 ${'xyz'[a]} = ${to}${d.n ? `（再${d.n > 0 ? '外' : '內'} ${Math.abs(d.n)} vx，${nm(d.n)}）` : ''}`;
+      return `${who} 方頭到 ${'xyz'[a]} = ${to}${d.n ? `（再${d.n > 0 ? '外' : '內'} ${Math.abs(d.n)} vx，${nm(d.n)}）` : ''}`;
     }
     if (!d.n) return `${who}：拖動改變格數，Esc 取消`;
     return `${who} ${directionName(d.dir)}${d.n >= 0 ? '長' : '縮'} ${Math.abs(d.n)} vx（${nm(d.n)}）`;
@@ -1826,7 +1846,7 @@ export function View3D({
       kick();
       return;
     }
-    const h = hit(e.clientX, e.clientY);
+    const h = hitSel(e.clientX, e.clientY);
     if (!h || h.onCap || !selRef.current?.[h.p]) return rotate();
         // 按在已選結構的面上：準備筆刷；拖過死區才算拖拉
         const { vx, vy, pxPerVoxel } = screenVectors(h.point, h.n);
@@ -1927,7 +1947,7 @@ export function View3D({
             return;
           }
         }
-        const h = hit(e.clientX, e.clientY);
+        const h = toolRef.current === 'brush' ? hitSel(e.clientX, e.clientY) : hit(e.clientX, e.clientY);
         const br = brushRef.current;
         const onSel = toolRef.current === 'brush' && !!h && !h.onCap && !!selRef.current?.[h.p];
         if (onSel) {
@@ -1937,7 +1957,7 @@ export function View3D({
           const dirName = directionName(h.n);
           if (br.mode === 'level') {
             host.style.cursor = 'crosshair';
-            setHoverTag({ text: `點一下：圈內補平到這面（${dirName}）`, ...pos });
+            setHoverTag({ text: `點一下：圈內方頭到這面（${dirName}）`, ...pos });
             onHover(`局部方頭（${who}）：點一下把圈內補到這一面；按住再拖可以多 ±n 格；轉視角在別處拖`);
           } else {
             const { vx, vy } = screenVectors(h.point, h.n);
@@ -1996,14 +2016,14 @@ export function View3D({
           // 右鍵拖＝平移；沒拖才開選單
           if (moved < 4) {
             const r = e.currentTarget.getBoundingClientRect();
-            const h = hit(e.clientX, e.clientY);
+            const h = hitSel(e.clientX, e.clientY);
             onMenu({ voxel: h?.p ?? null, along: hitsAlong(e.clientX, e.clientY).map((a) => a.key), n: h && !h.onCap ? h.n : null }, e.clientX - r.left, e.clientY - r.top);
           }
           return;
         }
         if (e.button !== 0) return;
         if (d) {
-          // 補平：點一下就套用到那一面（拖過的話再加減 n 格）；推拉：拖過死區且 n ≠ 0 才套用
+          // 局部方頭：點一下就套用到那一面（拖過的話再加減 n 格）；局部長／縮：拖過死區且 n ≠ 0 才套用
           const apply = d.mode === 'level' || (d.armed && d.n !== 0);
           endDrag(d, apply);
           if (apply) {

@@ -232,7 +232,7 @@ function LevelPart({ ed, compact, plane }: { ed: Editor; compact?: boolean; plan
       <Flex align="center" gap={12}>
         <FacePicker value={dir} onChange={setDir} onHover={host.highlight} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} />
         <Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
-          {faceName(dir)}每一排補到最外側那一點。只填空氣；薄襯層{ed.follow ? '跟著往外推' : '會擋住（設定裡開「襯層一起推」才跟著走）'}，厚的鄰居不吃。
+          {faceName(dir)}每一排補到最外側那一點。只填空氣；薄襯層{ed.follow ? '跟著往外走' : '會擋住（設定裡開「襯層一起推」才跟著走）'}，厚的鄰居不吃。
         </Text>
       </Flex>
     </CardShell>

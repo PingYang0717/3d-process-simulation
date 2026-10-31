@@ -108,7 +108,7 @@ export function SweepModal({
               value={kind}
               onChange={(v) => setKind(v as 'push' | 'move')}
               options={[
-                { label: '長高／縮短（只推一面）', value: 'push' },
+                { label: '長／縮（只推一面）', value: 'push' },
                 { label: '整塊移動', value: 'move' },
               ]}
             />

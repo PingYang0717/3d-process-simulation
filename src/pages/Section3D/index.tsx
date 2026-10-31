@@ -148,6 +148,7 @@ type PV = Preview & { base: number; committed: boolean; blocked?: number[]; mesh
 
 
 /** 浮動卡片：右鍵「長／縮…」「圓頭…」、3D 角把手點一下開的。 */
+const CORNER_NAME: Record<CornerId, string> = { ul: '左上', ur: '右上', ll: '左下', lr: '右下' };
 type CardAt = { kind: 'push' | 'shape'; x: number; y: number; dir?: Vec3; round?: Partial<RoundGesture> };
 
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
@@ -487,6 +488,14 @@ export default function Section3DPage() {
     else enterFocus(t);
   };
   const [seenFocusHint, setSeenFocusHint] = usePersisted('seenFocusHint', false);
+  // 改名後舊使用者找不到（plan v10 §8）：第一次開新版本提示一次，? 裡有對照表
+  const [seenRename, setSeenRename] = usePersisted('seenV10Rename', false);
+  useEffect(() => {
+    if (!ed.ready || seenRename) return;
+    setSeenRename(true);
+    message.info({ key: 'rename', duration: 10, content: '改名了：長高／縮短 → 長／縮、補平 → 方頭、現在／原始 → 改後／改前、2D 編輯 → 聚焦編輯（E）。按 ? 看對照表' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ed.ready]);
   /** 頁籤換方向（記住，之後進入沿用）。 */
   const pickAxis = (a: Axis) => {
     axisPicked.current = true;
@@ -643,6 +652,21 @@ export default function Section3DPage() {
   const menuPage = () => ({ x: menuAt?.x ?? 200, y: menuAt?.y ?? 200 });
   const mn = ed.menu?.n ?? null;
   const editable = !!menuComp && ed.sel.has(menuComp.key) && !peek;
+  /** 2D 剖面右鍵點在選取外框的角附近（各邊 30% 以內）：那個角（「圓角…」預先勾好）。 */
+  const corner2d = ((): CornerId | null => {
+    const b = ed.selBox;
+    const v = ed.menu?.voxel;
+    if (!editing || !b || v == null) return null;
+    const p = ed.voxelCoord(v);
+    const [ua, va] = ed.editAxis === 'z' ? [0, 1] : ed.editAxis === 'y' ? [0, 2] : [2, 1];
+    const lo = [b.x0, b.y0, b.z0];
+    const hi = [b.x1, b.y1, b.z1];
+    const fu = (p[ua] - lo[ua] + 0.5) / (hi[ua] - lo[ua] + 1);
+    const fv = (p[va] - lo[va] + 0.5) / (hi[va] - lo[va] + 1);
+    const nu = fu < 0.3 ? 'l' : fu > 0.7 ? 'r' : null;
+    const nv = fv < 0.3 ? 'u' : fv > 0.7 ? 'l' : null;
+    return nu && nv ? ((nv + nu) as CornerId) : null;
+  })();
   const editItems: NonNullable<MenuProps['items']> =
     menuComp && editable && ed.focus
       ? [
@@ -654,6 +678,9 @@ export default function Section3DPage() {
                 { key: 'push', label: `${directionName(mn)}長／縮…`, onClick: () => openCard({ kind: 'push', dir: mn, ...menuPage() }) },
                 { key: 'level', label: `方頭（往${directionName(mn).slice(1)}）`, disabled: !!ed.busy, onClick: () => (ed.levelWhole(mn), closeMenu()) },
               ]
+            : []),
+          ...(editing && corner2d
+            ? [{ key: 'corner', label: `圓角（${CORNER_NAME[corner2d]}）…`, onClick: () => openCard({ kind: 'shape', round: { corners: [{ id: corner2d }] }, ...menuPage() }) }]
             : []),
           { key: 'round', label: '圓頭…', onClick: () => openCard({ kind: 'shape', ...menuPage() }) },
           {
@@ -827,7 +854,7 @@ export default function Section3DPage() {
                 onMenu={(p, x, y) => {
                   const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
                   setMenuAt({ x, y });
-                  ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
+                  ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, voxel: p ? (p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0] : null });
                 }}
               />
                 )}
@@ -1171,7 +1198,7 @@ export default function Section3DPage() {
               {cardAt.kind === 'push' ? (
                 <PushCard ed={ed} compact initialDir={cardAt.dir} />
               ) : (
-                <ShapeCard ed={ed} compact initial={cardAt.round} />
+                <ShapeCard ed={ed} compact initial={cardAt.round} plane={editing ? ed.editAxis : undefined} />
               )}
             </div>,
             document.body,
@@ -1232,13 +1259,13 @@ export default function Section3DPage() {
             key: 'changes',
             label: (
               <Flex align="center" gap={6}>
-                改動
+                改了哪些
                 {ed.changedKeys.size > 0 && <Badge count={ed.changedKeys.size} size="small" color="var(--c-primary)" />}
               </Flex>
             ),
             children: (
               <div className="insp-body">
-                <ChangesTab ed={ed} onExport={() => exportOne('vti')} />
+                <ChangesTab ed={ed} />
               </div>
             ),
           },
@@ -1252,7 +1279,7 @@ export default function Section3DPage() {
             ),
             children: (
               <div className="insp-body">
-                <SplitsTab ed={ed} onExportAll={() => confirmExportAll('vti')} onSweep={() => setSweepOpen(true)} />
+                <SplitsTab ed={ed} />
               </div>
             ),
           },

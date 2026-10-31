@@ -8,7 +8,7 @@ const { Text } = Typography;
 
 export const AXIS_NAME: Record<Axis, string> = { z: 'XY 正面', y: 'XZ 上視', x: 'YZ 側面' };
 
-/** 並排比較：每個 split 一張同位置切面，紅框＝和原始不同。 */
+/** 並排看各 split：每個 split 一張同位置切面，深藍框＝和原始不同。 */
 export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; setAxis: (a: Axis) => void }) {
   const at = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
   const cards = [
@@ -23,7 +23,7 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
     <div className="compare">
       <div className="pane-head" style={{ background: '#fff', borderRadius: 8, marginBottom: 12, boxShadow: '0 1px 2px rgba(0,0,0,.06)' }}>
         <Text strong style={{ fontSize: 12 }}>
-          並排比較
+          並排看各 split
         </Text>
         <Segmented
           size="small"

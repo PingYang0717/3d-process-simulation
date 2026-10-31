@@ -51,7 +51,7 @@ export function SettingsDrawer({
           </Row>
         </Section>
         <Section title="2D 剖面">
-          <Row label="選到結構時自動放大到它" sub="2D 編輯的主切面">
+          <Row label="選到結構時自動放大到它" sub="2D 剖面的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />
           </Row>
           <Row label="多選時對應到長得一樣的結構" sub="在一根 fin 上拖，其他長得一樣的 fin 一起改（同材質、長寬比與面積相近）">

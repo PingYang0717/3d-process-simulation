@@ -1,5 +1,4 @@
-import { Alert, Button, Flex, Table, Typography } from 'antd';
-import { DownloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { Alert, Flex, Table, Typography } from 'antd';
 import { bboxDims } from '../../volume/volume';
 import { signed } from '../../ui/format';
 import { type Editor, useSplitDiffs } from './editor';
@@ -7,7 +6,7 @@ import { type Editor, useSplitDiffs } from './editor';
 const { Text } = Typography;
 
 /** 右欄「Split」總表：每個 split 一列，選取結構的 H／W 與改動體素。 */
-export function SplitsTab({ ed, onExportAll, onSweep }: { ed: Editor; onExportAll: () => void; onSweep: () => void }) {
+export function SplitsTab({ ed }: { ed: Editor }) {
   const focus = ed.selComps[0];
   const was = focus ? ed.origByKey.get(focus.key) : undefined;
   const base = was ? bboxDims(was.bbox) : null;
@@ -56,14 +55,8 @@ export function SplitsTab({ ed, onExportAll, onSweep }: { ed: Editor; onExportAl
       <Text type="secondary" style={{ fontSize: 12 }}>
         點一列切到那個 split。1 voxel = {ed.nmPerVoxel} nm。
       </Text>
-      <Button icon={<ThunderboltOutlined />} onClick={onSweep} block>
-        一次產生多個 split…
-      </Button>
-      <Button type="primary" icon={<DownloadOutlined />} onClick={onExportAll} block>
-        全部匯出（zip）
-      </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        zip 裡每個 split 一個 .vti（同 Extent、同 Spacing、同 Origin），加一份 manifest.json 記錄每個 split 做了哪些操作。
+        一次產生多個 split：上方 Split 列的「＋」。匯出在右上角「匯出」：zip 裡每個 split 一個 .vti（同 Extent、Spacing、Origin），加一份 manifest.json 記錄每個 split 做了哪些操作。
       </Text>
     </Flex>
   );

@@ -1,5 +1,5 @@
-import { Alert, Button, Empty, Flex, Table, Typography } from 'antd';
-import { DownloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Empty, Flex, Popconfirm, Table, Typography } from 'antd';
+import { DeleteOutlined } from '@ant-design/icons';
 import { bboxDims, isVoid } from '../../volume/volume';
 import { MatLabel, Swatch } from '../../ui/Swatch';
 import { Section } from '../../ui/Stat';
@@ -9,8 +9,8 @@ import { matOf } from './Inspector';
 
 const { Text } = Typography;
 
-/** 右欄「改動」：原始 → 現在。 */
-export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void }) {
+/** 右欄「改了哪些」：原始 → 現在；最底下「丟掉所有改動」（plan v10 D8）。 */
+export function ChangesTab({ ed }: { ed: Editor }) {
   const total = ed.vol.data.length;
   const nm = ed.nmPerVoxel;
   const fromTo = (a: number, b: number) => `${a} → ${b}（${signed(b - a)} vx，${signed((b - a) * nm, 1)} nm）`;
@@ -161,9 +161,21 @@ export function ChangesTab({ ed, onExport }: { ed: Editor; onExport: () => void 
           />
         </Section>
       )}
-      <Button type="primary" block icon={<DownloadOutlined />} onClick={onExport}>
-        匯出 .vti
-      </Button>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        匯出在右上角「匯出」。
+      </Text>
+      <Popconfirm
+        title="丟掉這個 split 的所有改動？"
+        description="回到和原始一模一樣，這個 split 的步驟也會清掉，不能復原。"
+        okText="丟掉"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        onConfirm={ed.resetAll}
+      >
+        <Button danger block icon={<DeleteOutlined />} disabled={!ed.diff.count || !!ed.busy}>
+          丟掉所有改動
+        </Button>
+      </Popconfirm>
     </Flex>
   );
 }

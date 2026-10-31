@@ -5,7 +5,7 @@ import { BASE_ID, type Editor, type Split } from './editor';
 
 const { Text } = Typography;
 
-/** Split 列：「原始」＋每個 split 一個頁籤、新增、[ ] 切換、並排比較。 */
+/** Split 列：「原始」＋每個 split 一個頁籤、新增、[ ] 切換、並排看各 split。 */
 export function SplitBar({
   ed,
   compare,
@@ -136,7 +136,7 @@ export function SplitBar({
             <kbd>]</kbd> 切換
           </Text>
           <Button size="small" type={compare ? 'primary' : 'default'} icon={<AppstoreOutlined />} onClick={() => setCompare(!compare)}>
-            並排比較
+            並排看各 split
           </Button>
         </>
       )}

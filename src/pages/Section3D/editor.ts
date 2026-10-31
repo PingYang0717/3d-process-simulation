@@ -416,7 +416,7 @@ export function useEditor() {
 
   /**
    * 第一次要改之前：把原始複製進這個 split 的帳簿（主執行緒與 Worker 各一次），之後原地改。
-   * 借用中的 split 內容一定是原始（新 split、回到原始、借用中的複本）。
+   * 借用中的 split 內容一定是原始（新 split、丟掉所有改動、借用中的複本）。
    */
   const own = (sp: Split): Split => {
     if (sp.buf) return sp;
@@ -812,7 +812,7 @@ export function useEditor() {
     [opFor, commit],
   );
   /**
-   * 整個選取沿 dir 補平到最外側那一點：每一排都補到和最高點一樣高（圓頭、斜角變方頭）。
+   * 整個選取沿 dir 方頭：補到最外側那一點：每一排都補到和最高點一樣高（圓頭、斜角變方頭）。
    * 只填空氣與可跟推的襯層，不吃厚的鄰居。回傳目標座標；沒選取回傳 null。
    */
   const levelTarget = useCallback(
@@ -825,7 +825,7 @@ export function useEditor() {
     },
     [selComps],
   );
-  /** 方頭（整個選取沿 dir 補平到最外側）。 */
+  /** 方頭（整個選取沿 dir 補到最外側）。 */
   const levelOp = useCallback(
     (dir: Vec3): Op | null => {
       const b = unionBBox(selComps);
@@ -1117,7 +1117,7 @@ export function useEditor() {
 
 export type Editor = ReturnType<typeof useEditor>;
 
-/** 每個 split 和原始的 diff（並排比較、總表用）：直接讀帳簿（§4.4）。 */
+/** 每個 split 和原始的 diff（並排看各 split、總表用）：直接讀帳簿（§4.4）。 */
 export function useSplitDiffs(ed: Editor) {
   const { splits } = ed;
   return useMemo(() => new Map<string, Diff>(splits.map((s) => [s.id, splitDiff(s)])), [splits]);

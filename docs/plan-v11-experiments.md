@@ -468,7 +468,7 @@ README 的「掃描」段改成「實驗」；HelpDrawer 加一條任務「撒 s
 | M11.1 | `factors.ts`、`editor.addDesign`／`commitTo`、`ExperimentTab.tsx`、`MatrixTab.tsx`、`matrix.ts`（CSV、manifest）、刪 `SweepModal.tsx` | `factors.test.ts`、`v12.test.ts`（3×3＝9 個 split，Worker 重播 ≡ manifest ops 重播，levels／designs round-trip） |
 | M11.2 | `OverlayView.tsx`、`overlay.ts`、CompareView 並排／疊圖、基準選擇、卡片自動放大、腳註改 levels；`SliceView` 多 `box` | `overlay.test.ts` |
 | M11.3 | `cd`、`taper`（展開成 `pushSeq`）、`dilate`（`dilateMask`）、`defect`（`setRegionMaterial`）、`level.ref`、push `policy`；卡片：長／縮四模式、允許穿層、方頭相對於、缺陷卡、FacePicker 軸模式 | `cd`／`taper`／`dilate`／`defect`／`policy`／`levelRef.test.ts`（每個都驗預覽裁切 ≡ applyOp ≡ applyOpLocal） |
-| M11.4 | 設定：推面 policy 預設、進階「自由形變」「筆刷」；`hitTest` 的 `nodeOk`、Shift／Alt 關閉、自由形變 Op 加「自由形變：」；`Material.kind`／`guessKind`、左欄改類別、MaterialCard 分組；README、HelpDrawer | `scripts/e2e/m11.cjs`（§0～§4 全過）；m0／m2／m3／m5／m9／m10 開頭打開進階開關後全過 |
+| M11.4 | 設定：推面 policy 預設、進階「自由形變」「筆刷」；`hitTest` 的 `nodeOk`、Shift／Alt 關閉、自由形變 Op 加「自由形變：」；`Material.kind`／`guessKind`、左欄改類別、MaterialCard 分組；README、HelpDrawer | `scripts/e2e/m11.cjs`（§0～§4 共 18 項全過）；m0／m2／m3／m5／m9／m10 開頭打開進階開關後全過 |
 
 ### 和計畫不同的地方
 
@@ -489,7 +489,7 @@ README 的「掃描」段改成「實驗」；HelpDrawer 加一條任務「撒 s
 | --- | --- |
 | 單元測試 | 34 個檔案、231 個測試全過 |
 | 3×3 設計 Worker 重播（×1，node） | 約 3.5 s（`v12.test.ts`，目標 < 5 s） |
-| e2e m11 | §0～§4 共 19 項全過 |
+| e2e m11 | §0～§4 共 18 項全過 |
 
 ### 還沒做
 

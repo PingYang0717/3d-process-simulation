@@ -5,6 +5,7 @@ import { type Scope, axisIndex, scopeBox } from './scope';
 import { type Report, LINER_MAX, addCell, fillAt, moveCells, removeCell, shellOf } from './kernel';
 
 export { LINER_MAX, fillAt };
+import { BOTH, MeshBuilder, emitFaces } from './meshBuilder';
 
 export interface Volume {
   X: number;
@@ -185,21 +186,16 @@ export function greedyMesh(
   colorOf: (code: number) => [number, number, number],
 ): MeshData {
   const dims = [X, Y, Z];
-  const pos: number[] = [];
-  const nor: number[] = [];
-  const col: number[] = [];
-  let quads = 0;
+  const mb = new MeshBuilder();
   const stride = [1, X, X * Y];
-  const BOTH = 1 << 30;
   const mask = new Int32Array(Math.max(X * Y, Y * Z, X * Z));
+  const x = [0, 0, 0];
   for (let d = 0; d < 3; d++) {
     const u = (d + 1) % 3;
     const v = (d + 2) % 3;
-    const x = [0, 0, 0];
-    for (x[d] = -1; x[d] < dims[d]; ) {
+    for (let t = -1; t < dims[d]; t++) {
       // 這一片的面：正值 = 朝 +d 的面、負值 = 朝 −d、BOTH = 兩面都有（直接算 index，不逐格判斷出界）
       let n = 0;
-      const t = x[d];
       const hasA = t >= 0;
       const hasB = t < dims[d] - 1;
       const sd = stride[d];
@@ -212,10 +208,11 @@ export function greedyMesh(
           mask[n++] = a === b ? 0 : a && !b ? a : !a && b ? -b : BOTH | (a << 15) | b;
         }
       }
-      x[d]++;
+      x[d] = t + 1;
       n = 0;
+      const W = dims[u];
       for (let j = 0; j < dims[v]; j++)
-        for (let i = 0; i < dims[u]; ) {
+        for (let i = 0; i < W; ) {
           const c = mask[n];
           if (!c) {
             i++;
@@ -223,49 +220,20 @@ export function greedyMesh(
             continue;
           }
           let w = 1;
-          while (i + w < dims[u] && mask[n + w] === c) w++;
+          while (i + w < W && mask[n + w] === c) w++;
           let h = 1;
           grow: for (; j + h < dims[v]; h++)
-            for (let k = 0; k < w; k++) if (mask[n + k + h * dims[u]] !== c) break grow;
-          // 負值的二補數也帶著 bit 30，所以先看正負再看 BOTH
-          const faces: [number, number][] =
-            c > 0 && c & BOTH
-              ? [
-                  [(c >> 15) & 0x7fff, 1],
-                  [c & 0x7fff, -1],
-                ]
-              : c > 0
-                ? [[c, 1]]
-                : [[-c, -1]];
+            for (let k = 0; k < w; k++) if (mask[n + k + h * W] !== c) break grow;
           x[u] = i;
           x[v] = j;
-          const du = [0, 0, 0];
-          const dv = [0, 0, 0];
-          du[u] = w;
-          dv[v] = h;
-          const p0 = [x[0], x[1], x[2]];
-          const p1 = [x[0] + du[0], x[1] + du[1], x[2] + du[2]];
-          const p2 = [x[0] + du[0] + dv[0], x[1] + du[1] + dv[1], x[2] + du[2] + dv[2]];
-          const p3 = [x[0] + dv[0], x[1] + dv[1], x[2] + dv[2]];
-          for (const [code, sign] of faces) {
-            const rgb = colorOf(code);
-            const tris = sign > 0 ? [p0, p1, p2, p0, p2, p3] : [p0, p2, p1, p0, p3, p2];
-            const nn = [0, 0, 0];
-            nn[d] = sign;
-            for (const p of tris) {
-              pos.push(p[0], p[1], p[2]);
-              nor.push(nn[0], nn[1], nn[2]);
-              col.push(rgb[0], rgb[1], rgb[2]);
-            }
-            quads++;
-          }
-          for (let l = 0; l < h; l++) for (let k = 0; k < w; k++) mask[n + k + l * dims[u]] = 0;
+          emitFaces(mb, c, d, u, v, x[0], x[1], x[2], w, h, colorOf);
+          for (let l = 0; l < h; l++) mask.fill(0, n + l * W, n + l * W + w);
           i += w;
           n += w;
         }
     }
   }
-  return { positions: new Float32Array(pos), normals: new Float32Array(nor), colors: new Float32Array(col), quads };
+  return mb.finish();
 }
 
 /**
@@ -339,18 +307,29 @@ export function levelMask(
       : axis === 1
         ? (a: number, b: number, t: number) => (b * Y + t) * X + a
         : (a: number, b: number, t: number) => (t * Y + b) * X + a;
-  const coord = (a: number, b: number, t: number): Vec3 => (axis === 0 ? [t, a, b] : axis === 1 ? [a, t, b] : [a, b, t]);
+  // plan v9 P12：座標內聯（不配 Vec3）；scope 的軸不是掃描軸時，一整列在不在 scope 只看 (a, b)，提到列外判斷一次
   const A = axis === 0 ? Y : X;
   const B = axis === 2 ? Y : Z;
   const sa = axisIndex(scope.axis);
-  const inZ = (c: Vec3) => c[sa] >= scope.lo && c[sa] <= scope.hi;
+  const { lo: slo, hi: shi } = scope;
+  const xOf = (a: number, t: number) => (axis === 0 ? t : a);
+  const yOf = (a: number, b: number, t: number) => (axis === 0 ? a : axis === 1 ? t : b);
+  const zOf = (b: number, t: number) => (axis === 2 ? t : b);
+  const alongT = sa === axis;
   for (let b = 0; b < B; b++)
     for (let a = 0; a < A; a++) {
-      const c0 = coord(a, b, 0);
-      if (!inBrush(axis, center, r, shape, c0[0], c0[1], c0[2])) continue;
+      if (!inBrush(axis, center, r, shape, xOf(a, 0), yOf(a, b, 0), zOf(b, 0))) continue;
+      // 這一列在不在 scope：scope 沿掃描軸時每個 t 各自判斷，否則整列一樣
+      let colIn = true;
+      if (!alongT) {
+        const c = sa === 0 ? xOf(a, 0) : sa === 1 ? yOf(a, b, 0) : zOf(b, 0);
+        colIn = c >= slo && c <= shi;
+        if (!colIn) continue;
+      }
+      const inT = (t: number) => !alongT || (t >= slo && t <= shi);
       // 這一列最外側（沿 dir）的 mask 體素
       let outer = -1;
-      for (let t = 0; t < len; t++) if (mask[at(a, b, t)] && inZ(coord(a, b, t)) && (sign > 0 || outer < 0)) outer = t;
+      for (let t = 0; t < len; t++) if (mask[at(a, b, t)] && inT(t) && (sign > 0 || outer < 0)) outer = t;
       if (outer < 0) continue;
       const mat = vol.data[at(a, b, outer)];
       const gap = (to - outer) * sign;
@@ -359,18 +338,16 @@ export function levelMask(
         for (let k = 1; k <= gap; k++) {
           const t = outer + k * sign;
           if (t < 0 || t >= len) break;
-          const c = coord(a, b, t);
-          if (!inZ(c)) break;
-          if (!addCell(live, out, c[0], c[1], c[2], d, mat, follow, 'block', report)) break;
+          if (!inT(t)) break;
+          if (!addCell(live, out, xOf(a, t), yOf(a, b, t), zOf(b, t), d, mat, follow, 'block', report)) break;
         }
       } else if (gap < 0) {
         // 削：從 outer 往回退到 to+1；核心規則「拿」（follow = 上面的襯層一格一格跟著退、最外面回填）
         for (let k = 0; k < -gap; k++) {
           const t = outer - k * sign;
           const i = at(a, b, t);
-          const c = coord(a, b, t);
-          if (!mask[i] || !inZ(c)) continue;
-          removeCell(live, out, orig, c[0], c[1], c[2], d, vol.data[i], mat, backfill, follow, report);
+          if (!mask[i] || !inT(t)) continue;
+          removeCell(live, out, orig, xOf(a, t), yOf(a, b, t), zOf(b, t), d, vol.data[i], mat, backfill, follow, report);
         }
       }
     }
@@ -425,9 +402,9 @@ export function setMaskMaterial(vol: Volume, mask: Uint8Array, scope: Scope, mat
   return { X, Y, Z, data: out };
 }
 
-const shiftMask = (vol: Volume, mask: Uint8Array, d: Vec3) => {
+const shiftMask = (vol: Volume, mask: Uint8Array, d: Vec3, out = new Uint8Array(mask.length)) => {
   const { X, Y, Z } = vol;
-  const out = new Uint8Array(mask.length);
+  out.fill(0);
   for (let z = 0; z < Z; z++)
     for (let y = 0; y < Y; y++)
       for (let x = 0; x < X; x++) {
@@ -445,9 +422,9 @@ const shiftMask = (vol: Volume, mask: Uint8Array, d: Vec3) => {
  * 每條沿 d 軸的線上，只留 mask 在 d 方向最外側的那一格（真正的外表面）。
  * 結構內部的空洞邊界不算，所以推面不會長進 void、也不會從 void 往外蝕。
  */
-const outerFace = (vol: Volume, mask: Uint8Array, d: Vec3) => {
+const outerFace = (vol: Volume, mask: Uint8Array, d: Vec3, out = new Uint8Array(mask.length)) => {
   const { X, Y, Z } = vol;
-  const out = new Uint8Array(mask.length);
+  out.fill(0);
   const axis = d[0] ? 0 : d[1] ? 1 : 2;
   const sign = d[0] + d[1] + d[2];
   const len = axis === 0 ? X : axis === 1 ? Y : Z;
@@ -485,15 +462,24 @@ export function growMask(
   report?: Report,
 ): Volume {
   let cur = vol;
-  let m = new Uint8Array(mask);
+  // 第 0 步之前複製一次（之後原地改）；plan v9 P12：兩塊外框大小的 buffer 輪流當這一步的結果，face／front 共用 scratch
+  const m = new Uint8Array(mask);
   const { X, Y, Z } = vol;
   const sb = scopeBox(vol, scope);
   if (!sb) return vol;
-  for (let step = 0; step < Math.abs(n); step++) {
-    const out = new Uint8Array(cur.data);
+  const steps = Math.abs(n);
+  if (!steps) return vol;
+  const bufs: Uint8Array[] = [];
+  const face = new Uint8Array(m.length);
+  const front = n > 0 ? new Uint8Array(m.length) : face;
+  for (let step = 0; step < steps; step++) {
+    // 這一步讀 cur、寫 out（out 先複製 cur）；兩塊 buffer 輪流，cur 永遠不是 out
+    let out = bufs[step & 1];
+    if (!out) out = bufs[step & 1] = new Uint8Array(cur.data);
+    else out.set(cur.data);
     const d: Vec3 = n > 0 ? dir : [-dir[0], -dir[1], -dir[2]];
     if (n > 0) {
-      const front = shiftMask(cur, outerFace(cur, m, d), d);
+      shiftMask(cur, outerFace(cur, m, d, face), d, front);
       for (let z = sb.z0; z <= sb.z1; z++)
         for (let y = sb.y0; y <= sb.y1; y++)
           for (let x = sb.x0; x <= sb.x1; x++) {
@@ -503,12 +489,11 @@ export function growMask(
             // 核心規則「加」；推面一直是蓋過去（overwrite），和以前相同
             addCell(cur, out, x, y, z, d, cur.data[src], follow, 'overwrite', report);
           }
-      m = new Uint8Array(m);
       for (let i = 0; i < m.length; i++) if (front[i]) m[i] = 1;
     } else {
       // d 指向要退的方向（dir 的反向）；要退掉的是 dir 方向最外側那一層
       const back: Vec3 = [-d[0], -d[1], -d[2]];
-      const face = outerFace(cur, m, back);
+      outerFace(cur, m, back, face);
       for (let z = sb.z0; z <= sb.z1; z++)
         for (let y = sb.y0; y <= sb.y1; y++)
           for (let x = sb.x0; x <= sb.x1; x++) {

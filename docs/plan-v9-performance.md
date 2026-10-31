@@ -43,25 +43,27 @@ diff 與體積帳在主執行緒自己差量更新，不再每步跟 Worker 要�
 
 | # | 問題 | 在哪 | 影響 | 里程碑 |
 | --- | --- | --- | --- | --- |
-| P1 | 每一步做 6 次整個陣列複製：Worker `data.slice()`、`relabelFast` 的 `P.slice()`（4N）、`carryStats` 的 `mask.slice()`、`diff` handler 的 `mask.slice()`；主執行緒 `applyStep` 的 `data.slice()`＋`labels.slice()`（4N） | `apply.ts:44`、`volume.ts:1029`、`worker.ts:108,382`、`patch.ts:84,89` | ×3 光 memcpy ≈ 1.6 s／步；Worker 常駐 orig＋from＋to 三份 | M9.1 |
-| P2 | 主執行緒 `diffCache` 以版本號為 key，`pruneCaches` 把 hist／future 裡的版本都算活的 → 最多留 50 份 N 位元組的 mask | `editor.ts:129–144,291–303` | ×2 50 步 ≈ 785 MB；×3 2.6 GB | M9.1 |
-| P3 | 拖拉第 2 級預覽（整個 scope）每幀在 rAF 裡跑：profile 帶 gestures 時**每片重新 `traceRings`**，再對整個預覽盒做主執行緒 `greedyMesh`；`bench.ts drag` 只量第 1 級 | `index.tsx:282`、`profile.ts:90–101`、`relative.ts:96`、`views.tsx:870–930` | 一幀 100–200 ms，拖拉掉到個位數 fps；沒有數字 | M9.2 |
-| P4 | 選取層每一步在整個「選取外框 ∩ scope」裡重做 greedy mesh，沒有快取；選到基板＝每步一次全陣列 greedy mesh | `views.tsx:957–980`、`worker.ts:323–341` | ×2 每步多 ~0.9 s，排在主網格後面 | M9.3 |
-| P5 | 每個 chunk 的 `MeshBVH` 在主執行緒同步建 | `views.tsx:236,786` | 整個網格換掉時卡一段（×2 480 chunk） | M9.3 |
-| P6 | Worker chunk 快取每次 serve 都 `.slice()` 三個陣列再 transfer；4 組快取 | `worker.ts:290–294` | 全量回傳時整個網格再複製一遍、記憶體兩倍 | M9.3 |
-| P7 | 主切面 pointermove → `onHover` 新陣列 → `setSliceHover` → 整個 `Section3DPage` 重 render；`View3D` 的 `useEffect(kick)` 沒有依賴再多畫兩幀；`SliceEditor` 自己 `setHoverUV`／`setHover` 每 move 重 render、render 裡重算所有環的 `pathOf` 字串 | `index.tsx:167,598`、`views.tsx:435`、`SliceEditor.tsx:661–667,790–802` | 每次滑鼠移動一次整頁 render | M9.4 |
-| P8 | 被擋格子用 React `<rect>` 逐格畫，`blockedLive` 依賴 `preview`，拖拉中每幀 reconcile 最多 4000 個 | `SliceEditor.tsx:596–626,783–785,806–808` | 拖拉中每幀數千 DOM 節點 | M9.4 |
-| P9 | 剖面貼圖 effect 依賴 `preview`：拖拉每幀整張 `drawSlice`＋`new CanvasTexture`＋`new PlaneGeometry`＋`new EdgesGeometry`；兩張小切面 `SliceView` 收到 `preview` 也整張重畫 | `views.tsx:992–1031,1664–1666` | 每幀 3 張整片重畫＋貼圖上傳 | M9.4 |
-| P10 | 點一下選取三次全陣列掃描：`maskOf`、`maskInScope`（`scopeMode='slice'` 時每次換片都做）、`slicesWith` | `volume.ts:1202`、`editor.ts:31,51,249,287`、`index.tsx:313,324,335` | ×3 一次點選 100–200 ms | M9.4 |
-| P11 | `drawSlice` 每像素 `toVoxel` 配陣列、`hidden.has`、`rgb.get`；描紅邊每像素配 `[[1,0],…]`、每個邊緣像素一次 `fillRect` | `views.tsx:265–322` | 一次狀態變化呼叫 4–5 次 | M9.4 |
-| P12 | `growMask` 每一步 \|n\| 配 3–4 個外框大小的陣列（含不必要的 `m = new Uint8Array(m)`）；`levelMask` 內層 `coord()` 每 voxel new 一個 Vec3、`inZ` 沒有提出迴圈 | `volume.ts:342–376,492–523` | 拖拉中每幀 | M9.5 |
-| P13 | `greedyMesh`／`greedyMeshChunk` 用 `number[]` push 再轉 Float32Array，每個 quad 配 `faces`／`p0..p3`／`tris`／`nn`／顏色 tuple | `volume.ts:180–269`、`chunks.ts:50–154` | 範例 quad 少量不出；真實資料襯層多時明顯 | M9.5 |
-| P14 | `greedyMeshChunk` 每個 chunk 配一塊 66³ 的 Uint16（575 KB），全量重建 ×3 ≈ 115 MB GC 流量 | `chunks.ts:59` | GC 抖動 | M9.5 |
-| P15 | 預覽三角形搬回全域座標時 `[b.x0-1,…][j%3]` 每個分量配陣列 | `views.tsx:918–924` | 每幀 | M9.2（併入 Worker 版） |
-| P16 | `decodeVti` 整個檔案先 `TextDecoder` 成字串只為找標頭；`ascii` 走 `split(/\s+/).map(Number)`；UInt8 也逐格 `Number()` | `vti.ts:110–112,154,173–177` | 載入記憶體 2×、ascii 大檔爆記憶體 | M9.5 |
-| P17 | 主網格 `DoubleSide`，剖面關著時也畫背面 | `views.tsx:548` | GPU 多一半 fragment | M9.5 |
-| P18 | `voidEdges = new EdgesGeometry(...)` 沒有 quad 數上限保護 | `views.tsx:948` | VOID 多時卡 | M9.5 |
-| P19 | `profileBox` 用 `${u},${v}` 字串 Set；`applyProfileMask` 的 `at()` 每次呼叫 `to3D` 配陣列（4 鄰居 × 每格 × 每輪） | `preview.ts:160–166`、`profile.ts:57–60` | 熱迴圈配置 | M9.5 |
+| P1 | 每一步做 6 次整個陣列複製：Worker `data.slice()`、`relabelFast` 的 `P.slice()`（4N）、`carryStats` 的 `mask.slice()`、`diff` handler 的 `mask.slice()`；主執行緒 `applyStep` 的 `data.slice()`＋`labels.slice()`（4N） | `apply.ts:44`、`volume.ts:1029`、`worker.ts:108,382`、`patch.ts:84,89` | ×3 光 memcpy ≈ 1.6 s／步；Worker 常駐 orig＋from＋to 三份 | M9.1 ✔ |
+| P2 | 主執行緒 `diffCache` 以版本號為 key，`pruneCaches` 把 hist／future 裡的版本都算活的 → 最多留 50 份 N 位元組的 mask | `editor.ts:129–144,291–303` | ×2 50 步 ≈ 785 MB；×3 2.6 GB | M9.1 ✔ |
+| P3 | 拖拉第 2 級預覽（整個 scope）每幀在 rAF 裡跑：profile 帶 gestures 時**每片重新 `traceRings`**，再對整個預覽盒做主執行緒 `greedyMesh`；`bench.ts drag` 只量第 1 級 | `index.tsx:282`、`profile.ts:90–101`、`relative.ts:96`、`views.tsx:870–930` | 一幀 100–200 ms，拖拉掉到個位數 fps；沒有數字 | M9.2 ✔ |
+| P4 | 選取層每一步在整個「選取外框 ∩ scope」裡重做 greedy mesh，沒有快取；選到基板＝每步一次全陣列 greedy mesh | `views.tsx:957–980`、`worker.ts:323–341` | ×2 每步多 ~0.9 s，排在主網格後面 | M9.3 ✔ |
+| P5 | 每個 chunk 的 `MeshBVH` 在主執行緒同步建 | `views.tsx:236,786` | 整個網格換掉時卡一段（×2 480 chunk） | M9.3 ✔ |
+| P6 | Worker chunk 快取每次 serve 都 `.slice()` 三個陣列再 transfer；4 組快取 | `worker.ts:290–294` | 全量回傳時整個網格再複製一遍、記憶體兩倍 | M9.3 ✔ |
+| P7 | 主切面 pointermove → `onHover` 新陣列 → `setSliceHover` → 整個 `Section3DPage` 重 render；`View3D` 的 `useEffect(kick)` 沒有依賴再多畫兩幀；`SliceEditor` 自己 `setHoverUV`／`setHover` 每 move 重 render、render 裡重算所有環的 `pathOf` 字串 | `index.tsx:167,598`、`views.tsx:435`、`SliceEditor.tsx:661–667,790–802` | 每次滑鼠移動一次整頁 render | M9.4 ✔ |
+| P8 | 被擋格子用 React `<rect>` 逐格畫，`blockedLive` 依賴 `preview`，拖拉中每幀 reconcile 最多 4000 個 | `SliceEditor.tsx:596–626,783–785,806–808` | 拖拉中每幀數千 DOM 節點 | M9.4 ✔ |
+| P9 | 剖面貼圖 effect 依賴 `preview`：拖拉每幀整張 `drawSlice`＋`new CanvasTexture`＋`new PlaneGeometry`＋`new EdgesGeometry`；兩張小切面 `SliceView` 收到 `preview` 也整張重畫 | `views.tsx:992–1031,1664–1666` | 每幀 3 張整片重畫＋貼圖上傳 | M9.4 ✔ |
+| P10 | 點一下選取三次全陣列掃描：`maskOf`、`maskInScope`（`scopeMode='slice'` 時每次換片都做）、`slicesWith` | `volume.ts:1202`、`editor.ts:31,51,249,287`、`index.tsx:313,324,335` | ×3 一次點選 100–200 ms | M9.4 ✔ |
+| P11 | `drawSlice` 每像素 `toVoxel` 配陣列、`hidden.has`、`rgb.get`；描紅邊每像素配 `[[1,0],…]`、每個邊緣像素一次 `fillRect` | `views.tsx:265–322` | 一次狀態變化呼叫 4–5 次 | M9.4 ✔ |
+| P12 | `growMask` 每一步 \|n\| 配 3–4 個外框大小的陣列（含不必要的 `m = new Uint8Array(m)`）；`levelMask` 內層 `coord()` 每 voxel new 一個 Vec3、`inZ` 沒有提出迴圈 | `volume.ts:342–376,492–523` | 拖拉中每幀 | M9.5 ✔ |
+| P13 | `greedyMesh`／`greedyMeshChunk` 用 `number[]` push 再轉 Float32Array，每個 quad 配 `faces`／`p0..p3`／`tris`／`nn`／顏色 tuple | `volume.ts:180–269`、`chunks.ts:50–154` | 範例 quad 少量不出；真實資料襯層多時明顯 | M9.5 ✔ |
+| P14 | `greedyMeshChunk` 每個 chunk 配一塊 66³ 的 Uint16（575 KB），全量重建 ×3 ≈ 115 MB GC 流量 | `chunks.ts:59` | GC 抖動 | M9.5 ✔ |
+| P15 | 預覽三角形搬回全域座標時 `[b.x0-1,…][j%3]` 每個分量配陣列 | `views.tsx:918–924` | 每幀 | M9.2（併入 Worker 版）✔ |
+| P16 | `decodeVti` 整個檔案先 `TextDecoder` 成字串只為找標頭；`ascii` 走 `split(/\s+/).map(Number)`；UInt8 也逐格 `Number()` | `vti.ts:110–112,154,173–177` | 載入記憶體 2×、ascii 大檔爆記憶體 | M9.5 ✔ |
+| P17 | 主網格 `DoubleSide`，剖面關著時也畫背面 | `views.tsx:548` | GPU 多一半 fragment | M9.5 ✔ |
+| P18 | `voidEdges = new EdgesGeometry(...)` 沒有 quad 數上限保護 | `views.tsx:948` | VOID 多時卡 | M9.5 ✔ |
+| P19 | `profileBox` 用 `${u},${v}` 字串 Set；`applyProfileMask` 的 `at()` 每次呼叫 `to3D` 配陣列（4 鄰居 × 每格 × 每輪） | `preview.ts:160–166`、`profile.ts:57–60` | 熱迴圈配置 | M9.5 ✔ |
+
+> 實作狀態（2026-10-31）：P1～P19 全部做完（✔），實測與目標的對照見 §2 最右欄與 §11。
 
 量測基準（這台雲端容器、`npx vite-node scripts/bench.ts`）：
 ×2 poly 長高 1：外框裡算＋relabel 610 ms、主執行緒貼補丁 164 ms；`Uint8Array(15.7M).slice()` 20 ms、`Int32Array(15.7M).slice()` 86 ms；
@@ -69,18 +71,18 @@ diff 與體積帳在主執行緒自己差量更新，不再每步跟 Worker 要�
 
 ## 2. 目標與量法
 
-| 項目 | 現在（×2 / ×3） | 目標（×2 / ×3） | 量法 |
-| --- | --- | --- | --- |
-| 一步 1 格 push，按下 → 正式網格換上（JS 時間） | ≈ 0.9 s / 未量（估 3 s+） | < 400 ms / < 1 s | `perf.cjs`（`__meshAt`）、`bench.ts step` |
-| 一步裡整個陣列的 memcpy 次數 | 6 次 | **0 次**（只有第一次改 split 時複製 orig 一次） | `bench.ts step` 印「複製位元組」 |
-| 50 步後主執行緒記憶體增量 | 50 × N（diff mask） | < 補丁總量 ＋ 20 MB | `perf.cjs` 讀 `performance.memory`、`bench.ts mem` |
-| Worker 常駐 | orig ＋ from ＋ to | orig ＋ 每個 split 一份 | `bench.ts mem`（`process.memoryUsage`） |
-| 拖節點，主執行緒每幀（第 1 級＋事件） | 3.7 / 5.4 ms（第 2 級另加 100–200 ms） | < 8 / < 12 ms，且第 2 級不在主執行緒 | `bench.ts drag`（加第 2 級、分開印） |
-| 拖節點，第 2 級每幀（Worker） | 未量 | 有快取 < 40 ms（×2，fin 256 片） | `bench.ts drag` |
-| 選到基板後每一步選取層的成本 | 全陣列 greedy mesh | ∝ 髒 chunk 數（和主網格同級） | `bench.ts step` 印 layer 請求時間 |
-| 整個網格換上時主執行緒 long task | 有（BVH） | 無 > 50 ms | `perf.cjs` PerformanceObserver |
-| 主切面上滑鼠移動 | `Section3DPage` 每 move render 一次 | 0 次（只有小元件 render） | React Profiler／`perf.cjs` 計 commit 數 |
-| `drawSlice` 480×384 一張 | 未量（估 3–5 ms） | < 1 ms | `bench.ts draw` |
+| 項目 | 現在（×2 / ×3） | 目標（×2 / ×3） | 量法 | v9 實測（×2 / ×3） |
+| --- | --- | --- | --- | --- |
+| 一步 1 格 push，按下 → 正式網格換上（JS 時間） | ≈ 0.9 s / 未量（估 3 s+） | < 400 ms / < 1 s | `perf.cjs`（`__meshAt`）、`bench.ts step` | Worker 90～350 ＋ chunk 55～75 ms；端到端 JS 560～960 ms（headless）/ apply 540～960 ＋ chunk 250～280 ms ✗（×3 略超） |
+| 一步裡整個陣列的 memcpy 次數 | 6 次 | **0 次**（只有第一次改 split 時複製 orig 一次） | `bench.ts step` 印「複製位元組」 | **0 次** ✔（own 一次：×2 150 MB、×3 506 MB） |
+| 50 步後主執行緒記憶體增量 | 50 × N（diff mask） | < 補丁總量 ＋ 20 MB | `perf.cjs` 讀 `performance.memory`、`bench.ts mem` | 50 步 +10～17 MB（補丁 247 MB 在堆疊裡）✔ |
+| Worker 常駐 | orig ＋ from ＋ to | orig ＋ 每個 split 一份 | `bench.ts mem`（`process.memoryUsage`） | orig ＋ 每 split 一份 ✔ |
+| 拖節點，主執行緒每幀（第 1 級＋事件） | 3.7 / 5.4 ms（第 2 級另加 100–200 ms） | < 8 / < 12 ms，且第 2 級不在主執行緒 | `bench.ts drag`（加第 2 級、分開印） | 第 1 級 2.8 / 4.9 ms ✔，第 2 級在 Worker ✔ |
+| 拖節點，第 2 級每幀（Worker） | 未量 | 有快取 < 40 ms（×2，fin 256 片） | `bench.ts drag` | ×1 有快取 10 ms ✔；×2 130 ms ✗（外框 170 萬格 > 上限 40 萬，照舊畫點雲） |
+| 選到基板後每一步選取層的成本 | 全陣列 greedy mesh | ∝ 髒 chunk 數（和主網格同級） | `bench.ts step` 印 layer 請求時間 | ∝ 髒 chunk：60～90 個 110～190 ms（全量 238 個 830～950 ms）✔ |
+| 整個網格換上時主執行緒 long task | 有（BVH） | 無 > 50 ms | `perf.cjs` PerformanceObserver | BVH 不再同步建 ✔；headless 仍有 long task（軟體 WebGL 畫一幀就 > 50 ms） |
+| 主切面上滑鼠移動 | `Section3DPage` 每 move render 一次 | 0 次（只有小元件 render） | React Profiler／`perf.cjs` 計 commit 數 | 0 次 ✔ |
+| `drawSlice` 480×384 一張 | 未量（估 3–5 ms） | < 1 ms | `bench.ts draw` | ×3 1.9～2.5 ms（x 切面 7 ms）✗（比舊版快 12×） |
 
 ## 3. 原則、不做的事
 
@@ -426,3 +428,47 @@ Worker 內部：`buffers: Map<owner, { data, labels, diff, diffCount, counts }>`
 - **保留 non-indexed 6 頂點／quad**：indexed 省 22% 資料但要改 BVH／recolor／預覽濾三角形的假設；量過 M9.5 之後再決定（選配）。
 - **不用 SharedArrayBuffer**：需要 COOP/COEP，部署環境不保證；原地補丁已經把每步的跨執行緒資料降到補丁大小。
 - **純函式一律保留**：`applyOp`／`replay`／`relabelFast`／`applyStep`／`greedyMesh` 當測試對照，原地版本都以「包裝＝純版」驗證。
+
+## 11. 實作紀錄（M9.0～M9.5）
+
+分支 `claude/upbeat-einstein-wod16i`。每個里程碑一個 commit；測試 117 → 145 個（20 個檔案），既有測試一行沒改全過。
+e2e：`m0`／`m2`／`m3`／`m5` 既有驗收全過，新增 `m9.cjs`（兩個 split 各改、複製後各改、回到原始、復原到底再重做到底、看原始 B／差異 D）。
+
+### 11.1 和計畫不同的地方
+
+- **Worker 本體拆成 `workerCore.ts`**（純模組、匯出 `handle()`），`worker.ts` 只接訊息；`worker.test.ts` 的假 Worker 真的跑同一套 handler，bench 也直接呼叫它量全流程。
+- **協定細節**：`fork {owner, src, sid?}`（從另一本帳簿複製，不是從版本號）；`replay {owner, src, from, to, …}`（掃描「接在目前 split 之後」要從 split 開始，不只從原始）；`apply` 沒改到任何體素時 head 不前進；`apply` 算到一半失敗時 Worker 整本丟掉、主執行緒立刻 `put` 改前的內容（比「回錯誤再重送」少一個來回）。
+- **畫面請求不呼叫 `ensure`**：過期的版本（apply 還在飛）由 Worker 回錯誤、畫面丟掉，等新的 state 再要；`ensure` 只在改帳簿之前呼叫，否則會把已經原地改過的內容當成舊版本補送。
+- **輪廓快取多一層**：輪廓一模一樣的片共用同一份（`ringCache` 依環的頂點簽名去重），`applyProfileMask` 對同一份只重做一次手勢（輪廓含洞就是這一片結構的邊界，輪廓相同＝結果相同）。fin 這種沿法線擠出的結構，第 2 級從 50 ms 降到 10 ms（×1）。
+- **上限判斷**：非 profile 的 Op 仍在主執行緒用 `previewBox` 判斷（3D 筆刷要同步知道畫不畫得出來，好收掉橘色塊）；profile 的外框要讀襯層，交給 Worker，超過回 `none` 再畫點雲。
+- **P7 做得比計畫多**：除了滑鼠所在格子與 3D hover，拖拉中的第 1 級（`dragPv`）、第 2 級（Worker 回來的 `pv`）、點雲（`liveCells`）也都走 live value，只有主切面、3D、小切面重 render。只做計畫列的兩項時，×1 拖拉的 long task 反而從 63 變 107（每幀多一次 Worker 結果 → 整頁 render）；全部改完是 5～7。
+- **選取層的 key** 是選了哪些結構的 key（不隨 relabel 換編號）＋範圍，不是結構編號；否則每一步編號一變就全量。
+- **BVH 懶建用外接球**（`geometry.boundingSphere`，`toGeometry` 本來就算）而不是外接盒；閒置補建（`requestIdleCallback`）預設開。
+- **主網格快取在即時變色（recolor）時整個作廢**：recolor 直接改 GPU 上的顏色，共用 Mesh 的其他快取組會跟著變。
+- **drawSlice 用 32 位元 LUT**（一次寫一個像素）而不是 r／g／b 三張；`profileBox` 的數字 key 是 `(v+1)·65538 + u + 1`（容得下 −1 的鄰居查詢）。
+- **小切面的預覽**改用 `SlicePreviewLayer`（和主切面一樣淡綠／淡紅標加／拿），不再整張重畫。
+- **順手修的 bug**：頁籤上「⋯」選單的點擊冒泡回頁籤的 `onClick`，「複製這個 split」之後又被切回來源（`m9.cjs` 抓到）。`m0.cjs` 的「右鍵拖平移」改成等一幀再量（最後一次 pointermove 的 render 在下一幀；之前剛好被同一個事件裡別的 setState 同步帶出來）。
+
+### 11.2 量測（雲端容器、headless Chromium 軟體 WebGL、`npm run dev`；v8 欄＝plan v9 開工前的 commit 用同一支 `perf.cjs`）
+
+| 項目 | v8 | v9 |
+| --- | --- | --- |
+| `perf.cjs` ×1「長高 1」按下 → 換上正式網格（JS） | 600～1,100 ms | 420～680 ms |
+| `perf.cjs` ×2 同上 | 1,050～1,230 ms | 480～960 ms |
+| 每一步送 Worker 的請求 | retain、count、diff、mesh、chunks、apply | apply、chunks、layer（＋放開時的 preview） |
+| B 切 20 次送 chunks（×1） | 20 次 | 1 次；geometry 數 2 次之後不再漲 |
+| 復原 → 換上網格（×1／×2） | 250／470 ms | 175／190～225 ms |
+| 2D 拖節點 60 步（×1） | 11.5 s、long task 63 | 5.0～5.3 s、long task 5～7 |
+| 2D 拖節點 60 步（×2） | 14.4 s、long task 161 | 10.6 s、long task 104 |
+| 主切面上滑鼠移動 60 次 | 每次整頁 render | 0 次 |
+| 剖面開著拖拉 60 步 | 每幀新建貼圖＋平面＋邊框 | 新建 0 次（剖口碰到預覽時才重畫） |
+
+×2 拖拉剩下的 long task 主要是 3D 每幀重畫：點雲每幀換、軟體 WebGL 畫 ~500 個 chunk 就超過 50 ms；
+計畫的「≤ 5」在有 GPU 的瀏覽器、正式打包上再量（×1 已經是 5～7）。
+
+### 11.3 沒達到的目標（不再改的理由）
+
+- **×3 一步 < 1 s**：apply 540～960 ms ＋ chunk 250～280 ms。剩下的是外框裡的 kernel 與 relabel 本身（poly 的外框橫跨整個 x），不是複製。
+- **×2 拖 fin 整根的第 2 級 < 40 ms**：外框 170 萬格（襯層要讀到的格數 × 256 片），有快取也要 130 ms；超過即時上限（40 萬）所以本來就畫點雲。上限維持 40 萬（×1 第 2 級 10 ms，放寬到 170 萬會讓 Worker 每幀 > 100 ms、apply 排在後面）。
+- **drawSlice < 1 ms**：×3 的 z／y 切面 1.9～2.5 ms、x 切面 7 ms（每往右一格跨一整個 plane，是記憶體存取）；比舊版快 12×，3D 剖口與小切面拖拉中也不再整張重畫，不再追。
+- **點選基板（×3）< 50 ms**：只掃外框後 190 ms；剩下的是配兩個整個陣列大小的 mask（§10「保留陣列介面」的決定）。

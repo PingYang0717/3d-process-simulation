@@ -8,6 +8,7 @@ import {
   Color,
   DirectionalLight,
   DoubleSide,
+  FrontSide,
   EdgesGeometry,
   LineBasicMaterial,
   LineDashedMaterial,
@@ -1011,6 +1012,14 @@ export function View3D({
     const planes = plane ? [plane] : [];
     for (const o of [c.mesh, c.previewMesh, c.ghostMesh]) o.material.clippingPlanes = planes;
     for (const l of [c.selFill, c.voidMesh, c.voidEdges]) l.material.clippingPlanes = planes;
+    // 背面只有剖開時看得到（從剖口看進去）：沒剖面時只畫正面，GPU 少一半 fragment（plan v9 P17）
+    for (const m of [c.mesh.material, c.previewMesh.material]) {
+      const side = clip ? DoubleSide : FrontSide;
+      if (m.side !== side) {
+        m.side = side;
+        m.needsUpdate = true;
+      }
+    }
     if (!clip) {
       c.cap.visible = c.capEdges.visible = false;
       return;

@@ -101,15 +101,68 @@ function b64Block(text: string, hsize: number, compressed: boolean, le: boolean)
   return out;
 }
 
+const APPENDED = new TextEncoder().encode('<AppendedData');
+/** needle 在 hay 裡第一次出現的位置（逐位元組比對；沒有回傳 −1）。 */
+function findBytes(hay: Uint8Array, needle: Uint8Array) {
+  const first = needle[0];
+  for (let i = hay.indexOf(first); i >= 0 && i <= hay.length - needle.length; i = hay.indexOf(first, i + 1)) {
+    let k = 1;
+    while (k < needle.length && hay[i + k] === needle[k]) k++;
+    if (k === needle.length) return i;
+  }
+  return -1;
+}
+
+/**
+ * ascii 資料（plan v9 P16）：逐字元掃描，不 split 成幾千萬個字串。純整數直接累加；
+ * 有小數點、指數、nan 之類的那一個 token 才交給 Number()。和 split(/\s+/).map(Number) 結果相同。
+ */
+export function parseAscii(body: string, N: number): Float64Array {
+  const out = new Float64Array(N);
+  let n = 0;
+  const L = body.length;
+  let i = 0;
+  while (i < L && n < N) {
+    let c = body.charCodeAt(i);
+    // 空白：space、\t、\n、\r、\f、\v
+    if (c === 32 || (c >= 9 && c <= 13)) {
+      i++;
+      continue;
+    }
+    const s = i;
+    let neg = false;
+    if (c === 45 /* - */ || c === 43 /* + */) {
+      neg = c === 45;
+      i++;
+    }
+    let v = 0;
+    let digits = 0;
+    let simple = true;
+    for (; i < L; i++) {
+      c = body.charCodeAt(i);
+      if (c >= 48 && c <= 57) {
+        v = v * 10 + (c - 48);
+        digits++;
+      } else if (c === 32 || (c >= 9 && c <= 13)) break;
+      else simple = false;
+    }
+    out[n++] = simple && digits && digits < 16 ? (neg ? -v : v) : Number(body.slice(s, i));
+  }
+  if (n < N) return out.subarray(0, n);
+  return out;
+}
+
 /**
  * 讀 .vti。材質陣列挑名稱像 material／region／label／id 的，否則第一個。
  * 整數值 0～254 直接當編號（254 = VOID）；其他（小數、負數、超出範圍）依值重新編號，原本的 0 仍當空。
  */
 export async function decodeVti(buf: ArrayBuffer): Promise<{ vol: Volume; info: VtiInfo; valueMap: Map<number, number> }> {
   const bytes = new Uint8Array(buf);
-  const text = new TextDecoder('latin1').decode(bytes);
-  const appAt = text.indexOf('<AppendedData');
-  const xml = appAt >= 0 ? text.slice(0, appAt) : text;
+  // plan v9 P16：先在位元組裡找 <AppendedData，只把前面那段（XML 標頭）解成字串；後面幾百 MB 的資料不必變字串。
+  // 找不到（ascii／inline base64）就整檔解（資料本來就在 XML 裡）。
+  const latin1 = new TextDecoder('latin1');
+  const appAt = findBytes(bytes, APPENDED);
+  const xml = latin1.decode(appAt >= 0 ? bytes.subarray(0, appAt) : bytes);
 
   const fileTag = xml.match(/<VTKFile\b[^>]*>/);
   const file = fileTag ? attrs(fileTag[0]) : null;
@@ -151,15 +204,20 @@ export async function decodeVti(buf: ArrayBuffer): Promise<{ vol: Volume; info: 
   if (!(N > 0)) throw new Error(`Extent ${ext.join(' ')} 沒有任何格子`);
 
   let values: ArrayLike<number | bigint>;
-  if (format === 'ascii') values = arr.body.trim().split(/\s+/).map(Number);
+  if (format === 'ascii') values = parseAscii(arr.body, N);
   else {
     let block: Uint8Array;
     if (format === 'binary') block = b64Block(arr.body, hsize, compressed, le);
     else {
       if (appAt < 0) throw new Error('format="appended" 但找不到 AppendedData');
-      const enc = attrs(text.slice(appAt, text.indexOf('>', appAt))).encoding ?? 'base64';
-      const start = text.indexOf('_', appAt) + 1 + Number(arr.a.offset ?? 0);
-      block = enc === 'raw' ? bytes.subarray(start) : b64Block(text.slice(start, text.indexOf('<', start)), hsize, compressed, le);
+      const tagEnd = bytes.indexOf(0x3e /* > */, appAt);
+      const enc = attrs(latin1.decode(bytes.subarray(appAt, tagEnd))).encoding ?? 'base64';
+      const start = bytes.indexOf(0x5f /* _ */, appAt) + 1 + Number(arr.a.offset ?? 0);
+      if (enc === 'raw') block = bytes.subarray(start);
+      else {
+        const end = bytes.indexOf(0x3c /* < */, start);
+        block = b64Block(latin1.decode(bytes.subarray(start, end < 0 ? bytes.length : end)), hsize, compressed, le);
+      }
     }
     const data = await readBlock(block, hsize, compressed, le);
     const aligned = data.byteOffset % T.size === 0 ? data : new Uint8Array(data);
@@ -169,13 +227,29 @@ export async function decodeVti(buf: ArrayBuffer): Promise<{ vol: Volume; info: 
 
   const out = new Uint8Array(N);
   const valueMap = new Map<number, number>();
+  // 整數 0～254 直接當編號；型別化陣列的檢查不經過 Number()（BigInt 陣列才要）
+  const isBig = values instanceof BigInt64Array || values instanceof BigUint64Array;
   let direct = true;
-  for (let i = 0; i < N && direct; i++) {
-    const v = Number(values[i]);
-    if (v < 0 || v > 254 || v !== Math.round(v)) direct = false;
-  }
-  if (direct) for (let i = 0; i < N; i++) out[i] = Number(values[i]);
+  if (isBig)
+    for (let i = 0; i < N && direct; i++) {
+      const v = Number(values[i]);
+      if (v < 0 || v > 254 || v !== Math.round(v)) direct = false;
+    }
   else {
+    const vs = values as ArrayLike<number>;
+    for (let i = 0; i < N; i++) {
+      const v = vs[i];
+      if (!(v >= 0 && v <= 254 && v === Math.round(v))) {
+        direct = false;
+        break;
+      }
+    }
+  }
+  if (direct) {
+    if (values instanceof Uint8Array) out.set(values.subarray(0, N));
+    else if (isBig) for (let i = 0; i < N; i++) out[i] = Number(values[i]);
+    else for (let i = 0, vs = values as ArrayLike<number>; i < N; i++) out[i] = vs[i];
+  } else {
     // 依值重新編號：原本的 0 仍當空，其他從 1 起
     let next = 1;
     for (let i = 0; i < N; i++) {

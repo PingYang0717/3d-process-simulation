@@ -250,7 +250,7 @@ export default function Section3DPage() {
             setPv({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
           } else {
             livePv.set({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
-            setLiveCells((c) => (c ? null : c));
+            setLiveCells(null);
           }
         }
         done();
@@ -394,7 +394,9 @@ export default function Section3DPage() {
     if (!makePreview(op, LIVE_PREVIEW_CAP, false)) setLiveCells(cellCloud(op, ed.vol));
   };
   /** 超過即時預覽上限時，3D 畫的加／拿格子（沿範圍擠出；不算 kernel，被擋的不會顯示）。 */
-  const [liveCells, setLiveCells] = useState<CellCloud | null>(null);
+  // 拖拉中每幀都換：同樣不進整頁的 state，只有 3D 重 render（plan v9 P7）
+  const liveCells = useLiveValue<CellCloud | null>(null);
+  const setLiveCells = liveCells.set;
   /** 「看這些片」：跳到下一個有被擋住的片（循環）。 */
   const jumpBlocked = () => {
     const r = ed.report;
@@ -960,6 +962,8 @@ export default function Section3DPage() {
         </Space.Compact>
       </div>
       <div className="canvas-wrap" ref={wrapRef}>
+        <WithLivePv live={liveCells} pv={null}>
+          {(cells) => (
         <WithLivePv live={livePv} pv={pv}>
           {(p) => (
             <View3D
@@ -979,7 +983,7 @@ export default function Section3DPage() {
               nmPerVoxel={ed.nmPerVoxel}
               orig={ed.orig.vol}
               preview={p}
-              cells={liveCells}
+              cells={cells}
               onPreview={(op) => {
                 if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
                 endLive();
@@ -1008,6 +1012,8 @@ export default function Section3DPage() {
               translucent={translucent}
               busy={!!ed.busy}
             />
+          )}
+        </WithLivePv>
           )}
         </WithLivePv>
         <div className="viewbar">

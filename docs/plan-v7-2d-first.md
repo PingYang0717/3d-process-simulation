@@ -430,6 +430,9 @@ Op 多存 `gesture: {kind:'edge'|'node', ref: 正規化座標, delta}`；每片�
 
 量法：`scripts/bench.ts`（把本輪 `dist/bench.ts` 收進 repo）跑 Worker 核心；端到端用 Playwright 腳本（本輪 `smoke.cjs` 收進 `scripts/e2e/`）量「放開 → `.mesh-busy` 消失」。
 
+plan v9 之後（`docs/plan-v9-performance.md` §11，headless 軟體 WebGL）：「長高 1」按下 → 換上正式網格 ×1 420～680 ms、×2 480～960 ms；
+×3 Worker 一步 apply 540～960 ms ＋ chunk 250～280 ms。每一步不再整個陣列複製，主執行緒貼補丁 ×3 < 11 ms。
+
 ## 9. 程式結構與每個檔案要改什麼
 
 新增

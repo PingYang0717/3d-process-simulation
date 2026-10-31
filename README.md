@@ -46,7 +46,7 @@ npm run build      # 型別檢查 + 打包
 | `src/volume/scope.ts` | `Scope`（軸＋起止）、`scopeBox`／`clipBox`／`inScope`／`clampScope`／`fullScope` |
 | `src/volume/preview.ts` | `previewBox`／`previewOp`：一步操作會動到的裁切範圍與範圍內的結果（即時預覽用，主執行緒） |
 | `src/volume/vti.ts` | `decodeVti`（各種編碼、zlib 用 `DecompressionStream`）、`encodeVti`（UInt8 CellData、appended raw） |
-| `src/volume/worker.ts`、`client.ts` | Worker 入口（load／put／retain／replay／mesh／diffMesh／diff／count）與主執行緒的 `call()`；原始與每個 split 目前的結果常駐在 Worker，主執行緒只送編號。`client.ts` 看到 `globalThis.__WORKER_SRC__` 就用 Blob 建 Worker（單檔 prototype 用） |
+| `src/volume/workerCore.ts`、`worker.ts`、`client.ts` | Worker 本體（每個 split 一本帳簿：load／fork／put／drop／apply／derive／replay／chunks／layer／preview／diffMesh；diff、count 留給測試）、Worker 入口與主執行緒的 `call()`；主執行緒只送版本號、owner 與小資料。`client.ts` 看到 `globalThis.__WORKER_SRC__` 就用 Blob 建 Worker（單檔 prototype 用） |
 | `src/volume/zip.ts` | `zipStore`（CRC32，store only） |
 | `src/pages/Section3D/editor.ts` | `useEditor`（async）：splits、選取、範圍（`scope`／`scopeMode`／`editAxis`）、3D 雕刻與自動放大設定、commit → Worker、undo／redo（每 split 10 步）、busy、diff／ledger、鍵盤、`loadVolume(vol, meta)` |
 | `src/pages/Section3D/views.tsx` | `View3D`（Worker greedy mesh、選取層沿法線外推、差異模式兩層、三軸剖面＋剖口貼圖、命中、筆刷圈與拖拉預覽、即時預覽網格＋主網格挖洞 shader、視角預設、座標軸、即時變色 `recolor`）、`drawSlice`、`SliceView`。按下用 capture 階段的原生事件判斷筆刷，OrbitControls 才不會記到一個收不到放開的指標 |
@@ -58,35 +58,49 @@ npm run build      # 型別檢查 + 打包
 | `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
 | `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、手勢 → Op）、`snap.ts`（拖法：浮點 ghost 與放開時的整數位移）、`model.ts`（持久幾何層：建立、位移、驗證、重描保留 id、每版本快照）、`relative.ts`、`mirror.ts` |
 | `src/pages/Section3D/SlicePreviewLayer.tsx`、`cellCloud.ts` | 主切面的預覽層（只重畫預覽那一塊，拖拉中淡綠／淡紅）；超過即時預覽上限時 3D 的加／拿格子點雲 |
-| `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算、補丁、chunk 網格、profile Op、一步的報告 |
+| `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算（`applyOpInPlace` 原地）、補丁（`applyStepInPlace`、`carryStepStats`）、chunk 網格、profile Op、一步的報告 |
+| `src/volume/previewMesh.ts`、`meshBuilder.ts`、`src/pages/Section3D/drawSlice.ts`、`tables.ts`、`src/ui/liveValue.ts` | 預覽網格（Worker 與主執行緒共用）、網格建構器、LUT 版切面像素、送 Worker 的畫法表、不經整頁 state 的即時值（plan v9） |
 | `src/ui/` | Swatch、StatTile、download、theme（antd 主題；色票和 `styles.css` 的 `:root` 變數對齊）、persist（`usePersisted`：欄寬、筆刷、襯層跟推、nm 比例、標紅存 localStorage；`overlayOpen`：Modal／Drawer 開著時單鍵快捷鍵不動 3D） |
 
 面板不直接碰 Volume；所有改體素的路徑都經過 `useEditor` 的 `commit`，所以每一步都有 Op 記錄、都能復原、都能在別的 split 重播。
 
 ## 大陣列的效能
 
-- **Worker 常駐狀態**：原始與每個 split 目前的結果放在 Worker，用版本號（`EditState.version`，全域遞增；改名不換號）當編號與 diff／計數／網格快取的 key；一步操作只送編號、Op 與結構清單。
-- **一步只在外框裡算**（`apply.ts`）：裁下這一步會動到的範圍（`previewBox`），在裡面跑同一組純函式，找出真正改到的外框，回傳補丁（外框＋前後資料）；主執行緒拿補丁貼到目前陣列做出新版本。和 `applyOp` 逐體素相同（`apply.test.ts`）。
-- **核心規則一套**（`kernel.ts`）：加（空氣填、薄襯層推開、厚的擋住）、拿（襯層跟退）、搬（可帶殼）；`growMask`／`levelMask`／`translateMask` 都呼叫它，和改寫前的實作逐體素相同（`kernel.test.ts`）。
-- **relabel 吃外框**（`relabelFast`）：只看改到的外框（多留 1 格）裡有體素的結構；掉了體素的才重新 flood fill，只長出來的整塊照舊、新體素用 union-find 接上；名稱與 key 用同一套投票，和整個重算相同。沒碰到的結構編號不變，labels 補丁只有重新標記的範圍。
-- **復原存補丁**：每個 split 50 步，只存改到的外框那麼大；復原／重做在主執行緒貼補丁，Worker 同時從目前版本做出同一個版本。
-- **網格切 chunk**（`chunks.ts`）：3,000 萬以下 32³、以上 64³；Worker 快取每個版本的 chunk 網格，一步之後只重算和補丁外框相交的 chunk，主執行緒只換那幾個 Mesh（各自一棵 BVH）。差異模式、改隱藏、改顏色才整個重算。
-- **diff 與體積帳用差量**：Worker 依上一版在補丁外框裡更新。
-- **只在有變化時重畫 3D**：鏡頭動、動畫、滑鼠、React 更新、Worker 結果到了才畫，靜止時不佔主執行緒。
+plan v9（`docs/plan-v9-performance.md`）之後：
+
+- **每本帳簿只有一份**：原始是 owner `base`（永遠不寫），每個 split 第一次改的時候複製一次原始（主執行緒與 Worker 各一次，`own`／`fork`），之後每一步原地貼補丁，不再整個陣列影印。Worker 用 `heads`（owner → 版本號）記每本帳簿現在是哪一版；畫面要網格時送版本號，過期的版本 Worker 回錯誤、主執行緒丟掉等新的。復原／重做也是原地貼「改前」／「改後」，逐位元組相同（`patch.test.ts`）。複製 split 時兩本各自一份（`worker.test.ts`、`scripts/e2e/m9.cjs`）。
+- **一步只在外框裡算**（`apply.ts`）：裁下這一步會動到的範圍（`previewBox`），在裡面跑同一組純函式，找出真正改到的外框 R；先裁「改前」再貼，原地 relabel（`relabelInPlace`：任何寫入之前先把 R ∪ 碰到的結構外框裡的舊 labels 裁下來當快照）。純函式 `applyOpLocal`／`relabelFast`／`applyStep` 都是「複製後呼叫原地版」的包裝，和 `applyOp` 逐體素相同（`apply.test.ts`）。
+- **核心規則一套**（`kernel.ts`）：加（空氣填、薄襯層推開、厚的擋住）、拿（襯層跟退）、搬（可帶殼）；`growMask`／`levelMask`／`translateMask` 都呼叫它。
+- **diff 與體積帳差量更新**：主執行緒與 Worker 各自在補丁外框裡更新（`carryStepStats`），不互傳、不快取整份 mask；每一步只送 `apply`、`chunks`（有選取再加 `layer`）。
+- **網格切 chunk**（`chunks.ts`）：3,000 萬以下 32³、以上 64³；一步之後只重算和補丁外框相交的 chunk。chunk 網格快取在主執行緒（最近 3 組，沒動到的 chunk 在多組間共用），看原始（B）、切 split、復原到快取裡的版本不必再跟 Worker 要。BVH 等射線真的碰到那個 chunk 才建（閒置時補建）。
+- **選取層、空洞層也切 chunk**：選取層的 key 是選了哪些結構（key 不隨 relabel 換編號）＋範圍，每一步只重算 relabel 範圍 S 碰到的 chunk；選到基板也只在第一次付全量。
+- **拖拉第 2 級預覽在 Worker**：主執行緒每幀只算主切面這一片（第 1 級）；整個範圍的預覽與預覽網格在 Worker（同時最多一個在飛、永遠送最新的）。每片的輪廓同一次拖拉只描一次，輪廓一模一樣的片共用一份、只重做一次手勢。
+- **畫面層不重 render**：滑鼠所在的格子、3D 的 hover 說明、拖拉中每幀換的預覽與點雲都走 live value（`ui/liveValue.ts`），只有用到的小元件重 render；主切面上滑鼠移動整頁 render 0 次。剖口貼圖用同一張 canvas 與同一個貼圖物件；切面像素用 LUT（`drawSlice.ts`，和舊版逐位元組相同）。
+- **只在有變化時重畫 3D**：鏡頭動、動畫、滑鼠、會改畫面的 props、Worker 結果到了才畫；沒剖開時只畫正面。
 - **Worker 忙時排隊**：最多再排 3 步，依序接在前一步的結果後面；再多就提示「還在算前面的步驟」。排隊中按 Ctrl+Z 先清掉排隊的步驟。
-- **點選**：three-mesh-bvh。
 - **選取層不閃爍**：選取層頂點沿法線外推 0.03 voxel、不寫深度，主網格開 polygonOffset；相機 near 依陣列大小設。
-- **換材質即時**：點下去先在主執行緒把現有網格裡屬於選取體素的三角形改色（三角形重心沿法線退半格反推體素），Worker 的正式網格之後覆蓋。
+- **換材質即時**：點下去先在主執行緒把現有網格裡屬於選取體素的三角形改色，Worker 的正式網格之後覆蓋（主網格快取同時作廢）。
 
-量法：`npx vite-node scripts/bench.ts 1 2 3`（Worker 核心）、`node scripts/e2e/perf.cjs <url> <scale>`（端到端）。雲端容器、Node 22（單位 ms，會有雜訊）：
+量法：`npx vite-node scripts/bench.ts [step|mem|drag|draw] [scale ...]`、`node scripts/e2e/perf.cjs <url> <scale>`（端到端，需要 `npm run dev`）。雲端容器、Node 22、headless Chromium 軟體 WebGL（單位 ms，有雜訊）：
 
-| 範例 | 舊：整個陣列重播 | 新：外框裡算＋relabel | 主執行緒貼補丁 | 重算的 chunk | 舊：整個網格重畫 |
-| --- | --- | --- | --- | --- | --- |
-| ×1（197 萬） | 170～280 | 90～110 | 10～30 | 10/60 個，70～180 | 240～300 |
-| ×2（1,570 萬） | 580～800 | 180～230 | 65～80 | 16～30/480 個，30～250 | 1,100～1,200 |
-| ×3（5,300 萬） | 2,400～2,500 | 710～760 | 950～1,170 | 12～16/240 個，120～220 | 5,600 |
+| 項目 | v8 | v9 |
+| --- | --- | --- |
+| 一步「長高 1」整陣列複製（`bench.ts step`） | ×2 每步 6 次（≈ 150 MB） | 0（只有第一次改 split 時 own 一次） |
+| 主執行緒貼補丁（×1／×2／×3） | 10／65～80／950～1,170 | 0.2～2／0.3～3／0.8～11 |
+| Worker 一步：外框裡算＋relabel（×2／×3） | 180～320／710～760 | 90～350／540～960 |
+| 50 步後記憶體增量（×2，`bench.ts mem`） | 最多 50 份 diff mask（≈ 785 MB） | 10～17 MB（補丁 247 MB 在復原堆疊裡） |
+| 選到基板後每一步的選取層（×2） | 每步整個外框重做（≈ 0.9 s） | 60～90 個 chunk，110～190 ms（第一次全量 830～950 ms） |
+| 端到端「長高 1」按下 → 換上正式網格（`perf.cjs`，×1／×2） | 600～1,100／1,050～1,230 | 420～680／480～960 |
+| 復原 → 換上網格（×1／×2） | 250／470 | 175／225 |
+| B 切 20 次（×1） | 每次送 chunks（20 次） | 只有第一次（1 次），geometry 數不漲 |
+| 拖拉第 2 級（Worker，fin 整根，`bench.ts drag` ×1） | 主執行緒 50～60 ms／幀 | Worker 10 ms／幀（有輪廓快取） |
+| 2D 拖節點 60 步（`perf.cjs` ×1） | 11.5 s、long task 63 | 5.0～5.3 s、long task 5～7 |
+| 2D 拖節點 60 步（`perf.cjs` ×2） | 14.4 s、long task 161 | 10.6 s、long task 104（剩下的多是軟體 WebGL 每幀重畫 3D） |
+| 主切面上滑鼠移動 60 次（`perf.cjs`） | 每次整頁 render | 整頁 render 0 次 |
+| drawSlice 一張（×3，480×384 那一面） | 33 ms | 2.5 ms |
+| 點選一個結構的掃描（×3，poly／基板） | 484／534 | 76／190 |
 
-端到端（headless Chromium、軟體 WebGL）：「長高 1 格」按下到換上正式網格，×1 約 0.65～0.85 s、×2 約 1.1～1.6 s；剩下的大多是軟體繪圖（profile 裡的 native 時間），有 GPU 的瀏覽器會快很多。plan 的目標（1,800 萬 < 200 ms）在這個容器裡沒有達到：主要卡在 ×2 以上 relabel 要複製整份 labels（Int32，4 bytes／voxel）與主執行緒貼補丁時的同樣複製。
+沒達到 plan v9 §2 目標的：×3 一步（apply＋chunk ≈ 0.8～1.2 s，目標 < 1 s）、×2 拖 fin 整根的第 2 級（外框 170 萬格超過即時上限 40 萬，在 Worker 也要 130 ms，所以照舊畫點雲）、drawSlice ×3 仍 2～7 ms（目標 < 1 ms；沿 x 的切面是跨 plane 讀記憶體）、×3 點選基板 190 ms（目標 < 50 ms；結果陣列仍是整個陣列大小，見 plan v9 §10）。
 
 ## 匯出
 

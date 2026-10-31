@@ -1,7 +1,7 @@
 // 切面畫成像素（plan v9 P11）：主切面、下方小切面、3D 剖面貼圖共用，所以逐像素相同。
 // LUT 版：材質色（隱藏的折成淡灰）與「混藍」各一張 256 色表；依軸特化索引遞增（不呼叫 toVoxel／idx、不配陣列）；
-// 預覽盒用列區間判斷；差異描紅邊在同一份像素裡做 4 鄰居判斷，最後一次 putImageData。
-// 輸出和舊版逐位元組相同（drawSlice.test.ts 留著舊版當參考）。
+// 預覽盒用列區間判斷；差異描邊在同一份像素裡做 4 鄰居判斷，最後一次 putImageData。
+// 沒有 diff 時輸出和舊版逐位元組相同（drawSlice.test.ts 留著舊版當參考；差異的顏色 plan v10 改過）。
 import type { Axis, Vec3, Volume } from '../../volume/volume';
 import type { Preview } from '../../volume/preview';
 
@@ -9,7 +9,13 @@ import type { Preview } from '../../volume/preview';
 export const SEL_RGB: Vec3 = [22, 119, 255];
 const HIDDEN_RGB = 245;
 const MISSING: Vec3 = [255, 0, 255];
-const DIFF_RGB: Vec3 = [255, 77, 79];
+/**
+ * 差異模式（plan v10 §4.3）：改過的描深藍邊（和 16 色調色盤每一色對比度 ≥ 3:1，plan 原訂的 #1677ff 只有 1.2～2.9）、
+ * 被拿掉的（現在是空、和原始不同）整格紅。改後模式不傳 diff，什麼都不標。
+ */
+export const DIFF_EDGE_HEX = '#003a8c';
+export const DIFF_EDGE_RGB: Vec3 = [0, 58, 140];
+export const REMOVED_RGB: Vec3 = [255, 77, 79];
 
 /** 切面像素大小（u 往右、v 往下）。 */
 export const sliceSize = (vol: { X: number; Y: number; Z: number }, axis: Axis): [number, number] =>
@@ -90,21 +96,24 @@ export function sliceRGBA(
     }
   }
   if (diff) {
-    const red = (DIFF_RGB[0] | (DIFF_RGB[1] << 8) | (DIFF_RGB[2] << 16) | (255 << 24)) >>> 0;
+    const edge = (DIFF_EDGE_RGB[0] | (DIFF_EDGE_RGB[1] << 8) | (DIFF_EDGE_RGB[2] << 16) | (255 << 24)) >>> 0;
+    const red = (REMOVED_RGB[0] | (REMOVED_RGB[1] << 8) | (REMOVED_RGB[2] << 16) | (255 << 24)) >>> 0;
     for (let v = 0, p = 0; v < H; v++) {
       const r = row0 + v * sv;
       const edgeRow = v === 0 || v === H - 1;
       for (let u = 0, i = r; u < W; u++, i += su, p++) {
         if (!diff[i]) continue;
+        // 改過而現在是空＝被拿掉：整格紅
+        if (!d[i]) px[p] = red;
         // 4 鄰居有一個不是改過的（或出界）＝邊
-        if (edgeRow || u === 0 || u === W - 1 || !diff[i - su] || !diff[i + su] || !diff[i - sv] || !diff[i + sv]) px[p] = red;
+        else if (edgeRow || u === 0 || u === W - 1 || !diff[i - su] || !diff[i + su] || !diff[i - sv] || !diff[i + sv]) px[p] = edge;
       }
     }
   }
   return { W, H, data };
 }
 
-/** 把一個切面畫到 canvas：材質顏色、隱藏材質淡灰、選取混藍、差異描紅邊；patch＝即時預覽蓋上去。 */
+/** 把一個切面畫到 canvas：材質顏色、隱藏材質淡灰、選取混藍、差異（只有差異模式傳）描藍邊＋拿掉的紅；patch＝即時預覽蓋上去。 */
 export function drawSlice(
   cv: HTMLCanvasElement,
   vol: Volume,

@@ -22,20 +22,16 @@ function Row({ label, sub, children }: { label: string; sub?: string; children: 
   );
 }
 
-/** 不常動的東西：襯層跟著推、回填、3D 雕刻、自動放大、標紅、nm 比例、重新載入。筆刷大小在 3D 工具列。 */
+/** 不常動的東西（plan v10 §4.7）：襯層跟著推、回填、自動放大、多選對應、大操作先確認、nm 比例、重新載入。畫面怎麼顯示在 3D 上方「顯示」。 */
 export function SettingsDrawer({
   ed,
   open,
   onClose,
-  showDiff,
-  setShowDiff,
   onLoad,
 }: {
   ed: Editor;
   open: boolean;
   onClose: () => void;
-  showDiff: boolean;
-  setShowDiff: (v: boolean) => void;
   onLoad: () => void;
 }) {
   return (
@@ -54,34 +50,9 @@ export function SettingsDrawer({
             />
           </Row>
         </Section>
-        <Section title="3D 與 2D">
-          <Row label="在 3D 上雕刻（進階）" sub="關著時 3D 上怎麼拖都只轉視角；打開後已選結構的面上左鍵拖＝筆刷">
-            <Switch checked={ed.sculpt3d} onChange={ed.setSculpt3d} />
-          </Row>
+        <Section title="2D 剖面">
           <Row label="選到結構時自動放大到它" sub="2D 編輯的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />
-          </Row>
-          <Row label="2D 輪廓顯示" sub="幾何線：拖過的斜邊是一條直線，放大到 8× 以上下面淡淡疊著真正的格子邊界；階梯：一直畫格子邊界">
-            <Select
-              value={ed.outlineStyle}
-              onChange={ed.setOutlineStyle}
-              style={{ width: 110 }}
-              options={[
-                { value: 'geometry' as const, label: '幾何線' },
-                { value: 'stairs' as const, label: '階梯' },
-              ]}
-            />
-          </Row>
-          <Row label="2D 拖拉吸附" sub="放開才吸附：輪廓跟手、旁邊同時標出放開後會變成的格子；邊拖邊吸附：一格一格跳">
-            <Select
-              value={ed.snapMode}
-              onChange={ed.setSnapMode}
-              style={{ width: 130 }}
-              options={[
-                { value: 'release' as const, label: '放開才吸附' },
-                { value: 'live' as const, label: '邊拖邊吸附' },
-              ]}
-            />
           </Row>
           <Row label="多選時對應到長得一樣的結構" sub="在一根 fin 上拖，其他長得一樣的 fin 一起改（同材質、長寬比與面積相近）">
             <Switch checked={ed.mirror} onChange={ed.setMirror} />
@@ -97,10 +68,7 @@ export function SettingsDrawer({
             />
           </Row>
         </Section>
-        <Section title="畫面">
-          <Row label="改過的地方標紅">
-            <Switch checked={showDiff} onChange={setShowDiff} />
-          </Row>
+        <Section title="單位">
           <Row label="1 voxel = ? nm" sub="只影響顯示的 nm 與 nm → voxel 換算">
             <InputNumber
               min={0.001}

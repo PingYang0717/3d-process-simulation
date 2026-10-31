@@ -9,7 +9,7 @@ const { Text } = Typography;
 export const AXIS_NAME: Record<Axis, string> = { z: 'XY 正面', y: 'XZ 上視', x: 'YZ 側面' };
 
 /** 並排比較：每個 split 一張同位置切面，紅框＝和原始不同。 */
-export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis: Axis; setAxis: (a: Axis) => void; showDiff: boolean }) {
+export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; setAxis: (a: Axis) => void }) {
   const at = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
   const cards = [
     { id: BASE_ID, name: '原始', vol: ed.orig.vol, L: ed.orig.L, ops: [] as typeof ed.splits[number]['ops'] },
@@ -99,7 +99,7 @@ export function CompareView({ ed, axis, setAxis, showDiff }: { ed: Editor; axis:
                   selMask={null}
                   cursor={ed.cursor}
                   scope={null}
-                  diff={showDiff && diff ? diff.mask : null}
+                  diff={diff ? diff.mask : null}
                   onPick={(p) => ed.setCursor(p)}
                   onStep={(d) => ed.stepCursor(axis, d)}
                 />

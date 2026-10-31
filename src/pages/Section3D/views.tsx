@@ -53,7 +53,7 @@ import type { EditState, Local, Op } from '../../volume/ops';
 import type { Preview } from '../../volume/preview';
 import { HOLE_EPS, previewMesh } from '../../volume/previewMesh';
 import { hiddenTable, palette } from './tables';
-import { SEL_RGB, drawSlice } from './drawSlice';
+import { DIFF_EDGE_HEX, SEL_RGB, drawSlice } from './drawSlice';
 import { SlicePreviewLayer } from './SlicePreviewLayer';
 import type { CellCloud } from './cellCloud';
 import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
@@ -331,10 +331,10 @@ const hidePreview = (c: Ctx) => {
 export { drawSlice } from './drawSlice';
 
 /**
- * 3D：Worker 做 greedy mesh（同材質同朝向的面合併成大矩形），改過的體素混紅；
+ * 3D：Worker 做 greedy mesh（同材質同朝向的面合併成大矩形），改後模式不染色（plan v10 §4.3）；
  * 選取半透明網格（沿法線外推 0.03 避免共面）＋bbox 線框、橘色十字、剖面（三軸、剖口貼真正的切面圖）。
  * 滑鼠拖拉只做筆刷雕刻：按住已選結構的面沿法線拖＝局部長／縮；補平模式點一下＝補到那一面。
- * 整面長縮、整塊移動都在右欄輸入。差異模式：沒改的半透明灰、改過的實色、拿掉的紅。
+ * 整面長縮、整塊移動都在右欄輸入。差異模式：沒改的半透明灰、改過的實色＋深藍邊、拿掉的紅。
  * 體素 y 向下，所以網格 scale y = −1 再平移，讓畫面上方 = y 索引小。
  */
 export function View3D({
@@ -347,7 +347,6 @@ export function View3D({
   selBBox,
   cursor,
   clip,
-  showDiff,
   diffMask,
   mode,
   brush,
@@ -380,9 +379,7 @@ export function View3D({
   selBBox: BBox | null;
   cursor: Vec3;
   clip: Clip | null;
-  /** 改過的體素混紅（和原始比，Worker 算）。 */
-  showDiff: boolean;
-  /** 差異 mask（剖面貼圖描紅邊用）。 */
+  /** 差異 mask（只有差異模式傳；剖面貼圖描邊用）。改後模式不標任何顏色（plan v10 §4.3）。 */
   diffMask: Uint8Array | null;
   mode: ViewMode;
   brush: Brush;
@@ -425,6 +422,10 @@ export function View3D({
   const clipRef = useRef(clip);
   clipRef.current = clip;
   const dragRef = useRef<Drag | null>(null);
+  /** 射線命中（掛載時的滾輪、旋轉中心用最新一次 render 的 hit）。 */
+  const hitRef = useRef<(x: number, y: number) => { world: Vector3 } | null>(() => null);
+  /** 鏡頭操作（掛載時建立）：旋轉前定中心、雙擊對準。 */
+  const camRef = useRef<{ pivotAt: (x: number, y: number) => void; lookAtPoint: (p: Vector3) => void } | null>(null);
   /** 左鍵或右鍵按下的位置（判斷是點還是拖）。 */
   const downRef = useRef<{ x: number; y: number; button: number } | null>(null);
   /** 背景點一下要延後清選取：雙擊背景（回全貌）不該順便清掉。 */
@@ -442,7 +443,7 @@ export function View3D({
   };
   // 會改場景的 props 變了才多畫兩格（plan v9 P7：滑鼠在別處移動、父元件重 render 不必重畫 3D）
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(kick, [state, materials, hidden, selMask, selComps, scope, selBBox, cursor, clip, showDiff, diffMask, mode, brush, preview, cells, xray, translucent, busy, meshing]);
+  useEffect(kick, [state, materials, hidden, selMask, selComps, scope, selBBox, cursor, clip, diffMask, mode, brush, preview, cells, xray, translucent, busy, meshing]);
   const meshingRef = useRef(false);
   meshingRef.current = meshing;
   const busyRef = useRef(busy);
@@ -470,12 +471,18 @@ export function View3D({
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
     controls.screenSpacePanning = true;
-    // 中鍵也能轉視角：選取的結構佔滿畫面時，左鍵是筆刷，還有中鍵（或 Alt＋左鍵）可以轉
+    // 中鍵也能轉視角（把手模式裡左鍵按在把手上是編輯，其他地方一律轉視角）
     controls.mouseButtons = { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.ROTATE, RIGHT: MOUSE.PAN };
-    // 滾輪朝游標縮放；不能縮到模型裡面、也不能退到看不見
-    controls.zoomToCursor = true;
+    // 滾輪自己接（plan v10 §4.1）：OrbitControls 的 zoomToCursor＋screenSpacePanning 每滾一下都把 target
+    // 重設到「相機正前方、距離＝新半徑」的點，滾幾下旋轉中心就飄到模型外，之後怎麼拖都拉不回來
+    controls.enableZoom = false;
     controls.minDistance = size * 0.08;
     controls.maxDistance = size * 8;
+    // 極點留一點：正上方也能繼續拖
+    controls.minPolarAngle = 0.02;
+    controls.maxPolarAngle = Math.PI - 0.02;
+    // 開發模式：e2e（scripts/e2e/m10.cjs）讀旋轉中心
+    if (import.meta.env.DEV) (window as unknown as { __controls?: OrbitControls }).__controls = controls;
     const center = new Vector3(vol.X / 2, vol.Y / 2, vol.Z / 2);
     const ISO = new Vector3(0.55, 0.38, 0.74).normalize();
     let anim: CamAnim | null = null;
@@ -522,7 +529,7 @@ export function View3D({
         preset === 'front'
           ? new Vector3(0, 0, 1)
           : preset === 'top'
-            ? new Vector3(0, 1, 0.0005).normalize()
+            ? new Vector3(0, 1, 0.035).normalize()
             : preset === 'side'
               ? new Vector3(-1, 0, 0)
               : preset === 'fit'
@@ -537,6 +544,88 @@ export function View3D({
       moveTo(pos, target, preset === 'home' && !ctxRef.current);
     };
     setView('home');
+    /** 視線方向上、和 h 同深度的點（旋轉中心放這裡：視線方向不變，畫面不跳）。 */
+    const depthPoint = (pos: Vector3, h: Vector3) => {
+      const v = camera.getWorldDirection(new Vector3());
+      return pos.clone().addScaledVector(v, Math.max(1e-3, h.clone().sub(pos).dot(v)));
+    };
+    /** 距離下限：有選取時跟著選取的大小（可以貼近小結構），沒有時整個模型的 8%。 */
+    const minDist = () => {
+      const b = bboxRef.current;
+      return b ? Math.max(1, 0.3 * Math.hypot(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1)) : size * 0.08;
+    };
+    /** 滾輪：朝游標下的實際表面縮放，旋轉中心落在那個面上；沒打到東西就朝現在的中心縮放、中心不動。 */
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      anim = null;
+      const s = Math.exp(-e.deltaY * 0.0015);
+      const pos = camera.position;
+      const maxD = controls.maxDistance;
+      const minD = Math.min(minDist(), maxD);
+      const h = hitRef.current(e.clientX, e.clientY);
+      if (h) {
+        const H = h.world.clone();
+        const v = camera.getWorldDirection(new Vector3());
+        const d0 = H.clone().sub(pos).dot(v);
+        if (d0 > 1e-3) {
+          let f = 1 - 1 / s;
+          // 深度 d0·(1−f) 夾在 [minD, maxD]
+          f = Math.min(f, 1 - minD / d0);
+          f = Math.max(f, 1 - maxD / d0);
+          if (f > 0 || s < 1) {
+            pos.addScaledVector(H.clone().sub(pos), f);
+            controls.target.copy(depthPoint(pos, H));
+          }
+          controls.update();
+          scheduleRecenter();
+          return;
+        }
+      }
+      const off = pos.clone().sub(controls.target);
+      const d = Math.max(minD, Math.min(maxD, off.length() / s));
+      pos.copy(controls.target).addScaledVector(off.normalize(), d);
+      controls.update();
+      scheduleRecenter();
+    };
+    /** 旋轉開始：中心放到游標下（只改深度，不改視線方向）。 */
+    const pivotAt = (clientX: number, clientY: number) => {
+      const h = hitRef.current(clientX, clientY);
+      if (!h) return;
+      anim = null;
+      controls.target.copy(depthPoint(camera.position, h.world));
+      controls.update();
+    };
+    /** 雙擊模型：對準那個點（有動畫，距離不變）。 */
+    const lookAtPoint = (p: Vector3) => {
+      const dist = camera.position.distanceTo(controls.target);
+      const v = camera.getWorldDirection(new Vector3());
+      moveTo(p.clone().addScaledVector(v, -dist), p.clone());
+    };
+    /**
+     * 自動回正：旋轉中心跑到模型（放大 25%）外、相機退得太遠、或整個模型都在畫面外 → 300 ms 把中心拉回模型中心
+     * （相機位置不動，只轉頭）。滾輪連續滾的時候等停下來再判斷。
+     */
+    let recenterTimer: ReturnType<typeof setTimeout> | null = null;
+    const recenter = () => {
+      recenterTimer = null;
+      if (anim) return;
+      const t = controls.target;
+      const m = 0.25;
+      const out = (x: number, n: number) => x < -n * m || x > n * (1 + m);
+      const far = camera.position.distanceTo(center) > fullRadius() * 3;
+      let anyIn = false;
+      const p = new Vector3();
+      for (const x of [0, vol.X]) for (const y of [0, vol.Y]) for (const z of [0, vol.Z]) {
+        p.set(x, y, z).project(camera);
+        if (p.z < 1 && Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1) anyIn = true;
+      }
+      if (out(t.x, vol.X) || out(t.y, vol.Y) || out(t.z, vol.Z) || far || !anyIn) moveTo(camera.position.clone(), center.clone());
+    };
+    const scheduleRecenter = () => {
+      if (recenterTimer) clearTimeout(recenterTimer);
+      recenterTimer = setTimeout(recenter, 250);
+    };
+    controls.addEventListener('end', scheduleRecenter);
     scene.add(new AmbientLight(0xffffff, 0.8));
     const key = new DirectionalLight(0xffffff, 0.85);
     key.position.set(1, 2, 1.5);
@@ -575,8 +664,8 @@ export function View3D({
       1,
     );
     ghostMesh.raycast = lazyRaycast;
-    // 差異模式：改過的部分描紅邊，和半透明的「沒改」分開
-    const changedEdges = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0xff4d4f })), 2);
+    // 差異模式：改過的部分描深藍邊（紅留給「被拿掉的」），和半透明的「沒改」分開
+    const changedEdges = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: DIFF_EDGE_HEX })), 2);
     changedEdges.visible = false;
     const layerOf = <T extends Mesh | LineSegments>(material: ThreeMaterial, order: number): Layer<T> => {
       const group = new Group();
@@ -674,6 +763,8 @@ export function View3D({
       kick();
     };
     handle.current = { setView, recolor, flash };
+    camRef.current = { pivotAt, lookAtPoint };
+    host.addEventListener('wheel', onWheel, { passive: false });
 
     const ro = new ResizeObserver(() => {
       const w = host.clientWidth;
@@ -771,6 +862,10 @@ export function View3D({
       flashTimer.forEach(clearTimeout);
       ro.disconnect();
       host.removeEventListener('pointerdown', onDown, { capture: true });
+      host.removeEventListener('wheel', onWheel);
+      controls.removeEventListener('end', scheduleRecenter);
+      if (recenterTimer) clearTimeout(recenterTimer);
+      camRef.current = null;
       controls.dispose();
       scene.traverse((o) => {
         if (o instanceof Mesh || o instanceof LineSegments || o instanceof LineLoop) {
@@ -816,7 +911,7 @@ export function View3D({
             c.changedEdges.visible = true;
           })
         : (() => {
-            const key = `${look}|${showDiff}`;
+            const key = look;
             const sid = sidOf(state);
             const done = (n: number, full: boolean) => {
               // 量測用（scripts/e2e/perf.cjs）：最近一次換上正式網格的時間與換了幾個 chunk
@@ -834,14 +929,14 @@ export function View3D({
               return Promise.resolve();
             }
             const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
-            return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials), base }).then((r) => {
+            return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: false, palette: palette(materials), base }).then((r) => {
               if (seq !== meshSeq.current || !ctxRef.current) return;
               showParts(c, nextParts(c, r.full ? null : c.parts, r.items), { sid, key }, true);
               done(r.items.length, r.full);
             });
           })();
     req.then(() => (setMeshing(false), kick())).catch(() => setMeshing(false));
-  }, [state, materials, hidden, showDiff, mode]);
+  }, [state, materials, hidden, mode]);
 
   useEffect(() => {
     const c = ctxRef.current;
@@ -912,7 +1007,7 @@ export function View3D({
       previewMesh(vol, b, preview.data, (id) => hidden.has(id), (code) => {
         const [r, g, bl] = rgb.get(code & 255) ?? [255, 0, 255];
         return code & DIFF_BIT ? [(r / 255) * 0.35 + 0.65, (g / 255) * 0.35 + 0.2, (bl / 255) * 0.35 + 0.2] : [r / 255, g / 255, bl / 255];
-      }, showDiff ? (origRef.current?.data ?? null) : null);
+      }, null);
     c.previewMesh.geometry.dispose();
     c.previewMesh.geometry = toGeometry(m);
     c.previewMesh.visible = true;
@@ -1155,6 +1250,7 @@ export function View3D({
     }
     return h ? voxelOf(h) : null;
   };
+  hitRef.current = (x, y) => hit(x, y);
   /** 沿射線由近到遠經過的結構（key 與各自第一個體素），最多 8 個；被擋住的也能選。 */
   const hitsAlong = (clientX: number, clientY: number): { key: string; p: number }[] => {
     const c = ctxRef.current;
@@ -1478,10 +1574,12 @@ export function View3D({
     }
     if (e.button !== 0) return;
     downRef.current = { x: e.clientX, y: e.clientY, button: 0 };
+    // 不是編輯就是轉視角：旋轉中心先放到游標下（plan v10 §4.1）
+    const rotate = () => camRef.current?.pivotAt(e.clientX, e.clientY);
     // Alt 拖＝只轉視角；筆刷關閉、計算中、重畫中、看原始時不雕刻（還是可以點選）
-    if (e.altKey || brushRef.current.mode === 'off' || busyRef.current || meshingRef.current || mode === 'orig') return;
+    if (e.altKey || brushRef.current.mode === 'off' || busyRef.current || meshingRef.current || mode === 'orig') return rotate();
     const h = hit(e.clientX, e.clientY);
-    if (!h || h.onCap || !selRef.current?.[h.p]) return;
+    if (!h || h.onCap || !selRef.current?.[h.p]) return rotate();
         // 按在已選結構的面上：準備筆刷；拖過死區才算拖拉
         const { vx, vy, pxPerVoxel } = screenVectors(h.point, h.n);
         const ax = axisOf(h.n);
@@ -1624,8 +1722,8 @@ export function View3D({
           bgTimer.current = null;
         }
         const h = hit(e.clientX, e.clientY);
-        // 雙擊模型：旋轉中心移到點到的地方（相機不動，之後繞著它轉）；雙擊空白：回全貌
-        if (h) c.controls.target.copy(h.world);
+        // 雙擊模型：對準點到的地方（有動畫）；雙擊空白：回全貌
+        if (h) camRef.current?.lookAtPoint(h.world);
         else handle.current?.setView('home');
       }}
       onPointerLeave={() => {

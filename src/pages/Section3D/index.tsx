@@ -189,8 +189,7 @@ export default function Section3DPage() {
   const [clipAxis, setClipAxis] = useState<Axis>('z');
   const [clipSide, setClipSide] = useState<1 | -1>(1);
   const [clipPos, setClipPos] = useState<Record<Axis, number>>({ x: 0, y: 0, z: 0 });
-  const [showDiff, setShowDiff] = usePersisted('showDiff', true);
-  /** 現在／原始／差異。 */
+  /** 改後／改前／差異（plan v10 §4.3：改後不染色，要看差異切「差異」）。 */
   const [mode, setMode] = useState<ViewMode>('now');
   /**
    * 2D 編輯：主畫面換成 editAxis 方向的切面編輯器，3D 與另外兩張切面縮到小窗。
@@ -220,11 +219,11 @@ export default function Section3DPage() {
    */
   const livePv = useLiveValue<PV | null>(null);
   const live2 = useRef({ inflight: false, pending: null as Op | null, sent: null as Op | null, seq: 0, dragging: false });
-  const look = useRef({ ed, showDiff });
-  look.current = { ed, showDiff };
+  const look = useRef({ ed });
+  look.current = { ed };
   const sendPreview = (op: Op, committed: boolean, cap: number) => {
     const L = live2.current;
-    const { ed: e, showDiff: sd } = look.current;
+    const { ed: e } = look.current;
     const cur = e.cur;
     const base = sidOf(cur);
     const seq = ++L.seq;
@@ -237,7 +236,7 @@ export default function Section3DPage() {
       L.inflight = false;
       if (L.dragging && L.pending && L.pending !== L.sent) sendPreview(L.pending, false, cap);
     };
-    previewIn(cur, { op, cap, hidden: hiddenTable(e.hidden), palette: palette(e.materials), showDiff: sd, seq, mesh: true }).then(
+    previewIn(cur, { op, cap, hidden: hiddenTable(e.hidden), palette: palette(e.materials), showDiff: false, seq, mesh: true }).then(
       (r) => {
         const fresh = r.seq === L.seq && sidOf(look.current.ed.cur) === base && (committed || L.dragging);
         if (fresh) {
@@ -319,7 +318,7 @@ export default function Section3DPage() {
     setClipOn(!clipOn);
   };
 
-  // B：現在 ⇄ 原始；D：現在 ⇄ 差異；, .：剖面前後一片；F 對準選取、H 全貌、1/2/3/4 視角；Esc：還原放大的切面
+  // B：改後 ⇄ 改前；D：改後 ⇄ 差異；, .：剖面前後一片；F 對準選取、H 全貌、1/2/3/4 視角；Esc：還原放大的切面
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (typingIn(e.target)) return;
@@ -499,7 +498,8 @@ export default function Section3DPage() {
     if (!b) return null;
     return clipBox(b, ed.scope) ?? b;
   }, [ed.selComps, ed.scope]);
-  const diffShown = showDiff && ed.diff.count ? ed.diff.mask : null;
+  /** 只有差異模式描邊（plan v10 §4.3）。 */
+  const diffShown = mode === 'diff' && ed.diff.count ? ed.diff.mask : null;
 
   // ---- 匯出：.vti（同 Extent／Spacing／Origin）或 .npy ----
 
@@ -921,7 +921,7 @@ export default function Section3DPage() {
             </Button>
           </Tooltip>
         </Space.Compact>
-        <Tooltip title={ed.diff.count > 0 ? 'B：現在 ⇄ 原始；D：現在 ⇄ 差異（沒改的半透明、改過的實色、拿掉的紅）' : '還沒有改動；改了之後可以切到「原始」「差異」對照'}>
+        <Tooltip title={ed.diff.count > 0 ? 'B：改後 ⇄ 改前；D：改後 ⇄ 差異（沒改的半透明、改過的實色＋深藍邊、拿掉的紅）' : '還沒有改動；改了之後可以切到「改前」「差異」對照'}>
           <Segmented
             size="small"
             className="tb"
@@ -929,8 +929,8 @@ export default function Section3DPage() {
             disabled={!ed.diff.count}
             onChange={(v) => setMode(v as ViewMode)}
             options={[
-              { label: '現在', value: 'now' },
-              { label: '原始', value: 'orig' },
+              { label: '改後', value: 'now' },
+              { label: '改前', value: 'orig' },
               { label: '差異', value: 'diff' },
             ]}
           />
@@ -976,7 +976,6 @@ export default function Section3DPage() {
               scope={ed.scope}
               cursor={ed.cursor}
               clip={clip}
-              showDiff={showDiff && !peek}
               diffMask={diffShown}
               mode={mode}
               brush={sculptOn ? ed.brush : OFF_BRUSH}
@@ -1087,9 +1086,9 @@ export default function Section3DPage() {
             document.body,
           )}
         {mode === 'orig' ? (
-          <div className="peek">原始陣列（唯讀；B 或上方切換回到現在）</div>
+          <div className="peek">改前（原始陣列，唯讀；B 或上方切換回到改後）</div>
         ) : mode === 'diff' ? (
-          <div className="peek">差異：沒改的半透明、改過的實色、拿掉的紅（D 切回）</div>
+          <div className="peek">差異：沒改的半透明、改過的實色＋深藍邊、拿掉的紅（D 切回改後）</div>
         ) : null}
       </div>
       <div className={'pane-foot' + (hot ? ' hot' : '')}>
@@ -1271,7 +1270,7 @@ export default function Section3DPage() {
             </div>
           )}
           {compare ? (
-            <CompareView ed={ed} axis={cmpAxis} setAxis={setCmpAxis} showDiff={showDiff} />
+            <CompareView ed={ed} axis={cmpAxis} setAxis={setCmpAxis} />
           ) : (
             <div className={'canvas-area' + (focus ? ` editing focus-${focus}` : '')}>
               {pane3d}
@@ -1309,8 +1308,6 @@ export default function Section3DPage() {
         ed={ed}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        showDiff={showDiff}
-        setShowDiff={setShowDiff}
         onLoad={() => setUploadOpen(true)}
       />
       <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />

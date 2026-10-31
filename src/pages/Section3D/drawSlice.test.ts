@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { type Axis, type Vec3, type Volume, MATERIALS, demoVolume, hexToRgb, idx, initialLabeled, maskOf } from '../../volume/volume';
 import { matNameOf } from '../../volume/ops';
 import type { Preview } from '../../volume/preview';
-import { SEL_RGB, sliceRGBA } from './drawSlice';
+import { DIFF_EDGE_HEX, DIFF_EDGE_RGB, REMOVED_RGB, SEL_RGB, sliceRGBA } from './drawSlice';
+import { PALETTE } from '../../volume/volume';
 
 /** 舊版（plan v9 之前 views.tsx 的 drawSlice），把 putImageData＋fillRect 換成寫進陣列。 */
 function reference(vol: Volume, axis: Axis, at: number, rgb: Map<number, Vec3>, hidden: Set<number>, selMask: Uint8Array | null, diff: Uint8Array | null, patch?: Preview | null) {
@@ -53,10 +54,11 @@ function reference(vol: Volume, axis: Axis, at: number, rgb: Map<number, Vec3>, 
           const nv = v + dv;
           return nu < 0 || nv < 0 || nu >= W || nv >= H || !on(nu, nv);
         });
-        if (edge) {
-          const o = (v * W + u) * 4;
-          data.set([255, 77, 79, 255], o);
-        }
+        const [x, y, z] = toVoxel(u, v);
+        const o = (v * W + u) * 4;
+        // plan v10：被拿掉的（現在是空）整格紅、其他改過的描深藍邊
+        if (!vol.data[idx(vol, x, y, z)]) data.set([...REMOVED_RGB, 255], o);
+        else if (edge) data.set([...DIFF_EDGE_RGB, 255], o);
       }
   }
   return data;
@@ -93,4 +95,41 @@ describe('drawSlice LUT 版（plan v9 P11）', () => {
           expect(bad).toBe(0);
         }
       });
+});
+
+describe('改過的地方不染色（plan v10 §4.3）', () => {
+  /** WCAG 對比度。 */
+  const lum = (h: string) => {
+    const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const contrast = (a: string, b: string) => {
+    const [x, y] = [lum(a), lum(b)];
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  };
+  it('差異邊框和 16 色調色盤每一色對比度 ≥ 3:1', () => {
+    for (const c of PALETTE) expect(contrast(DIFF_EDGE_HEX, c)).toBeGreaterThanOrEqual(3);
+  });
+  it('改後模式（不傳 diff）：16 色各一塊、改一格，像素就是材質色；差異模式：邊框深藍、拿掉的紅', () => {
+    const X = 16;
+    const Y = 6;
+    const data = new Uint8Array(X * Y);
+    for (let u = 0; u < X; u++) for (let v = 1; v < Y; v++) data[v * X + u] = u + 1;
+    const vol: Volume = { X, Y, Z: 1, data };
+    const rgb = new Map(PALETTE.map((c, k) => [k + 1, hexToRgb(c)] as const));
+    // 改一格：材質 1 的一格變成材質 2；另一格拿掉
+    const diff = new Uint8Array(X * Y);
+    data[3 * X] = 2;
+    diff[3 * X] = 1;
+    data[3 * X + 5] = 0;
+    diff[3 * X + 5] = 1;
+    const now = sliceRGBA(vol, 'z', 0, rgb, new Set(), null, null).data;
+    for (let i = 0; i < X * Y; i++) {
+      const c = data[i] ? rgb.get(data[i])! : [255, 0, 255];
+      expect([now[i * 4], now[i * 4 + 1], now[i * 4 + 2]]).toEqual(c);
+    }
+    const d = sliceRGBA(vol, 'z', 0, rgb, new Set(), null, diff).data;
+    expect([d[3 * X * 4], d[3 * X * 4 + 1], d[3 * X * 4 + 2]]).toEqual(DIFF_EDGE_RGB);
+    expect([d[(3 * X + 5) * 4], d[(3 * X + 5) * 4 + 1], d[(3 * X + 5) * 4 + 2]]).toEqual(REMOVED_RGB);
+  });
 });

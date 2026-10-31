@@ -116,6 +116,7 @@ export function SliceEditor({
   diff,
   preview,
   selBox,
+  faceHi = null,
   focusKey,
   autoZoom,
   onPick,
@@ -149,6 +150,8 @@ export function SliceEditor({
   preview?: SlicePreview | null;
   /** 選取外框（對準選取、自動放大用）。 */
   selBox: BBox | null;
+  /** 卡片的六面小方塊滑過（plan v10 §4.4）：選取外框上對應那條邊亮橘色；方向不在這個切面上就不畫。 */
+  faceHi?: Vec3 | null;
   /** 選取改變時換值（自動放大的觸發）。 */
   focusKey: string;
   autoZoom: boolean;
@@ -864,6 +867,17 @@ export function SliceEditor({
               ) : (
                 <rect x={scope!.lo} y={0} width={scope!.hi - scope!.lo + 1} height={H} {...frame} />
               ))}
+            {sb &&
+              faceHi &&
+              (() => {
+                const [du, dv] = toPlane(axis, faceHi);
+                if (!du && !dv) return null;
+                const x0 = du > 0 ? sb.u1 + 1 : sb.u0;
+                const y0 = dv > 0 ? sb.v1 + 1 : sb.v0;
+                const [x1, y1] = du ? [x0, sb.v1 + 1] : [sb.u1 + 1, y0];
+                const [xa, ya] = du ? [x0, sb.v0] : [sb.u0, y0];
+                return <line x1={xa} y1={ya} x2={x1} y2={y1} stroke="#fa541c" strokeWidth={4} strokeLinecap="round" vectorEffect="non-scaling-stroke" />;
+              })()}
             {sb && (
               <rect
                 x={sb.u0}

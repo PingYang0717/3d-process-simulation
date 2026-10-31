@@ -293,6 +293,8 @@ export default function Section3DPage() {
     if (!L.inflight) sendPreview(op, false, cap);
     return true;
   };
+  /** 六面小方塊滑過的方向：主切面那條邊亮起（live value，整頁不 render）。 */
+  const faceHi = useLiveValue<Vec3 | null>(null, sameVec);
   /** 卡片（plan v10 §4.4）用的畫面功能：身分不變，裡面呼叫最新一次 render 的函式。 */
   const hostFns = useRef({ makePreview: (_op: Op) => false as boolean, endLive: () => {}, changeMaterial: (_id: number) => {} });
   const cardHost = useMemo<CardHost>(
@@ -304,7 +306,10 @@ export default function Section3DPage() {
         }
         return hostFns.current.makePreview(op);
       },
-      highlight: (d) => view.current?.highlightFace(d),
+      highlight: (d) => {
+        view.current?.highlightFace(d);
+        faceHi.set(d);
+      },
       onMaterial: (id) => hostFns.current.changeMaterial(id),
     }),
     [],
@@ -819,6 +824,8 @@ export default function Section3DPage() {
             {(dp) => (
               <WithLivePv live={livePv} pv={null}>
                 {(lp) => (
+                  <WithLivePv live={faceHi} pv={null}>
+                    {(fh) => (
               <SliceEditor
                 vol={shown}
                 axis={axis}
@@ -831,6 +838,7 @@ export default function Section3DPage() {
                 diff={diffShown}
                 preview={dp ?? (lp && lp.base === sidOf(ed.cur) && mode === 'now' ? lp : null) ?? slicePv}
                 selBox={peek ? null : (unionBBox(ed.selComps) ?? null)}
+                faceHi={fh}
                 focusKey={selKey}
                 autoZoom={ed.autoZoom}
                 onPick={pickInSlice}
@@ -857,6 +865,8 @@ export default function Section3DPage() {
                   ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, voxel: p ? (p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0] : null });
                 }}
               />
+                    )}
+                  </WithLivePv>
                 )}
               </WithLivePv>
             )}

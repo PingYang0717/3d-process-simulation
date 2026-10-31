@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { Alert, Button, Collapse, Empty, Flex, InputNumber, Select, Space, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, Empty, Flex, InputNumber, Table, Tooltip, Typography } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
-import { DIRECTIONS, type Vec3, bboxDims, isVoid } from '../../volume/volume';
-import { MatLabel, Swatch } from '../../ui/Swatch';
+import { bboxDims, isVoid } from '../../volume/volume';
+import { Swatch } from '../../ui/Swatch';
 import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
-import { ScopeControl } from './PositionBar';
+import { MaterialCard, MoveCard, PushCard, ShapeCard } from './OpCard';
 import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handleOps';
 import { groupNormal, smoothEdgeGroup } from '../../slice/gestures';
 import { Checkbox } from 'antd';
@@ -15,127 +15,6 @@ const { Text } = Typography;
 
 export const matOf = (ed: Editor, id: number) =>
   ed.materials.find((m) => m.id === id) ?? { id, name: `材質 ${id}`, color: '#ff00ff' };
-
-function PushRow({ ed }: { ed: Editor }) {
-  const [dirId, setDirId] = useState('up');
-  const [n, setN] = useState<number | null>(1);
-  const dir = DIRECTIONS.find((d) => d.id === dirId)!;
-  const steps = Math.round(n ?? 0);
-  const apply = () => ed.push(dir.d, steps);
-  return (
-    <Flex vertical gap={10}>
-      <Flex gap={10}>
-        <label className="field" style={{ flex: 1.4 }}>
-          <span>方向</span>
-          <Select
-            value={dirId}
-            onChange={setDirId}
-            optionLabelProp="label"
-            options={DIRECTIONS.map((d) => ({ value: d.id, label: `${d.arrow} ${d.name}`, title: d.hint }))}
-          />
-        </label>
-        <label className="field">
-          <span>幾格（負＝縮）</span>
-          <InputNumber value={n} onChange={setN} step={1} precision={0} suffix="vx" style={{ width: '100%' }} onPressEnter={apply} />
-        </label>
-      </Flex>
-      <Button type="primary" block onClick={apply} disabled={!steps || !!ed.busy} loading={!!ed.busy}>
-        {steps < 0 ? `${dir.name}縮 ${-steps} 格` : `${dir.name}長 ${steps} 格`}（{(Math.abs(steps) * ed.nmPerVoxel).toFixed(1)} nm）
-      </Button>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        整面一起推；套用後選取保留，可以連續按。局部的凸起、補平請在 3D 上用筆刷。
-      </Text>
-    </Flex>
-  );
-}
-
-/** 整個選取沿一個方向補平到最外側：圓頭、斜角變方頭，一鍵完成。 */
-function LevelRow({ ed }: { ed: Editor }) {
-  const [dirId, setDirId] = useState('up');
-  const dir = DIRECTIONS.find((d) => d.id === dirId)!;
-  const to = ed.levelTarget(dir.d);
-  const axisName = dir.axis;
-  return (
-    <Flex vertical gap={10}>
-      <Flex gap={10} align="end">
-        <label className="field" style={{ flex: 1 }}>
-          <span>哪一面</span>
-          <Select
-            value={dirId}
-            onChange={setDirId}
-            optionLabelProp="label"
-            options={DIRECTIONS.map((d) => ({ value: d.id, label: `${d.arrow} ${d.name}`, title: d.hint }))}
-          />
-        </label>
-        <Button block style={{ flex: 1.3 }} onClick={() => ed.levelWhole(dir.d)} disabled={to === null || !!ed.busy} loading={!!ed.busy}>
-          補平成方頭（{axisName} = {to ?? '–'}）
-        </Button>
-      </Flex>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        選取裡每一排都補到{dir.name}最外側那一點（{axisName} = {to ?? '–'}，{to === null ? '' : `${(to * ed.nmPerVoxel).toFixed(1)} nm`}）。只填空氣；薄襯層
-        {ed.follow ? '跟著往外推' : '會擋住（設定裡開「襯層一起推」才跟著走）'}，厚的鄰居不吃。只補一小塊請在 3D 上用「補平」筆刷點。
-      </Text>
-    </Flex>
-  );
-}
-
-function MoveRow({ ed }: { ed: Editor }) {
-  const [v, setV] = useState<(number | null)[]>([0, 0, 0]);
-  const set = (i: number) => (x: number | null) =>
-    setV((p) => {
-      const next = [...p];
-      next[i] = x;
-      return next;
-    });
-  // 畫面上「往上」是 y 索引變小：輸入用正＝往上，送出時轉號
-  const d: Vec3 = [Math.round(v[0] ?? 0), -Math.round(v[1] ?? 0), Math.round(v[2] ?? 0)];
-  const any = d.some(Boolean);
-  const apply = () => ed.translate(d);
-  const labels = ['左右 x（右＋）', '上下（上＋）', '前後 z（後＋）'];
-  const words = [d[0] > 0 ? '右' : '左', d[1] < 0 ? '上' : '下', d[2] > 0 ? '後' : '前'];
-  return (
-    <Flex vertical gap={10}>
-      <Flex gap={10}>
-        {labels.map((l, i) => (
-          <label className="field" key={l}>
-            <span>{l}</span>
-            <InputNumber value={v[i]} onChange={set(i)} precision={0} style={{ width: '100%' }} onPressEnter={apply} />
-          </label>
-        ))}
-      </Flex>
-      <Button block onClick={apply} disabled={!any || !!ed.busy}>
-        整塊移動
-        {any
-          ? `（${d
-              .map((n, i) => (n ? `往${words[i]} ${Math.abs(n)}` : ''))
-              .filter(Boolean)
-              .join('、')} vx）`
-          : ''}
-      </Button>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        也可以用方向鍵：1 格、<kbd>Shift</kbd> 10 格，<kbd>PgUp</kbd>／<kbd>PgDn</kbd> 走前後。
-      </Text>
-    </Flex>
-  );
-}
-
-function MaterialRow({ ed, value, onMaterial }: { ed: Editor; value?: number; onMaterial: (id: number) => void }) {
-  return (
-    <Space.Compact style={{ width: '100%' }}>
-      <Select
-        style={{ flex: 1 }}
-        value={value}
-        placeholder="多種材質"
-        disabled={!!ed.busy}
-        onChange={(m) => onMaterial(m)}
-        options={ed.materials.filter((m) => m.id !== 0).map((m) => ({ value: m.id, label: <MatLabel mat={m} /> }))}
-      />
-      <Button onClick={() => onMaterial(254)} disabled={!!ed.busy}>
-        設為 VOID
-      </Button>
-    </Space.Compact>
-  );
-}
 
 /** 選到節點或邊時：數值輸入（和拖拉產生完全相同的 Op，§5.5）。 */
 function HandleRow({ ed }: { ed: Editor }) {
@@ -227,7 +106,7 @@ function HandleRow({ ed }: { ed: Editor }) {
 }
 
 /** 右欄「選取與調整」。 */
-export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: number) => void }) {
+export function Inspector({ ed, roundPart }: { ed: Editor; roundPart?: React.ReactNode }) {
   const nm = ed.nmPerVoxel;
   const sel = ed.selComps;
   if (!sel.length)
@@ -239,7 +118,7 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
             <b>選取</b>　在 3D 或切面點一塊，或點左邊清單。<kbd>Shift</kbd>＋點可以多選，例如兩根 poly。
           </li>
           <li>
-            <b>調整</b>　按 3D 上方「2D 編輯」（E）切到放大的切面；整面長縮、移動、換材質在這裡輸入。選取會留著。
+            <b>調整</b>　按 <kbd>E</kbd> 進入聚焦編輯：拖箭頭＝整面長／縮、拖角＝圓頭；再按 <kbd>E</kbd> 切到 2D 剖面。長／縮、方頭／圓頭、移動、材質也可以在這裡打數字，先看預覽再按「套用」。
           </li>
           <li>
             <b>匯出</b>　右上角「匯出」，shape 與 dtype 和原始一樣。
@@ -334,29 +213,23 @@ export function Inspector({ ed, onMaterial }: { ed: Editor; onMaterial: (id: num
         )}
       </Section>
       {ed.isBase && <Alert type="info" showIcon message="直接調整會自動建立 Split 1；原始本身不會變。" />}
-      <Section title="材質">
-        <MaterialRow ed={ed} value={mats.size === 1 ? [...mats][0] : undefined} onMaterial={onMaterial} />
-      </Section>
       {ed.handle && (
         <Section title={ed.handle.kind === 'node' ? '選到的節點' : '選到的邊'}>
           <HandleRow ed={ed} key={`${ed.handle.kind}${ed.handle.origin.join()}`} />
         </Section>
       )}
-      <Section title="範圍（要改哪裡）">
-        <ScopeControl ed={ed} showAxis />
+      <Section title="長／縮">
+        <PushCard ed={ed} />
       </Section>
-      <Section title="長高／縮短">
-        <PushRow ed={ed} />
+      <Section title="方頭／圓頭">
+        <ShapeCard ed={ed} roundPart={roundPart} />
       </Section>
-      <Section title="補平（圓頭變方頭）">
-        <LevelRow ed={ed} />
+      <Section title="移動">
+        <MoveCard ed={ed} />
       </Section>
-      <Collapse
-        ghost
-        size="small"
-        className="insp-collapse"
-        items={[{ key: 'move', label: <span className="insp-collapse-title">移動（整塊）</span>, children: <MoveRow ed={ed} /> }]}
-      />
+      <Section title="材質">
+        <MaterialCard ed={ed} />
+      </Section>
     </>
   );
 }

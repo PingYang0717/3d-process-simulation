@@ -750,19 +750,33 @@ export function useEditor() {
 
   // ---- 調整 ----
 
+  // 每個操作只有一條產生路徑（plan v10 §3）：卡片的預覽、套用、方向鍵、右鍵都呼叫這幾個 xxxOp，再交給 commit。
+  /** 整塊移動；withShell＝外面的薄襯層一起搬。 */
+  const translateOp = useCallback(
+    (d: Vec3, withShell = false): Op | null =>
+      !sel.size || (!d[0] && !d[1] && !d[2]) ? null : { kind: 'translate', keys: [...sel], scope, d, backfill, ...(withShell ? { follow: true } : {}) },
+    [sel, scope, backfill],
+  );
+  /** 長／縮：dir 那一面沿法線 n 格（負＝縮）；local＝筆刷。 */
+  const pushOp = useCallback(
+    (dir: Vec3, n: number, local?: Local): Op | null =>
+      !sel.size || !n ? null : { kind: 'push', keys: [...sel], scope, dir, n, follow, backfill, ...(local ? { local } : {}) },
+    [sel, scope, follow, backfill],
+  );
+  const materialOp = useCallback((m: number): Op | null => (sel.size ? { kind: 'material', keys: [...sel], scope, m } : null), [sel, scope]);
   const translate = useCallback(
     (d: Vec3, withShell = false) => {
-      if (!sel.size || (!d[0] && !d[1] && !d[2])) return;
-      commit({ kind: 'translate', keys: [...sel], scope, d, backfill, ...(withShell ? { follow: true } : {}) });
+      const op = translateOp(d, withShell);
+      if (op) commit(op);
     },
-    [sel, scope, backfill, commit],
+    [translateOp, commit],
   );
   const push = useCallback(
     (dir: Vec3, n: number, local?: Local) => {
-      if (!sel.size || !n) return;
-      commit({ kind: 'push', keys: [...sel], scope, dir, n, follow, backfill, ...(local ? { local } : {}) });
+      const op = pushOp(dir, n, local);
+      if (op) commit(op);
     },
-    [sel, scope, follow, backfill, commit],
+    [pushOp, commit],
   );
   const level = useCallback(
     (dir: Vec3, to: number, local: Local) => {
@@ -803,21 +817,30 @@ export function useEditor() {
     },
     [selComps],
   );
-  const levelWhole = useCallback(
-    (dir: Vec3) => {
+  /** 方頭（整個選取沿 dir 補平到最外側）。 */
+  const levelOp = useCallback(
+    (dir: Vec3): Op | null => {
       const b = unionBBox(selComps);
       const to = levelTarget(dir);
-      if (!b || to === null) return;
+      if (!b || to === null || !sel.size) return null;
       const center: Vec3 = [(b.x0 + b.x1) >> 1, (b.y0 + b.y1) >> 1, (b.z0 + b.z1) >> 1];
-      commit({ kind: 'level', keys: [...sel], scope, dir, to, local: { center, radius: null }, backfill, follow });
+      return { kind: 'level', keys: [...sel], scope, dir, to, local: { center, radius: null }, backfill, follow };
     },
-    [selComps, levelTarget, sel, scope, backfill, follow, commit],
+    [selComps, levelTarget, sel, scope, backfill, follow],
+  );
+  const levelWhole = useCallback(
+    (dir: Vec3) => {
+      const op = levelOp(dir);
+      if (op) commit(op);
+    },
+    [levelOp, commit],
   );
   const setMaterial = useCallback(
     (m: number) => {
-      if (sel.size) commit({ kind: 'material', keys: [...sel], scope, m });
+      const op = materialOp(m);
+      if (op) commit(op);
     },
-    [sel, scope, commit],
+    [materialOp, commit],
   );
 
   // ---- 載入與材質 ----
@@ -1059,7 +1082,11 @@ export function useEditor() {
     menu,
     setMenu,
     translate,
+    translateOp,
     push,
+    pushOp,
+    materialOp,
+    levelOp,
     level,
     opFor,
     sculpt,

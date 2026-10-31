@@ -44,7 +44,7 @@ function useTicks(ed: Editor, axis: Axis) {
   }, [ed.selBox, ed.comps, ed.sel, ed.hidden, ed.vol, axis]);
 }
 
-/** 範圍控制：整個結構／此片／自訂（雙把手滑桿）。位置列與右欄是同一個元件、同一個狀態。 */
+/** 範圍控制：整個結構／此片／自訂（雙把手滑桿）。只在卡片下方「套用到：… ▾」點開（plan v10 §4.7）；位置列只顯示。 */
 export function ScopeControl({ ed, compact = false, showAxis = false }: { ed: Editor; compact?: boolean; showAxis?: boolean }) {
   const axis = ed.editAxis;
   const max = axisLen(ed.vol, axis) - 1;
@@ -198,7 +198,15 @@ export function PositionBar({ ed, axis, has, onJumpBlocked }: { ed: Editor; axis
     <div className="position-bar">
       <SliceNav ed={ed} axis={axis} />
       <span className="pb-sep" />
-      {sel.length ? <ScopeControl ed={ed} compact /> : <Text type="secondary" style={{ fontSize: 12 }}>點一塊結構選取；選了才會出現「套用到」</Text>}
+      {sel.length ? (
+        <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+          套用到：{scopeWords(ed).long}（在卡片下方改）
+        </Text>
+      ) : (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          點一塊結構選取
+        </Text>
+      )}
       {sel.length > 0 && near !== null && near !== at && (
         <Text type="warning" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
           這一片沒有 {name} ·{' '}

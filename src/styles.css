@@ -317,3 +317,21 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 @media (max-width: 799px) { .canvas-area { padding: 8px; gap: 8px; } .pane-3d { flex: 1.2; } .pane-foot span:last-child { display: none; } .split-hint { display: none; } }
 @media (max-height: 700px) { .pane-3d { flex: 1; } }
 @media (prefers-reduced-motion: reduce) { .busy-dot { animation: none; opacity: 1; } * { scroll-behavior: auto !important; } }
+
+/* plan v10 §4.4：預覽 → 套用的卡片、六面小方塊 */
+.op-card { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); background: #fff; transition: border-color .15s, box-shadow .15s; }
+.op-card.active { border-color: var(--c-primary); box-shadow: 0 0 0 2px rgba(22, 119, 255, .12); }
+.op-card.compact { border: 0; padding: 2px; box-shadow: none; }
+.op-card-words { font-size: 13px; line-height: 1.5; color: var(--c-text); }
+.scope-line { padding-inline: 0; font-size: 12px; }
+.face-picker { flex: none; user-select: none; }
+.face-picker .fp-face polygon { fill: #f0f2f5; stroke: #8c8c8c; stroke-width: 1; cursor: pointer; transition: fill .12s; }
+.face-picker .fp-face text, .face-picker .fp-hidden text { font-size: 10px; fill: var(--c-text-2); pointer-events: none; }
+.face-picker .fp-face:hover polygon, .face-picker .fp-face:focus-visible polygon { fill: #ffe7ba; }
+.face-picker .fp-face.on polygon { fill: #fa541c; stroke: #d4380d; }
+.face-picker .fp-face.on text, .face-picker .fp-hidden.on text { fill: #fff; font-weight: 600; }
+.face-picker .fp-hidden rect { fill: #fff; stroke: #8c8c8c; stroke-dasharray: 3 2; cursor: pointer; }
+.face-picker .fp-hidden:hover rect, .face-picker .fp-hidden:focus-visible rect { fill: #ffe7ba; }
+.face-picker .fp-hidden.on rect { fill: #fa541c; stroke: #d4380d; stroke-dasharray: none; }
+.face-picker .off { opacity: .3; pointer-events: none; }
+.face-picker g:focus { outline: none; }

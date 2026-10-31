@@ -89,6 +89,8 @@ export interface View3DHandle {
   recolor: (mask: Uint8Array, rgb: Vec3) => void;
   /** 選取框閃兩下：剛套用了一步。 */
   flash: () => void;
+  /** 卡片的六面小方塊滑過時：選取外框的那一面亮橘色＋往外的箭頭（plan v10 §4.4）；null＝收掉。 */
+  highlightFace: (dir: Vec3 | null) => void;
 }
 
 /** 右鍵選單用：點到的體素，以及沿射線往裡面還有哪些結構（key）。 */
@@ -707,6 +709,52 @@ export function View3D({
     const capEdges = new LineSegments(new EdgesGeometry(cap.geometry), new LineBasicMaterial({ color: 0xd46b08 }));
     capEdges.visible = false;
     scene.add(capEdges);
+    // 卡片滑過六面小方塊：選取外框的那一面＋箭頭（永遠畫在最上面）
+    const faceHi = new Mesh(new PlaneGeometry(1, 1), new MeshBasicMaterial({ color: BRUSH_COLOR, transparent: true, opacity: 0.35, depthTest: false, depthWrite: false, side: DoubleSide }));
+    faceHi.renderOrder = 7;
+    faceHi.visible = false;
+    faceHi.raycast = () => {};
+    scene.add(faceHi);
+    const faceArrow = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: BRUSH_COLOR, depthTest: false }));
+    faceArrow.renderOrder = 7;
+    faceArrow.visible = false;
+    scene.add(faceArrow);
+    /** 世界座標（翻 y）。 */
+    const W = (x: number, y: number, z: number) => new Vector3(x, vol.Y - y, z);
+    const highlightFace = (dir: Vec3 | null) => {
+      const b = bboxRef.current;
+      kick();
+      if (!dir || !b) {
+        faceHi.visible = faceArrow.visible = false;
+        return;
+      }
+      const a = axisOf(dir);
+      const lo = [b.x0, b.y0, b.z0];
+      const hi = [b.x1 + 1, b.y1 + 1, b.z1 + 1];
+      const c = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+      c[a] = dir[a] > 0 ? hi[a] : lo[a];
+      const size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+      faceHi.rotation.set(0, 0, 0);
+      if (a === 2) faceHi.scale.set(size[0], size[1], 1);
+      else if (a === 1) {
+        faceHi.rotation.x = -Math.PI / 2;
+        faceHi.scale.set(size[0], size[2], 1);
+      } else {
+        faceHi.rotation.y = -Math.PI / 2;
+        faceHi.scale.set(size[2], size[1], 1);
+      }
+      const p0 = W(c[0], c[1], c[2]);
+      faceHi.position.copy(p0);
+      faceHi.visible = true;
+      const len = Math.max(4, 0.35 * Math.hypot(size[0], size[1], size[2]));
+      const v = new Vector3(dir[0], -dir[1], dir[2]);
+      const tip = p0.clone().addScaledVector(v, len);
+      const side = new Vector3(a === 0 ? 0 : 1, a === 0 ? 1 : 0, 0).multiplyScalar(len * 0.18);
+      const back = tip.clone().addScaledVector(v, -len * 0.25);
+      faceArrow.geometry.dispose();
+      faceArrow.geometry = new BufferGeometry().setFromPoints([p0, tip, tip, back.clone().add(side), tip, back.clone().sub(side)]);
+      faceArrow.visible = true;
+    };
     ctxRef.current = { renderer, scene, camera, controls, mesh, parts, partGroup, shown: null, partsCache, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
     // 按下要在 OrbitControls（掛在 canvas 上）之前決定是不是筆刷：capture 階段先跑，筆刷就先把 controls 關掉，
     // OrbitControls 連這一下都不會記到。之前是 React 的 onPointerDown 事後才關，OrbitControls 已經記了一個指標、
@@ -762,7 +810,7 @@ export function View3D({
       col.needsUpdate = true;
       kick();
     };
-    handle.current = { setView, recolor, flash };
+    handle.current = { setView, recolor, flash, highlightFace };
     camRef.current = { pivotAt, lookAtPoint };
     host.addEventListener('wheel', onWheel, { passive: false });
 

@@ -4,8 +4,6 @@ import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, InputNumber, Menu,
 import type { MenuProps } from 'antd';
 import {
   AimOutlined,
-  ArrowDownOutlined,
-  ArrowUpOutlined,
   DownOutlined,
   ExpandOutlined,
   FormatPainterOutlined,
@@ -25,14 +23,15 @@ import {
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { type Axis, type Vec3, type Volume, encodeNpy, hexToRgb, isVoid, unionBBox } from '../../volume/volume';
+import { type Axis, type Vec3, type Volume, encodeNpy, hexToRgb, unionBBox } from '../../volume/volume';
 import { encodeVti } from '../../volume/vti';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
-import { MatLabel, Swatch } from '../../ui/Swatch';
+import { MatLabel } from '../../ui/Swatch';
 import { type Op, type SelectMode, slicesWith, useEditor } from './editor';
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
 import { FloatingToolbar } from './FloatingToolbar';
+import { type CardHost, CardHostCtx } from './OpCard';
 import { axisIndex, clipBox } from '../../volume/scope';
 import { type Preview, boxVoxels, previewBox, previewOp } from '../../volume/preview';
 import { newReport } from '../../volume/kernel';
@@ -282,6 +281,24 @@ export default function Section3DPage() {
     if (!L.inflight) sendPreview(op, false, cap);
     return true;
   };
+  /** 卡片（plan v10 §4.4）用的畫面功能：身分不變，裡面呼叫最新一次 render 的函式。 */
+  const hostFns = useRef({ makePreview: (_op: Op) => false as boolean, endLive: () => {}, changeMaterial: (_id: number) => {} });
+  const cardHost = useMemo<CardHost>(
+    () => ({
+      preview: (op) => {
+        if (!op) {
+          hostFns.current.endLive();
+          return false;
+        }
+        return hostFns.current.makePreview(op);
+      },
+      highlight: (d) => view.current?.highlightFace(d),
+      onMaterial: (id) => hostFns.current.changeMaterial(id),
+    }),
+    [],
+  );
+  // 開發模式：e2e（scripts/e2e/m10.cjs）讀卡片的預覽
+  if (import.meta.env.DEV) (window as unknown as { __livePv?: unknown }).__livePv = livePv;
   /** 拖拉結束或取消：之後晚到的拖拉預覽一律丟掉。 */
   const endLive = () => {
     live2.current.dragging = false;
@@ -644,9 +661,7 @@ export default function Section3DPage() {
     if (m && ed.affMask) view.current?.recolor(ed.affMask, hexToRgb(m.color));
     ed.setMaterial(id);
   };
-  const matItems: MenuProps['items'] = ed.materials
-    .filter((m) => m.id !== 0)
-    .map((m) => ({ key: `m${m.id}`, label: <MatLabel mat={m} />, onClick: () => changeMaterial(m.id) }));
+  hostFns.current = { makePreview: (op) => makePreview(op, LIVE_PREVIEW_CAP, false), endLive, changeMaterial };
 
   const pickInSlice = (p: [number, number, number], mode: SelectMode) => {
     ed.setCursor(p);
@@ -684,6 +699,8 @@ export default function Section3DPage() {
         <div className="slice-body">
           <WithLivePv key={axis} live={dragPv} pv={null}>
             {(dp) => (
+              <WithLivePv live={livePv} pv={null}>
+                {(lp) => (
               <SliceEditor
                 vol={shown}
                 axis={axis}
@@ -694,7 +711,7 @@ export default function Section3DPage() {
                 cursor={ed.cursor}
                 scope={ed.sel.size ? ed.scope : null}
                 diff={diffShown}
-                preview={dp ?? slicePv}
+                preview={dp ?? (lp && lp.base === sidOf(ed.cur) && mode === 'now' ? lp : null) ?? slicePv}
                 selBox={peek ? null : (unionBBox(ed.selComps) ?? null)}
                 focusKey={selKey}
                 autoZoom={ed.autoZoom}
@@ -714,7 +731,7 @@ export default function Section3DPage() {
                 }}
                 mirror={ed.mirror && ed.sel.size > 1}
                 onNote={(t) => message.warning({ key: 'mirror', content: t })}
-                overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} onMaterial={changeMaterial} /> : undefined}
+                overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} /> : undefined}
                 geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, outline: ed.outlineStyle, snap: ed.snapMode }}
                 onMenu={(p, x, y) => {
                   const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
@@ -722,6 +739,8 @@ export default function Section3DPage() {
                   ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
                 }}
               />
+                )}
+              </WithLivePv>
             )}
           </WithLivePv>
         </div>
@@ -841,8 +860,6 @@ export default function Section3DPage() {
   const selName = ed.selComps.length === 1 ? ed.selComps[0].label : `${ed.selComps.length} 個結構`;
   /** Worker 計算中：改體素的按鈕先 disabled，點了不會無聲被吞掉。 */
   const working = !!ed.busy;
-  const firstMat = ed.selComps.length ? matOf(ed, ed.selComps[0].mat) : null;
-  const oneMat = ed.selComps.every((c) => c.mat === ed.selComps[0]?.mat);
   const whole = ed.scopeMode === 'whole';
   const sculptOn = ed.sculpt3d;
 
@@ -870,23 +887,6 @@ export default function Section3DPage() {
         )}
         {ed.sel.size > 0 && (
           <Space.Compact size="small" className="tb">
-            <Tooltip title="頂面往上 1 voxel，可以一直按">
-              <Button icon={<ArrowUpOutlined />} disabled={working} onClick={() => ed.push([0, -1, 0], 1)}>
-                長高
-              </Button>
-            </Tooltip>
-            <Tooltip title="頂面往下 1 voxel">
-              <Button icon={<ArrowDownOutlined />} disabled={working} onClick={() => ed.push([0, -1, 0], -1)}>
-                縮短
-              </Button>
-            </Tooltip>
-            <Dropdown menu={{ items: matItems }} trigger={['click']} disabled={working}>
-              <Button>
-                {oneMat && firstMat && <Swatch fill={firstMat.color} isVoid={isVoid(firstMat.id)} />}
-                {oneMat ? firstMat?.name : '多種材質'}
-                <DownOutlined style={{ fontSize: 10, marginLeft: 2 }} />
-              </Button>
-            </Dropdown>
             {sculptOn && (
               <Popover content={brushPop} trigger="click" placement="bottomLeft">
                 <Tooltip title={br.mode === 'off' ? '筆刷已關閉：3D 上拖拉只轉視角' : '3D 上拖拉面只改筆刷範圍；整面長縮與移動在右欄輸入。關閉筆刷就只轉視角'}>
@@ -1131,7 +1131,7 @@ export default function Section3DPage() {
             label: '選取與調整',
             children: (
               <div className="insp-body">
-                <Inspector ed={ed} onMaterial={changeMaterial} />
+                <Inspector ed={ed} />
               </div>
             ),
           },
@@ -1198,6 +1198,7 @@ export default function Section3DPage() {
     );
 
   return (
+    <CardHostCtx.Provider value={cardHost}>
     <div className="app">
       <header className="topbar">
         {narrow && (
@@ -1322,5 +1323,6 @@ export default function Section3DPage() {
         }}
       />
     </div>
+    </CardHostCtx.Provider>
   );
 }

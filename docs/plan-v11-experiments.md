@@ -2,7 +2,7 @@
 
 > 位置：`docs/plan-v11-experiments.md`，分支 `claude/upbeat-einstein-wod16i`，接在 plan v10 之後。
 > 出發點：`docs/review-v11-process-ops-and-splits.md` 的盤點，加上 2026-10-31 與使用者確認的決定（§9）。
-> 範圍：M1 實驗變數模型與「實驗」頁籤、M2 比較（疊圖、A vs B、矩陣表）、M3 新操作（對稱 CD、保形層 dilate、缺陷注入、側壁 taper、相對 recess）、M4 收斂（3D 推面預設 block、自由形變進階化、材質清單、筆刷降級）。**物理 lint 這一輪不做。**
+> 範圍：M0 檔案格式（PointData 多材質比例＋FieldData，2026-10-31 追加）、M1 實驗變數模型與「實驗」頁籤、M2 比較（疊圖、A vs B、矩陣表）、M3 新操作（對稱 CD、保形層 dilate、缺陷注入、側壁 taper、相對 recess）、M4 收斂（3D 推面預設 block、自由形變進階化、材質清單、筆刷降級）。**物理 lint 這一輪不做。**
 
 ---
 
@@ -13,6 +13,7 @@
 2. 目標與驗收方式
 3. 原則、不做的事
 4. 設計
+   - 4.0 檔案格式：PointData 多材質比例＋FieldData 材質表
    - 4.1 實驗變數（Factor）與水平（level）：資料模型
    - 4.2 「實驗」頁籤：定義變數 → 組合 → 產生
    - 4.3 命名、變數 id、範本
@@ -40,6 +41,7 @@
 
 | # | 問題 | 現況 | 本計畫 |
 | --- | --- | --- | --- |
+| P0 | 真實檔案是 PointData 裡每個材質一個比例陣列（`material_1`、`material_2`…）＋FieldData 材質表；現在只挑一個陣列當編號、FieldData 不讀、匯出寫單一 UInt8 CellData | 真實檔案載入錯、匯出下游讀不回 | §4.0 argmax 載入、FieldData 命名、同格式匯出 |
 | P1 | 使用者想的是「L<sub>g</sub> 16／18／20」，系統只有「+1／+2／+3」 | SweepModal 只收相對值，名字是相對量 | §4.1 Factor 有 nominal，水平可填絕對或相對，兩欄都顯示 |
 | P2 | 圓角半徑、recess 深度、襯層厚度不能掃 | `sweepOps` 只有 push／translate | §4.2 所有可參數化的 Op 都能當變數 |
 | P3 | 兩變數矩陣要手動做 9 個 | 無 | §4.2 單變數掃描／全因子／手動勾選 |
@@ -74,6 +76,34 @@ Factor／levels 是**標註**，不是第二份真相：刪掉 factors 欄位，
 不做：物理 lint（下一輪）、量測器（下一輪）、LER、dishing、多人、伺服器端。
 
 ## 4. 設計
+
+### 4.0 檔案格式：PointData 多材質比例＋FieldData 材質表
+
+使用者的真實 `.vti`（2026-10-31 口述，沒有範例檔；格式細節照 VTK 慣例假設，§8 有對策）：
+
+- `PointData` 裡每個材質一個單分量陣列，名稱像 `material_1`、`material_2`…，值是這一點屬於那個材質的**比例**（0～1）。
+- `FieldData` 裡有材質表：材質代碼、材質名稱、顏色。
+
+**載入（取代「挑一個陣列當編號」）**
+
+1. 收集 `PointData` 裡名稱符合 `/^material[_ ]?(\d+)$/i` 的所有單分量陣列；編號＝名稱裡的數字（或 FieldData 代碼表對得上的那個代碼）。一個都沒有 → 退回現在的邏輯（單一編號陣列）。
+2. 每一點取**比例最大**的材質（argmax）；平手取編號小的；全部為 0 → Air（0）。只有一個比例陣列時以 ≥ 0.5 判定。比例是 0／1 時結果就是「哪個陣列是 1」。
+3. 點數＝Extent 每軸加一，每個點當一格（現有的 PointData 分支已經這樣）。Spacing／Origin 照舊。
+4. `FieldData`：讀代碼（整數陣列）、名稱（`String` 陣列，或 `UInt8` 以 0 結尾的字串）、顏色（三分量 0～255 或 0～1，或十六進位字串）。對得上代碼的材質用它的名字與顏色；對不上的仍叫「材質 n」。manifest 的 `materials` 多記 `source: 'FieldData' | 'auto'`。
+5. 原始檔案的 bytes 留著（`File`／`ArrayBuffer` 本來就在記憶體），**不**把每個比例陣列解碼後常駐：4,000 萬點 × 8 個 Float32 陣列是 1.3 GB，放不下。
+
+**上傳面板**：偵測結果列出來讓使用者確認再載入：「PointData 比例陣列 8 個（material_1…material_8）→ 取最大者；FieldData 材質表 8 筆（Si、SiO₂、…）；點數 401×301×201」。對不上的（名稱不符規則、FieldData 缺欄）在這裡標橘色，可手動指定哪個陣列是哪個材質。這是沒有範例檔的保險。
+
+**匯出（和輸入一模一樣，§9 D15）**
+
+- XML 結構、Extent／Spacing／Origin、`PointData` 的陣列名稱與型別、`FieldData` 整段、編碼與壓縮方式都和輸入相同（輸入壓縮就輸出壓縮，用 `CompressionStream('deflate')`，格式是 zlib；不支援時退回 appended raw 並提示）。
+- 沒改到的點：原值 bit-identical。做法是匯出時從保留的原始 bytes 把每個比例陣列**重新解碼一次**、套上這個 split 的 diff、編碼、丟掉，一次只在記憶體裡放一個陣列。
+- 改到的點：新材質的比例寫 1.0、其他寫 0（§9 D16）。
+- 新出現的材質（例如 VOID 254 原本沒有陣列）：補一個 `material_254` 陣列（同型別，未改點全 0），FieldData 補一筆（代碼、名稱、顏色）。
+- 現有的「單一 UInt8 編號」匯出保留為第二個選項（`.npy` 也保留），供只要標籤的下游。
+- 若輸入本來就是單一編號陣列（CellData 或 PointData），匯出照現在。
+
+**manifest** 多記 `input: { source: 'PointData', fractionArrays: ['material_1', …], fieldData: true, dtype: 'Float32', compressed: true }`，讓下游知道這份是哪種格式。
 
 ### 4.1 實驗變數（Factor）與水平（level）：資料模型
 
@@ -311,6 +341,8 @@ ref?: { key: string; side: 'lo' | 'hi'; offset: number /* 格，沿 dir 軸 */ }
 
 | 檔案 | 改什麼 |
 | --- | --- |
+| `src/volume/vti.ts` | 讀：收集 `material_k` 比例陣列、argmax、FieldData 材質表；保留原始 bytes 與每個陣列的位置／型別／壓縮資訊（`VtiInfo` 加 `fractions`、`fieldData`）。寫：`encodeVtiLike(info, orig bytes, diff, mats)` 同結構重寫（串流逐陣列）；`CompressionStream` 壓縮；補新材質陣列與 FieldData 列 |
+| `src/pages/Section3D/UploadPanel.tsx` | 偵測結果確認畫面、手動指定陣列 ↔ 材質 |
 | `src/volume/factors.ts`（新） | `Factor`／`Design`、`combosOf`、`opsOfCombo`、`nameOfCombo`、`measureNominal`、`defaultId`／`slug`、範本的 `toTemplate`／`fromTemplate`（match ↔ keys） |
 | `src/volume/ops.ts` | `Op` 加 `cd`／`dilate`／`defect`／`taper`；`push` 加 `policy`；`level` 加 `ref`；`applyOp` 的分支（cd／taper 展開成 push 後呼叫 `growMask`，dilate 呼叫 `dilateMask`，defect 呼叫 `setRegionMaterial`）；`opText`；`sweepOps` 保留但標 deprecated（由 factors 取代） |
 | `src/volume/kernel.ts` | 不改三條規則；加 `dilateMask`／`erodeMask` 需要的距離表 `offsetsWithin(r)` 與「軸向主分量」`majorAxis(d)` 兩個小工具 |
@@ -338,6 +370,7 @@ ref?: { key: string; side: 'lo' | 'hi'; offset: number /* 格，沿 dir 軸 */ }
 
 逐體素測試（vitest）：
 
+- `vti.test.ts` 加：合成一個 PointData 三個比例陣列＋FieldData 的 `.vti`（ascii 與 appended、壓縮與不壓縮各一），讀回的編號等於 argmax、平手取小、全 0 為 Air；名稱與顏色來自 FieldData；改一格後 `encodeVtiLike` 寫出再讀回：未改點每個陣列 bit-identical、改點 1.0／0、FieldData 整段相同、新材質補陣列與列；輸入是單一編號陣列時行為和 v10 相同。
 - `factors.test.ts`：`combosOf` 三種模式的數量與順序；`opsOfCombo` 等於標稱不出 Op；絕對↔相對換算；`nameOfCombo` 樣板與去 `.0`；`defaultId` 的 slug（中文結構名、`×3`、重複加 `_2`）；範本 `toTemplate`／`fromTemplate` 對回 keys、對不到的列出；`measureNominal` 對範例 Poly-Si 2 的 W、HfO₂ 1 的厚度（2 格）、STI 頂相對 fin 頂。
 - `cd.test.ts`：`cd` +2 center ≡ push lo +1 再 push hi +1；+3 center 多的在 hi；anchor lo／hi；被擋計數＝兩個 push 相加。
 - `dilate.test.ts`：HfO₂ 1 +1：每個新格到原殼距離 ≤ 1、TiN 被推開且總體積不變、fin／poly 體積不變；角落格（對角）有被填（歐氏，不是 6 鄰）；+1 時 scope 只有 z 60～64 則其他片不變；−1：厚度 2 → 1，TiN 跟著退回、回填原始；poly（厚）+1 碰到 fin：被擋 > 0、fin 不變；report 數字。
@@ -352,6 +385,12 @@ ref?: { key: string; side: 'lo' | 'hi'; offset: number /* 格，沿 dir 軸 */ }
 Playwright（`scripts/e2e/m11.cjs`）：見 §7。
 
 ## 7. 里程碑、工作拆解、驗收
+
+### M11.0 檔案格式（M）
+
+`vti.ts` 讀（比例 argmax、FieldData）＋測試 → UploadPanel 確認畫面 → `encodeVtiLike` 同格式匯出＋測試 → manifest `input`。先做：沒有它真實檔案進不來，後面全部白做。
+
+驗收（m11 §0）：合成檔載入後左欄顯示 FieldData 的名字與顏色；匯出的 `.vti` 用 vtk 讀回，未改陣列逐位元組相同、改過的點比例 1／0。
 
 ### M11.1 Factor 模型與「實驗」頁籤（L）
 
@@ -385,6 +424,8 @@ README 的「掃描」段改成「實驗」；HelpDrawer 加一條任務「撒 s
 
 | 風險 | 對策 |
 | --- | --- |
+| 沒有範例檔，PointData／FieldData 的名稱與型別是猜的 | 上傳面板把偵測結果列出來、可手動對應；讀取器對不上就退回「材質 n」而不是失敗；拿到第一個真實檔案時先跑一次 `vti.test.ts` 的 round-trip |
+| 匯出時重新解碼每個比例陣列，大檔案慢 | 一次一個陣列、Worker 裡做、進度條；4,000 萬點 × 8 陣列估 10～20 s，可接受 |
 | `dilate` 的方向只取軸向主分量，斜向推襯層時可能推錯邊 | 由近到遠分層、每層先處理軸向距離的格；測試覆蓋角落；report 記 pushed，疊圖可檢查 |
 | `dilate` 大結構（基板）外框太大 | 和 push 一樣用 previewBox cap，超過 600 萬不預覽、超過 400 萬先確認 |
 | 全因子組合數爆炸 | 超過 50 個先確認、超過 200 個拒絕並提示改逐一掃描或手動勾選 |
@@ -412,3 +453,7 @@ README 的「掃描」段改成「實驗」；HelpDrawer 加一條任務「撒 s
 | D12 | `taper`／`cd` 展開成 push，不加 kernel 規則 | 規則一套；只有 `dilate` 需要新的距離計算 |
 | D13 | `defect` 不經 kernel | 它是結構內部換材質，沒有長縮語意 |
 | D14 | SweepModal 刪除 | 功能完全被 ExperimentTab 覆蓋；單變數掃描就是 combine:'ofat' 一個 factor |
+| D15 | 匯出和輸入一模一樣（PointData 多比例陣列＋FieldData），單一編號陣列留為第二選項 | 下游不用改（使用者選擇） |
+| D16 | 改到的點比例寫新材質 1.0、其他 0 | 最簡單、可重播；邊界比原始硬一點先接受（使用者選擇） |
+| D17 | 載入用所有 `material_k` 的 argmax，而不是只看 `material_1` | 只看一個陣列拿不到編號；比例為 0／1 時結果和「哪個是 1」相同，介面有部分比例時也成立 |
+| D18 | 比例陣列不常駐記憶體，匯出時從原始 bytes 重新解碼一次 | 4,000 萬點 × 多個 Float32 放不下 |

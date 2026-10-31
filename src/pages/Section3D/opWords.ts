@@ -52,12 +52,14 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     const to = from === null ? null : from + s * op.n;
     const coord = from === null ? '' : ` ${AXIS[a]} ${from} → ${to}`;
     const brush = op.local && op.local.radius !== null ? `（筆刷 r${op.local.radius}）` : '';
-    return `${who}${brush} ${faceName(op.dir)}${coord}（${verb} ${n} 格 = ${nmText(n, w.nm)}）· 襯層${op.follow ? '跟著' : '不跟'}${tail}`;
+    return `${who}${brush} ${faceName(op.dir)}${coord}（${verb} ${n} 格 = ${nmText(n, w.nm)}）· 襯層${op.follow ? '跟著' : '不跟'}${op.policy === 'overwrite' ? ' · 允許穿層' : ''}${tail}`;
   }
   if (op.kind === 'level') {
     const a = axisOf(op.dir);
     const brush = op.local.radius === null ? '每一排' : `筆刷 r${op.local.radius} 內每一排`;
-    return `${who} 方頭：${faceName(op.dir)}${brush}補到 ${AXIS[a]} = ${op.to}（${nmText(op.to, w.nm)}）· 只填空氣${op.follow ? '、襯層跟著' : ''}${tail}`;
+    const ref = op.ref ? w.L.comps.find((c) => c.key === op.ref!.key) : undefined;
+    const rel = op.ref && ref ? `（= ${ref.label} ${a === 1 ? (op.ref.side === 'lo' ? '頂' : '底') : op.ref.side === 'lo' ? AXIS[a] + ' 小端' : AXIS[a] + ' 大端'} ${op.ref.offset >= 0 ? '+' : '−'}${Math.abs(op.ref.offset)} 格 = ${nmText(op.ref.offset, w.nm)}）` : `（${nmText(op.to, w.nm)}）`;
+    return `${who} 方頭：${faceName(op.dir)}${brush}補到 ${AXIS[a]} = ${op.to}${rel} · 只填空氣${op.follow ? '、襯層跟著' : ''}${tail}`;
   }
   if (op.kind === 'translate') {
     const parts: string[] = [];
@@ -73,6 +75,27 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     const from = mats.size === 1 ? w.matName([...mats][0]) : `${mats.size} 種材質`;
     const count = extra?.count ?? comps.reduce((s, c) => s + c.count, 0);
     return `${who}（${from}）→ ${w.matName(op.m)}，${count.toLocaleString()} 格${tail}`;
+  }
+  if (op.kind === 'cd') {
+    const a = AXIS[op.axis];
+    const w0 = b ? [b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1][op.axis] : null;
+    const W = op.axis === 1 ? 'H' : op.axis === 2 ? 'D' : 'W';
+    const m = Math.abs(op.delta);
+    const sides = op.anchor === 'center' ? (m % 2 ? `兩側 +${Math.floor(m / 2)}／+${Math.ceil(m / 2)} 格` : `兩側各 ${op.delta > 0 ? '+' : '−'}${m / 2} 格`) : `單側 ${op.delta > 0 ? '+' : '−'}${m} 格`;
+    const anchor = op.anchor === 'center' ? '中心不動' : op.anchor === 'lo' ? `${a} 小的一側不動` : `${a} 大的一側不動`;
+    return `${who} ${W}（${a}）${w0 !== null ? `${w0} → ${w0 + op.delta}` : ''}（${sides} = ${nmText(op.delta, w.nm)}）· ${anchor} · 襯層${op.follow ? '跟著' : '不跟'}${op.policy === 'overwrite' ? ' · 允許穿層' : ''}${tail}`;
+  }
+  if (op.kind === 'dilate')
+    return `${who} 整層${op.n > 0 ? '加厚' : '減薄'} ${Math.abs(op.n)} 格（${nmText(op.n, w.nm)}）：沿每一面${op.n > 0 ? '往外長' : '往內退'}${op.follow ? '，外面的薄層跟著' + (op.n > 0 ? '推開' : '退回') : ''}${tail}`;
+  if (op.kind === 'defect') {
+    const shape = op.shape === 'sphere' ? '球' : op.shape === 'slab' ? '片' : '盒';
+    return `${who} 裡放 ${w.matName(op.mat)} ${shape}：中心 (${op.center.map((v) => v.toFixed(2)).join(', ')})、${op.size.join('×')} 格（${op.size.map((v) => (v * w.nm).toFixed(1).replace(/\.0$/, '')).join('×')} nm）`;
+  }
+  if (op.kind === 'taper') {
+    const [t0, t1] = op.along === 1 ? ['頂', '底'] : op.along === 0 ? ['左端', '右端'] : ['前端', '後端'];
+    const sg = (v: number) => (v > 0 ? `+${v}` : v < 0 ? `−${-v}` : '0');
+    const kind = op.bottom > op.top ? '（footing）' : op.bottom < op.top ? '（倒梯形）' : '';
+    return `${who} ${faceName(op.face)}側壁：${t0} ${sg(op.top)}、${t1} ${sg(op.bottom)} 格（線性${kind}）${op.both ? ' · 兩側對稱' : ''}${op.policy === 'overwrite' ? ' · 允許穿層' : ''}${tail}`;
   }
   return `${who} ${op.text ?? '剖面調整'}${tail}`;
 }

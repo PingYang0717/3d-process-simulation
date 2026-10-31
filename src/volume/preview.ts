@@ -7,15 +7,18 @@ import {
   type Vec3,
   type Volume,
   LINER_MAX,
+  dilateMask,
   growMask,
+  pushSeq,
+  setRegionMaterial,
   levelMask,
   localMask,
   setMaskMaterial,
   translateMask,
   unionBBox,
 } from './volume';
-import { type EditState, type LegacyOp, type Op, radiusOf, upgradeOp } from './ops';
-import { axisIndex, planeAxes } from './scope';
+import { type EditState, type LegacyOp, type Op, bboxOfKeys, cdSteps, radiusOf, taperSteps, upgradeOp } from './ops';
+import { type Scope, axisIndex, planeAxes } from './scope';
 import { type ProfileOp, type RingsFor, applyProfileMask, decodeRle, dirVec, rleBox } from './profile';
 import type { Report } from './kernel';
 
@@ -264,6 +267,32 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
   // scope 比結構短：沿 scope 的軸只算 scope 那一段（推面／補平的方向和 scope 同軸時不行：
   // 最外側的面要看整根，裁掉會把裁切邊當成表面）
   const sa = axisIndex(op.scope.axis);
+  if (op.kind === 'dilate') {
+    // 保形層：每一面都可能長／退 |n|，襯層再往外推（plan v11 §4.6）；來源可以在 scope 外，不裁 scope
+    const r = Math.abs(op.n) + LINER_MARGIN;
+    for (let k = 0; k < 3; k++) {
+      l[k] -= r;
+      h[k] += r;
+    }
+    return clampBox(fromLoHi(l, h), s.vol);
+  }
+  if (op.kind === 'defect') {
+    const a = op.abs;
+    return clampBox({ x0: Math.max(b.x0, a.x0), x1: Math.min(b.x1, a.x1), y0: Math.max(b.y0, a.y0), y1: Math.min(b.y1, a.y1), z0: Math.max(b.z0, a.z0), z1: Math.min(b.z1, a.z1) }, s.vol);
+  }
+  if (op.kind === 'cd' || op.kind === 'taper') {
+    // 展開成推面：推的那一軸兩側多留 |n|＋襯層；scope 和推的軸不同才裁
+    const a = op.kind === 'cd' ? op.axis : op.face[0] ? 0 : op.face[1] ? 1 : 2;
+    const n = op.kind === 'cd' ? Math.abs(op.delta) : Math.max(Math.abs(op.top), Math.abs(op.bottom));
+    if (a !== sa) {
+      l[sa] = Math.max(l[sa], op.scope.lo);
+      h[sa] = Math.min(h[sa], op.scope.hi);
+      if (l[sa] > h[sa]) return null;
+    }
+    l[a] -= n + LINER_MARGIN;
+    h[a] += n + LINER_MARGIN;
+    return clampBox(fromLoHi(l, h), s.vol);
+  }
   const along = (op.kind === 'push' || op.kind === 'level') && (op.dir[0] ? 0 : op.dir[1] ? 1 : 2) === sa;
   if (op.kind !== 'translate' && !along) {
     l[sa] = Math.max(l[sa], op.scope.lo);
@@ -327,12 +356,25 @@ export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap 
   let out: Volume;
   if (op.kind === 'push') {
     const m = op.local ? localMask(vol, mask, op.dir, shift(op.local.center), radiusOf(op.local), op.local.shape ?? 'round') : mask;
-    out = growMask(vol, o, m, zr, op.dir, op.n, op.backfill, op.follow, report);
+    out = growMask(vol, o, m, zr, op.dir, op.n, op.backfill, op.follow, report, op.policy ?? 'overwrite');
+  } else if (op.kind === 'cd' || op.kind === 'taper') {
+    const steps = op.kind === 'cd' ? cdSteps(op) : taperSteps(op, bboxOfKeys(s.L, op.keys)!);
+    const local = (sc: Scope): Scope => {
+      const d = [box.x0, box.y0, box.z0][axisIndex(sc.axis)];
+      return { axis: sc.axis, lo: sc.lo - d, hi: sc.hi - d };
+    };
+    out = pushSeq(vol, o, mask, steps.map((st) => ({ ...st, scope: local(st.scope), ...(st.clip ? { clip: local(st.clip) } : {}) })), op.backfill, op.follow, op.policy ?? 'overwrite', report);
+  } else if (op.kind === 'dilate') {
+    out = dilateMask(vol, o, mask, zr, op.n, op.backfill, op.follow, report);
+  } else if (op.kind === 'defect') {
+    const a = op.abs;
+    out = setRegionMaterial(vol, mask, zr, op.shape, { x0: a.x0 - box.x0, x1: a.x1 - box.x0, y0: a.y0 - box.y0, y1: a.y1 - box.y0, z0: a.z0 - box.z0, z1: a.z1 - box.z0 }, op.mat);
   } else if (op.kind === 'level') {
     const a = op.dir[0] ? 0 : op.dir[1] ? 1 : 2;
     const to = op.to - [box.x0, box.y0, box.z0][a];
     out = levelMask(vol, o, mask, zr, op.dir, shift(op.local.center), radiusOf(op.local), op.local.shape ?? 'round', to, op.backfill, !!op.follow, report);
   } else if (op.kind === 'translate') out = translateMask(vol, o, mask, zr, op.d, op.backfill, !!op.follow);
-  else out = setMaskMaterial(vol, mask, zr, op.m);
+  else if (op.kind === 'material') out = setMaskMaterial(vol, mask, zr, op.m);
+  else out = vol;
   return { box, data: out.data };
 }

@@ -14,11 +14,26 @@ export interface Volume {
   data: Uint8Array;
 }
 
+export type MaterialKind = 'semi' | 'diel' | 'metal' | 'void' | 'other';
+
 export interface Material {
   id: number;
   name: string;
   color: string;
+  /** 材質類別（plan v11 §4.10）：換材質清單只先列同類；省略＝依名稱猜（guessKind）。 */
+  kind?: MaterialKind;
 }
+
+/** 依名稱猜材質類別：Si／Poly → semi；SiO₂／SiN／HfO₂／low-k／Oxide／Nitride → diel；TiN／TaN／W／Cu／Co／Al／Ti → metal；VOID → void。 */
+export function guessKind(name: string, id?: number): MaterialKind {
+  if (id === 254 || /void|空洞/i.test(name)) return 'void';
+  const n = name.replace(/[₀-₉]/g, (c) => String(c.charCodeAt(0) - 0x2080));
+  if (/sio2|sin\b|si3n4|hfo2|al2o3|zro2|low-?k|oxide|nitride|氧化|氮化|sti|spacer|teos|bpsg/i.test(n)) return 'diel';
+  if (/tin\b|tan\b|^w\b|\bw\b|cu\b|co\b|al\b|ti\b|ru\b|metal|金屬/i.test(n)) return 'metal';
+  if (/poly|\bsi\b|^si|sige|ge\b|silicon|矽/i.test(n)) return 'semi';
+  return 'other';
+}
+export const kindOf = (m: Material) => m.kind ?? guessKind(m.name, m.id);
 
 export interface BBox {
   x0: number;
@@ -460,15 +475,35 @@ export function growMask(
   backfill: Backfill,
   follow: boolean,
   report?: Report,
+  policy: 'block' | 'overwrite' = 'overwrite',
+  /** 有給就寫入推完之後結構的 mask（scope 外＝原 mask，scope 內＝真正寫到的格子）；cd／taper 連推第二面用。 */
+  maskOut?: Uint8Array,
+  /** 再夾一個 scope（taper 的每一段沿高度軸、使用者的範圍沿另一軸）。 */
+  clip?: Scope,
 ): Volume {
   let cur = vol;
   // 第 0 步之前複製一次（之後原地改）；plan v9 P12：兩塊外框大小的 buffer 輪流當這一步的結果，face／front 共用 scratch
   const m = new Uint8Array(mask);
   const { X, Y, Z } = vol;
-  const sb = scopeBox(vol, scope);
-  if (!sb) return vol;
+  let sb = scopeBox(vol, scope);
+  if (sb && clip) {
+    const c = scopeBox(vol, clip);
+    sb = c && { x0: Math.max(sb.x0, c.x0), x1: Math.min(sb.x1, c.x1), y0: Math.max(sb.y0, c.y0), y1: Math.min(sb.y1, c.y1), z0: Math.max(sb.z0, c.z0), z1: Math.min(sb.z1, c.z1) };
+    if (sb && (sb.x0 > sb.x1 || sb.y0 > sb.y1 || sb.z0 > sb.z1)) sb = null;
+  }
+  const done = (v: Volume) => {
+    if (maskOut) {
+      maskOut.set(mask);
+      if (sb && v !== vol)
+        for (let z = sb.z0; z <= sb.z1; z++)
+          for (let y = sb.y0; y <= sb.y1; y++)
+            for (let x = sb.x0, i = (z * Y + y) * X + x; x <= sb.x1; x++, i++) maskOut[i] = m[i];
+    }
+    return v;
+  };
+  if (!sb) return done(vol);
   const steps = Math.abs(n);
-  if (!steps) return vol;
+  if (!steps) return done(vol);
   const bufs: Uint8Array[] = [];
   const face = new Uint8Array(m.length);
   const front = n > 0 ? new Uint8Array(m.length) : face;
@@ -486,9 +521,10 @@ export function growMask(
             const i = (z * Y + y) * X + x;
             if (!front[i] || m[i]) continue;
             const src = (z - d[2]) * X * Y + (y - d[1]) * X + (x - d[0]);
-            // 核心規則「加」；推面一直是蓋過去（overwrite），和以前相同
-            addCell(cur, out, x, y, z, d, cur.data[src], follow, 'overwrite', report);
+            // 核心規則「加」；policy 省略＝蓋過去（overwrite，舊 Op 重播不變）；block＝厚的別的材質擋住（plan v11 §4.10）
+            if (!addCell(cur, out, x, y, z, d, cur.data[src], follow, policy, report)) front[i] = 0;
           }
+      // 被擋的格子（block）上面已經從 front 拿掉：不算長出來，下一步不會從擋住的格子再往前長
       for (let i = 0; i < m.length; i++) if (front[i]) m[i] = 1;
     } else {
       // d 指向要退的方向（dir 的反向）；要退掉的是 dir 方向最外側那一層
@@ -507,7 +543,283 @@ export function growMask(
     }
     cur = { X, Y, Z, data: out };
   }
+  return done(cur);
+}
+
+/** 一個推面（cd／taper 展開後的每一步）。 */
+export interface PushStep {
+  scope: Scope;
+  dir: Vec3;
+  n: number;
+  clip?: Scope;
+}
+
+/**
+ * 依序推好幾面（cd 的兩側、taper 的每一段）：每一步讀上一步的結果，mask 用上一步之後結構真正的格子
+ * （growMask 的 maskOut），和「手動一步一步推」逐體素相同（cd.test.ts、taper.test.ts）。
+ */
+export function pushSeq(
+  vol: Volume,
+  orig: Volume,
+  mask: Uint8Array,
+  steps: PushStep[],
+  backfill: Backfill,
+  follow: boolean,
+  policy: 'block' | 'overwrite',
+  report?: Report,
+): Volume {
+  let cur = vol;
+  let m = mask;
+  for (const st of steps) {
+    if (!st.n) continue;
+    const next = new Uint8Array(m.length);
+    cur = growMask(cur, orig, m, st.scope, st.dir, st.n, backfill, follow, report, policy, next, st.clip);
+    m = next;
+  }
   return cur;
+}
+
+/** 半徑 r 以內（歐氏，|o|² ≤ r²）的位移，由近到遠；同距離依 (z, y, x) 字典序（固定順序，重播與裁切一致）。 */
+export function offsetsWithin(r: number): { o: Vec3; d2: number }[] {
+  const R = Math.floor(r);
+  const out: { o: Vec3; d2: number }[] = [];
+  for (let z = -R; z <= R; z++)
+    for (let y = -R; y <= R; y++)
+      for (let x = -R; x <= R; x++) {
+        const d2 = x * x + y * y + z * z;
+        if (d2 && d2 <= r * r) out.push({ o: [x, y, z], d2 });
+      }
+  return out.sort((a, b) => a.d2 - b.d2 || a.o[2] - b.o[2] || a.o[1] - b.o[1] || a.o[0] - b.o[0]);
+}
+const offsetCache = new Map<number, { o: Vec3; d2: number }[]>();
+const offsetsOf = (r: number) => {
+  let v = offsetCache.get(r);
+  if (!v) offsetCache.set(r, (v = offsetsWithin(r)));
+  return v;
+};
+
+const DIRS6: Vec3[] = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+/** 位移的軸向主分量（|分量| 最大的那一軸，同大時 x 先、再 y、再 z）→ 單位方向。 */
+export function majorAxis(d: Vec3): Vec3 {
+  const a = Math.abs(d[0]) >= Math.abs(d[1]) && Math.abs(d[0]) >= Math.abs(d[2]) ? 0 : Math.abs(d[1]) >= Math.abs(d[2]) ? 1 : 2;
+  const out: Vec3 = [0, 0, 0];
+  out[a] = Math.sign(d[a]) || 1;
+  return out;
+}
+
+/** mask 的外框（掃整個陣列）；空的回傳 null。 */
+export function maskBox(vol: Volume, mask: Uint8Array): BBox | null {
+  const { X, Y, Z } = vol;
+  const b: BBox = { x0: X, x1: -1, y0: Y, y1: -1, z0: Z, z1: -1 };
+  for (let z = 0, i = 0; z < Z; z++)
+    for (let y = 0; y < Y; y++)
+      for (let x = 0; x < X; x++, i++)
+        if (mask[i]) {
+          if (x < b.x0) b.x0 = x;
+          if (x > b.x1) b.x1 = x;
+          if (y < b.y0) b.y0 = y;
+          if (y > b.y1) b.y1 = y;
+          if (z < b.z0) b.z0 = z;
+          if (z > b.z1) b.z1 = z;
+        }
+  return b.x1 < 0 ? null : b;
+}
+
+/**
+ * 保形層加厚／減薄（plan v11 §4.6，歐氏距離）：
+ * - n > 0：mask 外、到最近 mask 格中心距離 ≤ n 的格子，由近到遠呼叫「加」（方向＝來源格指向它的軸向主分量，
+ *   材質＝來源格材質，block：空氣填、薄襯層 follow 推開、厚的擋住）。前一格（沿方向往回一格）必須已經是這個材質，
+ *   不會跳過被擋的格子長到外面。
+ * - n < 0：mask 內、到最近非 mask 格距離 ≤ |n| 的格子，由外到內呼叫「拿」（back＝指向最近外部格的主分量）。
+ * 只改 scope 裡的格子；多個結構各自算來源材質。
+ */
+export function dilateMask(
+  vol: Volume,
+  orig: Volume,
+  mask: Uint8Array,
+  scope: Scope,
+  n: number,
+  backfill: Backfill,
+  follow: boolean,
+  report?: Report,
+): Volume {
+  const { X, Y, Z } = vol;
+  const out = new Uint8Array(vol.data);
+  const r = Math.abs(n);
+  const b = maskBox(vol, mask);
+  if (!r || !b) return { X, Y, Z, data: out };
+  const live: Volume = { X, Y, Z, data: out };
+  const sa = axisIndex(scope.axis);
+  const offs = offsetsOf(r);
+  const plane = X * Y;
+  // 搜尋範圍：外框 ± r
+  const x0 = Math.max(0, b.x0 - r);
+  const x1 = Math.min(X - 1, b.x1 + r);
+  const y0 = Math.max(0, b.y0 - r);
+  const y1 = Math.min(Y - 1, b.y1 + r);
+  const z0 = Math.max(0, b.z0 - r);
+  const z1 = Math.min(Z - 1, b.z1 + r);
+  const W = x1 - x0 + 1;
+  const H = y1 - y0 + 1;
+  const D = z1 - z0 + 1;
+  const best = new Int32Array(W * H * D).fill(0x7fffffff);
+  const src = new Int32Array(W * H * D).fill(-1);
+  const grow = n > 0;
+  // 來源：邊界格（有 6 鄰居和自己不同類：grow 時是 mask 格碰到非 mask；shrink 時是非 mask 格碰到 mask）。
+  // shrink 只從「露出來的面」退：外面那一格是空氣或薄襯層（沿離開 mask 的方向 ≤ LINER_MAX 格）；
+  // 貼著厚材質（例如 fin）的那一面不退——和加厚時被厚材質擋住是同一件事。
+  const isIn = (x: number, y: number, z: number) => !!mask[(z * Y + y) * X + x];
+  const exposed = (x: number, y: number, z: number) => {
+    const i = (z * Y + y) * X + x;
+    const m = vol.data[i];
+    if (m === AIR) return true;
+    for (const [dx, dy, dz] of DIRS6) {
+      const mx = x - dx;
+      const my = y - dy;
+      const mz = z - dz;
+      if (!inside(vol, mx, my, mz) || !isIn(mx, my, mz)) continue;
+      let run = 0;
+      let [rx, ry, rz] = [x, y, z];
+      while (inside(vol, rx, ry, rz) && vol.data[(rz * Y + ry) * X + rx] === m && run <= LINER_MAX) {
+        run++;
+        rx += dx;
+        ry += dy;
+        rz += dz;
+      }
+      if (run <= LINER_MAX) return true;
+    }
+    return false;
+  };
+  for (let z = z0; z <= z1; z++)
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) {
+        const i = (z * Y + y) * X + x;
+        const m = !!mask[i];
+        if (m !== grow) continue;
+        const edge =
+          (x > 0 && isIn(x - 1, y, z) !== m) ||
+          (x < X - 1 && isIn(x + 1, y, z) !== m) ||
+          (y > 0 && isIn(x, y - 1, z) !== m) ||
+          (y < Y - 1 && isIn(x, y + 1, z) !== m) ||
+          (z > 0 && isIn(x, y, z - 1) !== m) ||
+          (z < Z - 1 && isIn(x, y, z + 1) !== m);
+        if (!edge) continue;
+        if (!grow && !exposed(x, y, z)) continue;
+        for (const { o, d2 } of offs) {
+          const tx = x + o[0];
+          const ty = y + o[1];
+          const tz = z + o[2];
+          if (tx < x0 || ty < y0 || tz < z0 || tx > x1 || ty > y1 || tz > z1) continue;
+          const t = (tz * Y + ty) * X + tx;
+          if (!!mask[t] === grow) continue;
+          const k = ((tz - z0) * H + ty - y0) * W + tx - x0;
+          if (d2 < best[k]) {
+            best[k] = d2;
+            src[k] = i;
+          }
+        }
+      }
+  const cand: number[] = [];
+  for (let k = 0; k < best.length; k++) if (src[k] >= 0) cand.push(k);
+  cand.sort((p, q) => best[p] - best[q] || p - q);
+  for (const k of cand) {
+    const lx = k % W;
+    const ly = ((k - lx) / W) % H;
+    const lz = (k - lx - ly * W) / (W * H);
+    const x = lx + x0;
+    const y = ly + y0;
+    const z = lz + z0;
+    if ([x, y, z][sa] < scope.lo || [x, y, z][sa] > scope.hi) continue;
+    const s = src[k];
+    const sx = s % X;
+    const sy = ((s - sx) / X) % Y;
+    const sz = (s - sx - sy * X) / plane;
+    const i = (z * Y + y) * X + x;
+    if (grow) {
+      const d = majorAxis([x - sx, y - sy, z - sz]);
+      const mat = vol.data[s];
+      const px = x - d[0];
+      const py = y - d[1];
+      const pz = z - d[2];
+      // 前一格還不是這個材質（被擋、或不在 scope）：不跳過去長
+      if (out[(pz * Y + py) * X + px] !== mat) continue;
+      addCell(live, out, x, y, z, d, mat, follow, 'block', report);
+    } else {
+      // back：從這一格指向最近的外部格
+      const back = majorAxis([sx - x, sy - y, sz - z]);
+      const mat = vol.data[i];
+      if (out[i] !== mat) continue;
+      removeCell(live, out, orig, x, y, z, back, mat, mat, backfill, follow, report);
+    }
+  }
+  return { X, Y, Z, data: out };
+}
+
+/** 缺陷的形狀判定：abs 外框裡，box／slab 全部，sphere 取內切橢球（格子中心）。 */
+export const inDefect = (shape: 'slab' | 'sphere' | 'box', b: BBox, x: number, y: number, z: number) => {
+  if (x < b.x0 || x > b.x1 || y < b.y0 || y > b.y1 || z < b.z0 || z > b.z1) return false;
+  if (shape !== 'sphere') return true;
+  const q = (v: number, a: number, c: number) => {
+    const r = (c - a + 1) / 2;
+    const t = (v + 0.5 - (a + c + 1) / 2) / r;
+    return t * t;
+  };
+  return q(x, b.x0, b.x1) + q(y, b.y0, b.y1) + q(z, b.z0, b.z1) <= 1;
+};
+
+/** 缺陷注入（plan v11 §4.7）：abs ∩ mask ∩ scope 裡的格子設成 mat；不經 kernel、不改 mask 以外。 */
+export function setRegionMaterial(vol: Volume, mask: Uint8Array, scope: Scope, shape: 'slab' | 'sphere' | 'box', abs: BBox, mat: number): Volume {
+  const { X, Y, Z } = vol;
+  const out = new Uint8Array(vol.data);
+  const sa = axisIndex(scope.axis);
+  for (let z = Math.max(0, abs.z0); z <= Math.min(Z - 1, abs.z1); z++)
+    for (let y = Math.max(0, abs.y0); y <= Math.min(Y - 1, abs.y1); y++)
+      for (let x = Math.max(0, abs.x0); x <= Math.min(X - 1, abs.x1); x++) {
+        const i = (z * Y + y) * X + x;
+        const t = sa === 0 ? x : sa === 1 ? y : z;
+        if (mask[i] && t >= scope.lo && t <= scope.hi && inDefect(shape, abs, x, y, z)) out[i] = mat;
+      }
+  return { X, Y, Z, data: out };
+}
+
+/**
+ * 襯層厚度（plan v11 §4.6「目前厚度約 n 格」）：每個 mask 格沿六個軸向量 run length（同 mask 連續幾格），
+ * 只取「兩端都碰到別的東西」的那一軸裡最短的那個（＝那一點的局部厚度），回傳中位數。量不到回 0。
+ */
+export function thicknessOf(vol: Volume, mask: Uint8Array, box?: BBox | null): number {
+  const { X, Y, Z } = vol;
+  const b = box ?? maskBox(vol, mask);
+  if (!b) return 0;
+  const runs: number[] = [];
+  const stride = [1, X, X * Y];
+  const dims = [X, Y, Z];
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++)
+      for (let x = b.x0; x <= b.x1; x++) {
+        const i = (z * Y + y) * X + x;
+        if (!mask[i]) continue;
+        const c = [x, y, z];
+        let min = Infinity;
+        for (let a = 0; a < 3; a++) {
+          let lo = 0;
+          while (c[a] - lo - 1 >= 0 && mask[i - (lo + 1) * stride[a]]) lo++;
+          let hi = 0;
+          while (c[a] + hi + 1 < dims[a] && mask[i + (hi + 1) * stride[a]]) hi++;
+          min = Math.min(min, lo + hi + 1);
+        }
+        runs.push(min);
+      }
+  if (!runs.length) return 0;
+  runs.sort((p, q) => p - q);
+  return runs[runs.length >> 1];
 }
 
 export function materialCounts(vol: Volume) {

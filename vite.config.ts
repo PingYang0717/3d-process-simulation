@@ -14,5 +14,6 @@ export default defineConfig({
       },
     },
   },
-  test: { environment: 'node' },
+  // 逐體素的測試在整個範例上跑（約 200 萬格），單一測試給長一點
+  test: { environment: 'node', testTimeout: 120_000 },
 });

@@ -1,18 +1,24 @@
 // 操作（Op）與重播：純函式，主執行緒與 Worker 共用，可單獨測試。
 import {
+  type BBox,
   type Backfill,
   type BrushShape,
+  type PushStep,
   type Labeled,
   type Material,
   type Vec3,
   type Volume,
   directionName,
+  dilateMask,
   growMask,
   levelMask,
   localMask,
   maskOf,
+  pushSeq,
   relabel,
   setMaskMaterial,
+  setRegionMaterial,
+  unionBBox,
   translateMask,
 } from './volume';
 import { type Scope, fromZRange, isFullScope, scopeText } from './scope';
@@ -29,13 +35,61 @@ export interface Local {
 export const radiusOf = (l: Local) => (l.radius === null ? Infinity : l.radius);
 
 /** scope：只有這個範圍裡的體素可以被改（推面時新格子落在 scope 外就不寫）。 */
+/** 推面碰到厚的別的材質：block＝擋住（plan v11 §4.10 新預設）、overwrite＝蓋過去（v10 以前；省略＝overwrite，舊 Op 重播不變）。 */
+export type Policy = 'block' | 'overwrite';
+
+/** level 的相對參照（plan v11 §4.9）：to = 參照結構外框在 dir 軸的 lo|hi + offset；apply 只看 to。 */
+export interface LevelRef {
+  key: string;
+  side: 'lo' | 'hi';
+  offset: number;
+}
+
+export type CdOp = { kind: 'cd'; keys: string[]; scope: Scope; axis: 0 | 1 | 2; delta: number; anchor: 'center' | 'lo' | 'hi'; follow: boolean; backfill: Backfill; policy?: Policy };
+export type DilateOp = { kind: 'dilate'; keys: string[]; scope: Scope; n: number; metric: 'euclid'; follow: boolean; backfill: Backfill };
+export type DefectShape = 'slab' | 'sphere' | 'box';
+export type DefectOp = {
+  kind: 'defect';
+  keys: string[];
+  scope: Scope;
+  shape: DefectShape;
+  /** 相對 host 外框的 0～1（§9 D5）。 */
+  center: Vec3;
+  /** 格數。 */
+  size: Vec3;
+  mat: number;
+  /** 產生時算好的絕對外框（含端點），apply 只看它（重播不變）。 */
+  abs: BBox;
+};
+export type TaperOp = {
+  kind: 'taper';
+  keys: string[];
+  scope: Scope;
+  /** 哪個側壁（往外的法線）。 */
+  face: Vec3;
+  /** 高度軸。 */
+  along: 0 | 1 | 2;
+  /** along 軸 lo 端（y：頂）與 hi 端（y：底）的位移，格，正＝往外。 */
+  top: number;
+  bottom: number;
+  /** 對面也做（鏡像）。 */
+  both?: boolean;
+  follow: boolean;
+  backfill: Backfill;
+  policy?: Policy;
+};
+
 export type Op =
-  | { kind: 'push'; keys: string[]; scope: Scope; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local }
+  | { kind: 'push'; keys: string[]; scope: Scope; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local; policy?: Policy }
   /** follow：外面的薄襯層（殼）一起搬；省略＝不帶（舊 Op）。 */
   | { kind: 'translate'; keys: string[]; scope: Scope; d: Vec3; backfill: Backfill; follow?: boolean }
   | { kind: 'material'; keys: string[]; scope: Scope; m: number }
   /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）；follow = 襯層跟推（同 push）。 */
-  | { kind: 'level'; keys: string[]; scope: Scope; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean }
+  | { kind: 'level'; keys: string[]; scope: Scope; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean; ref?: LevelRef }
+  | CdOp
+  | DilateOp
+  | DefectOp
+  | TaperOp
   /** 2D 剖面編輯（拖節點、斜邊、圓弧）：每個結構一份要加、要拿的格子，套用到 scope 裡的每一片（§7.3）。 */
   | ProfileOp;
 
@@ -48,6 +102,81 @@ export function upgradeOp(op: Op | LegacyOp): Op {
   const { zRange, ...rest } = op;
   return { ...rest, scope: fromZRange(zRange) } as Op;
 }
+
+const unit = (a: number, s: number): Vec3 => {
+  const d: Vec3 = [0, 0, 0];
+  d[a] = s;
+  return d;
+};
+
+/**
+ * cd 展開成推面（plan v11 §4.5）：center → lo 側 floor(|δ|/2)、hi 側 ceil(|δ|/2)（奇數多的給 hi，§9 D8）；
+ * lo 錨定＝只推 hi 側 δ；hi 錨定＝只推 lo 側 δ。先 lo 後 hi。
+ */
+export function cdSteps(op: CdOp): PushStep[] {
+  const s = Math.sign(op.delta);
+  const m = Math.abs(op.delta);
+  const [nlo, nhi] = op.anchor === 'lo' ? [0, m] : op.anchor === 'hi' ? [m, 0] : [Math.floor(m / 2), Math.ceil(m / 2)];
+  const out: PushStep[] = [];
+  if (nlo) out.push({ scope: op.scope, dir: unit(op.axis, -1), n: s * nlo });
+  if (nhi) out.push({ scope: op.scope, dir: unit(op.axis, 1), n: s * nhi });
+  return out;
+}
+
+/** taper 某一片的位移：沿 along 從 lo（top）到 hi（bottom）線性插值、四捨五入（Math.round）。 */
+export const taperDelta = (top: number, bottom: number, lo: number, hi: number, t: number) =>
+  Math.round(top + (bottom - top) * (hi === lo ? 0 : (t - lo) / (hi - lo)));
+
+/**
+ * taper 展開成推面（plan v11 §4.8）：結構沿 along 從 lo 到 hi 每一片算位移，相鄰同值合成一段，每段一個推面
+ * （scope 夾在這一段；使用者的 scope 另外夾，插值仍按整根算）；both 時對面鏡像再做一次。
+ */
+export function taperSteps(op: TaperOp, bbox: BBox): PushStep[] {
+  const A = (['x', 'y', 'z'] as const)[op.along];
+  const lo = [bbox.x0, bbox.y0, bbox.z0][op.along];
+  const hi = [bbox.x1, bbox.y1, bbox.z1][op.along];
+  const segs: { a: number; b: number; n: number }[] = [];
+  for (let t = lo; t <= hi; t++) {
+    const n = taperDelta(op.top, op.bottom, lo, hi, t);
+    const last = segs[segs.length - 1];
+    if (last && last.n === n) last.b = t;
+    else segs.push({ a: t, b: t, n });
+  }
+  const faces = op.both ? [op.face, op.face.map((v) => -v) as Vec3] : [op.face];
+  const out: PushStep[] = [];
+  for (const dir of faces)
+    for (const s of segs) if (s.n) out.push({ scope: { axis: A, lo: s.a, hi: s.b }, dir, n: s.n, clip: op.scope });
+  return out;
+}
+
+/** 缺陷的絕對外框：中心＝host 外框 lo + center·大小，size 格（含端點）；size 0 那一軸回傳 null（沒有缺陷）。 */
+export function defectBox(host: BBox, center: Vec3, size: Vec3): BBox | null {
+  if (size.some((v) => v <= 0)) return null;
+  const lo = [host.x0, host.y0, host.z0];
+  const hi = [host.x1, host.y1, host.z1];
+  const r = [0, 1, 2].map((a) => {
+    const c = lo[a] + center[a] * (hi[a] - lo[a] + 1);
+    const s = Math.round(size[a]);
+    const a0 = Math.round(c - s / 2);
+    return [a0, a0 + s - 1];
+  });
+  return { x0: r[0][0], x1: r[0][1], y0: r[1][0], y1: r[1][1], z0: r[2][0], z1: r[2][1] };
+}
+
+/** level 的相對參照 → 絕對 to（沿 dir 軸）；參照結構不在回傳 null。 */
+export function levelRefTo(L: Labeled, dir: Vec3, ref: LevelRef): number | null {
+  const c = L.comps.find((x) => x.key === ref.key);
+  if (!c) return null;
+  const a = dir[0] ? 0 : dir[1] ? 1 : 2;
+  const v = ref.side === 'lo' ? [c.bbox.x0, c.bbox.y0, c.bbox.z0][a] : [c.bbox.x1, c.bbox.y1, c.bbox.z1][a];
+  return v + ref.offset;
+}
+
+/** 結構（keys 聯集）的外框。 */
+export const bboxOfKeys = (L: Labeled, keys: string[]) => {
+  const ks = new Set(keys);
+  return unionBBox(L.comps.filter((c) => ks.has(c.key)));
+};
 
 export interface EditState {
   vol: Volume;
@@ -83,7 +212,16 @@ export function applyOp(s: EditState, input: Op | LegacyOp, ctx: OpContext): Edi
   let shift: Vec3 = [0, 0, 0];
   if (op.kind === 'push') {
     if (op.local) mask = localMask(s.vol, mask, op.dir, op.local.center, radiusOf(op.local), op.local.shape ?? 'round');
-    vol = growMask(s.vol, ctx.orig, mask, op.scope, op.dir, op.n, op.backfill, op.follow);
+    vol = growMask(s.vol, ctx.orig, mask, op.scope, op.dir, op.n, op.backfill, op.follow, undefined, op.policy ?? 'overwrite');
+  } else if (op.kind === 'cd') {
+    vol = pushSeq(s.vol, ctx.orig, mask, cdSteps(op), op.backfill, op.follow, op.policy ?? 'overwrite');
+  } else if (op.kind === 'taper') {
+    const b = bboxOfKeys(s.L, op.keys)!;
+    vol = pushSeq(s.vol, ctx.orig, mask, taperSteps(op, b), op.backfill, op.follow, op.policy ?? 'overwrite');
+  } else if (op.kind === 'dilate') {
+    vol = dilateMask(s.vol, ctx.orig, mask, op.scope, op.n, op.backfill, op.follow);
+  } else if (op.kind === 'defect') {
+    vol = setRegionMaterial(s.vol, mask, op.scope, op.shape, op.abs, op.mat);
   } else if (op.kind === 'level') {
     const l = op.local;
     vol = levelMask(s.vol, ctx.orig, mask, op.scope, op.dir, l.center, radiusOf(l), l.shape ?? 'round', op.to, op.backfill, !!op.follow);
@@ -114,13 +252,26 @@ export function opText(input: Op | LegacyOp, L: Labeled, dims: { X: number; Y: n
     return `${who}（${plane}，${scopeText(op.scope)}）${op.text ?? '剖面調整'}`;
   }
   const brush = (l: Local) => (l.radius === null ? '整面' : `筆刷 ${l.shape === 'square' ? '方' : '圓'} r${l.radius}`);
+  const nm = (n: number) => `${(Math.abs(n) * nmPerVoxel).toFixed(1)} nm`;
+  const pol = (p?: Policy) => (p === 'overwrite' ? ' · 允許穿層' : '');
   if (op.kind === 'push') {
     const n = Math.abs(op.n);
-    return `${who}${part}${op.local ? `（${brush(op.local)}）` : ''} ${directionName(op.dir)}${op.n > 0 ? '長' : '縮'} ${n} vx（${(n * nmPerVoxel).toFixed(1)} nm）`;
+    return `${who}${part}${op.local ? `（${brush(op.local)}）` : ''} ${directionName(op.dir)}${op.n > 0 ? '長' : '縮'} ${n} vx（${nm(n)}）${op.policy ? pol(op.policy) : ''}`;
   }
+  if (op.kind === 'cd') {
+    const a = 'xyz'[op.axis];
+    const anchor = op.anchor === 'center' ? '中心不動' : op.anchor === 'lo' ? `${a} 小的一側不動` : `${a} 大的一側不動`;
+    return `${who}${part} 沿 ${a} 寬度 ${op.delta > 0 ? '+' : ''}${op.delta} vx（${nm(op.delta)}，${anchor}）${pol(op.policy)}`;
+  }
+  if (op.kind === 'dilate') return `${who}${part} 整層${op.n > 0 ? '加厚' : '減薄'} ${Math.abs(op.n)} vx（${nm(op.n)}，保形）`;
+  if (op.kind === 'defect') {
+    const s = op.size.map((v) => v).join('×');
+    return `${who}${part} 放 ${matName(op.mat)}（${op.shape === 'sphere' ? '球' : op.shape === 'slab' ? '片' : '盒'}，${s} vx）`;
+  }
+  if (op.kind === 'taper') return `${who}${part} ${directionName(op.face)}側壁斜度：${op.along === 1 ? '頂' : '起端'} ${op.top > 0 ? '+' : ''}${op.top}、${op.along === 1 ? '底' : '末端'} ${op.bottom > 0 ? '+' : ''}${op.bottom} vx${op.both ? '（兩側）' : ''}${pol(op.policy)}`;
   if (op.kind === 'level') {
     const axis = op.dir[0] ? 'x' : op.dir[1] ? 'y' : 'z';
-    return `${who}${part}（${brush(op.local)}）方頭到 ${axis} = ${op.to}（${(op.to * nmPerVoxel).toFixed(1)} nm）`;
+    return `${who}${part}（${brush(op.local)}）方頭到 ${axis} = ${op.to}（${(op.to * nmPerVoxel).toFixed(1)} nm）${op.ref ? `（相對參照 ${op.ref.offset > 0 ? '+' : ''}${op.ref.offset} vx）` : ''}`;
   }
   if (op.kind === 'translate') {
     const parts = ['x', 'y', 'z']
@@ -134,7 +285,7 @@ export function opText(input: Op | LegacyOp, L: Labeled, dims: { X: number; Y: n
 
 export type SweepKind = { kind: 'push'; dir: Vec3 } | { kind: 'translate'; axis: 0 | 1 | 2 };
 
-/** 掃描：同一個操作、不同數值，每個數值一個 op。 */
+/** 掃描：同一個操作、不同數值，每個數值一個 op。@deprecated plan v11：由 factors.ts（Factor／Design）取代。 */
 export function sweepOps(
   kind: SweepKind,
   keys: string[],

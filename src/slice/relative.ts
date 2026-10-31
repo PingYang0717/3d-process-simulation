@@ -5,6 +5,7 @@ import type { ProfileCell } from '../volume/rle';
 import { type Ring, type XY, ringPolygon, traceRings } from './trace';
 import { deltaOf, editRing, rasterize } from './raster';
 import { type Handle, dragDisp, groupNormal, smoothEdgeGroup } from './gestures';
+import { type DragArg, type NodeDrag, isSingle, resolveNodeDrag } from './snap';
 
 export interface RelGesture {
   kind: 'node' | 'edge';
@@ -13,9 +14,15 @@ export interface RelGesture {
   /** 節點：位移（格）；邊：沿法線的格數放在 amount。 */
   delta: XY;
   amount: number;
+  /** 邊：只推這一段；節點：拖法是 single（舊版 Op 只有這個欄位）。 */
   shift: boolean;
+  /** 節點的拖法（v10）：每一片重做同一種。舊 Op 沒有這個欄位＝shift ? 'single' : 'falloff'（和舊版逐格相同）。 */
+  drag?: NodeDrag;
   hole: boolean;
 }
+
+/** 這個手勢的節點拖法（沒記錄的舊 Op：shift ? single : falloff）。 */
+export const gestureDrag = (g: RelGesture): NodeDrag => g.drag ?? (g.shift ? 'single' : 'falloff');
 
 export const NODE_TOL = 0.12;
 export const EDGE_TOL = 0.2;
@@ -40,8 +47,8 @@ export function ringsBox(rs: Ring[]): Box | null {
 }
 export const normIn = (b: Box, p: XY): XY => [(p[0] - b.u0) / (b.u1 - b.u0 + 1), (p[1] - b.v0) / (b.v1 - b.v0 + 1)];
 
-/** 這個把手的手勢記錄（建立 profile Op 時呼叫）。 */
-export function recordGesture(rs: Ring[], h: Handle, delta: XY, amount: number, shift: boolean): RelGesture | null {
+/** 這個把手的手勢記錄（建立 profile Op 時呼叫）。shift：拖法（DragArg；節點記下決定好的拖法）。 */
+export function recordGesture(rs: Ring[], h: Handle, delta: XY, amount: number, shift: DragArg): RelGesture | null {
   const b = ringsBox(rs);
   const r = rs[h.ring];
   if (!b || !r || h.kind === 'region') return null;
@@ -49,7 +56,11 @@ export function recordGesture(rs: Ring[], h: Handle, delta: XY, amount: number, 
     const g = smoothEdgeGroup(r, h.index, shift);
     return [normIn(b, r.pts[g[0]]), normIn(b, r.pts[g[g.length - 1]])];
   })();
-  return { kind: h.kind, ref, delta: [Math.round(delta[0]), Math.round(delta[1])], amount, shift, hole: r.hole };
+  if (h.kind === 'node') {
+    const drag = resolveNodeDrag(r, h.index, shift);
+    return { kind: h.kind, ref, delta: [Math.round(delta[0]), Math.round(delta[1])], amount, shift: drag === 'single', drag, hole: r.hole };
+  }
+  return { kind: h.kind, ref, delta: [Math.round(delta[0]), Math.round(delta[1])], amount, shift: isSingle(shift), hole: r.hole };
 }
 
 /** 在這一片的環裡找同一個把手；對不到回傳 null。 */
@@ -157,7 +168,7 @@ export function relativeCells(
     const n = groupNormal(r, smoothEdgeGroup(r, h.index, g.shift));
     delta = [n[0] * g.amount, n[1] * g.amount];
   }
-  const disp = dragDisp(r, h, delta, g.shift);
+  const disp = dragDisp(r, h, delta, g.kind === 'node' ? gestureDrag(g) : g.shift);
   const after = rs.map((x, i) => (i === h.ring ? editRing(x, disp) : ringPolygon(x)));
   let a0 = Infinity;
   let b0 = Infinity;

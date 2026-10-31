@@ -7,7 +7,7 @@ import { type Scope, axisIndex, axisLen, planeAxes, to3D } from '../../volume/sc
 import { type Ring, type XY, boundaryLoops, traceRings } from '../../slice/trace';
 import { editRing } from '../../slice/raster';
 import { type Handle, type HandleKind, dragDisp, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
-import { dragDispFloat, snapAmount } from '../../slice/snap';
+import { type DragArg, type NodeDrag, dragDispFloat, isSingle, resolveNodeDrag, selfIntersects, snapAmount } from '../../slice/snap';
 import { type ModelStore, type VId, insertNode, locate, removeHandle, ringsOf, sliceOfKey, vidOf } from '../../slice/model';
 import { type ModelHost, commitGesture, opOfGesture, sliceContext } from './handleOps';
 import { type SlicePreview, SlicePreviewLayer } from './SlicePreviewLayer';
@@ -65,7 +65,11 @@ export function sliceRings(L: Labeled, vol: Volume, axis: Axis, at: number, keys
   return out;
 }
 
-type DragLive = { h: Handle; delta: XY; shift: boolean; op: Op | null; missed: string[] };
+type DragLive = { h: Handle; delta: XY; shift: DragArg; op: Op | null; missed: string[] };
+/** 拖拉中的修飾鍵 → 拖法：Shift＝單點／單段、Alt＝自由衰減、都沒按＝依形狀自動選（矩形角或單點）。 */
+const dragArgOf = (e: { shiftKey: boolean; altKey: boolean }): DragArg => (e.shiftKey ? true : e.altKey ? 'falloff' : false);
+const DRAG_TIP: Record<NodeDrag, string> = { corner: ' · 矩形角（Shift 單點、Alt 衰減）', single: ' · 只動這一點', falloff: ' · 自由衰減' };
+const SELF_X = '輪廓自交，放開會出現缺口';
 /** +1.6／−2.3（正負號一律寫出來）。 */
 const signed = (x: number) => `${x > 0 ? '+' : x < 0 ? '−' : ''}${Number.isInteger(x) ? Math.abs(x) : Math.abs(x).toFixed(1)}`;
 
@@ -97,8 +101,8 @@ const sameHandle = (a: Handle | null, b: Handle | null) =>
   a === b || (!!a && !!b && a.kind === b.kind && a.key === b.key && a.ring === b.ring && a.index === b.index);
 
 /**
- * 主切面（2D 編輯狀態）：滾輪朝游標縮放、右鍵／中鍵／空白鍵＋左鍵／Alt＋左鍵拖＝平移、雙擊空白＝適合視窗、
- * Ctrl＋滾輪換片。左鍵點一下＝選取（Shift 加選、Ctrl 切換）。底圖和下方小切面同一個 drawSlice。
+ * 主切面（2D 編輯狀態）：滾輪朝游標縮放、右鍵／中鍵／空白鍵＋左鍵拖＝平移、雙擊空白＝適合視窗、
+ * Ctrl＋滾輪換片。左鍵點一下＝選取（Shift 加選、Ctrl 切換）。左鍵拖把手：預設依形狀（矩形角／單點）、Shift＝單點、Alt＝自由衰減。底圖和下方小切面同一個 drawSlice。
  */
 export function SliceEditor({
   vol,
@@ -224,7 +228,7 @@ export function SliceEditor({
     [L, vol, axis, at, rings, model, gesture?.scope, gesture?.follow, gesture?.backfill, gesture?.nm],
   );
   /** 放開＝一步：幾何層先更新（不等 Worker），再送 Op。 */
-  const commitOp = (h: Handle, delta: XY, shift: boolean, op: Op) => {
+  const commitOp = (h: Handle, delta: XY, shift: DragArg, op: Op) => {
     if (host && sctx) {
       commitGesture(host, sctx, h, delta, shift, op);
       bump();
@@ -243,7 +247,7 @@ export function SliceEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [got]);
   /** 手勢 → Op（多選＋對應時一起改長得一樣的結構）。 */
-  const opFor = (h: Handle, delta: XY, shift: boolean) => (sctx ? opOfGesture(sctx, h, delta, shift, mirror) : { op: null, missed: [] as string[] });
+  const opFor = (h: Handle, delta: XY, shift: DragArg) => (sctx ? opOfGesture(sctx, h, delta, shift, mirror) : { op: null, missed: [] as string[] });
   const labelOf = (key: string) => L?.comps.find((c) => c.key === key)?.label ?? key;
   const noteMissed = (missed: string[], h: Handle) => {
     if (missed.length) onNote?.(`${missed.map(labelOf).join('、')} 找不到對應的${h.kind === 'node' ? '節點' : '邊'}，未改`);
@@ -267,7 +271,7 @@ export function SliceEditor({
   const ghostRef = useRef<SVGPathElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   /** pointermove 只記最新的位置；requestAnimationFrame 每幀最多算一次。 */
-  const latestMove = useRef<{ x: number; y: number; shift: boolean } | null>(null);
+  const latestMove = useRef<{ x: number; y: number; shift: DragArg } | null>(null);
   const raf = useRef(0);
   /** 按住 V／E／R：只抓節點／邊／區域。按住 V 時也顯示所有頂點（不只節點）。 */
   const only = useRef<HandleKind | undefined>(undefined);
@@ -429,37 +433,45 @@ export function SliceEditor({
     return hitTest(rings, q, p.zoom, insideKey, only.current);
   };
   /** 拖動中的提示文字（§5.2）：浮點 → 放開後取的整數。 */
-  const tipText = (h: Handle, delta: XY, shift: boolean, op: Op | null) => {
+  const tipText = (h: Handle, delta: XY, shift: DragArg, op: Op | null) => {
     const nm = gesture?.nm ?? 0.5;
     const r = rings.get(h.key)?.[h.ring];
     const sn = snapAmount(r, h, delta, shift);
     const pair = (p: XY) => `(${signed(p[0])}, ${signed(p[1])})`;
     if (h.kind === 'node')
-      return `${pair(sn.raw)} → 取 ${pair(sn.snapped)}　${(Math.hypot(...sn.snapped) * nm).toFixed(1)} nm${shift ? ' · 只動這一點' : ''}`;
+      return `${pair(sn.raw)} → 取 ${pair(sn.snapped)}　${(Math.hypot(...sn.snapped) * nm).toFixed(1)} nm${r ? DRAG_TIP[resolveNodeDrag(r, h.index, shift)] : ''}`;
     if (h.kind === 'edge' && r && sn.amount) {
       const { raw, snapped } = sn.amount;
       const nrm = groupNormal(r, smoothEdgeGroup(r, h.index, shift));
       const word = snapped >= 0 ? `${uvWord(nrm[0], nrm[1])}（往外）` : `${uvWord(-nrm[0], -nrm[1])}（往內）`;
       const kind = op?.kind === 'push' ? '推面' : '剖面';
-      return `邊${word} ${Math.abs(raw).toFixed(1)} → 取 ${Math.abs(snapped)} vx（${(Math.abs(snapped) * nm).toFixed(1)} nm）· ${kind}${gesture?.follow ? ' · 襯層一起推' : ' · 防穿層'}${shift ? ' · 只推這一段' : ''}`;
+      return `邊${word} ${Math.abs(raw).toFixed(1)} → 取 ${Math.abs(snapped)} vx（${(Math.abs(snapped) * nm).toFixed(1)} nm）· ${kind}${gesture?.follow ? ' · 襯層一起推' : ' · 防穿層'}${isSingle(shift) ? ' · 只推這一段' : ''}`;
     }
     return `搬 ${pair(sn.raw)} → 取 ${pair(sn.snapped)}`;
   };
-  /** 拖動中的新輪廓：放開才吸附＝浮點位移（跟手）；邊拖邊吸附＝整數位移（v7）。幾何線＝頂點連線，階梯＝原始折線內插。 */
-  const ghostD = (h: Handle, delta: XY, shift: boolean) => {
+  /**
+   * 拖動中的新輪廓：放開才吸附＝浮點位移（跟手）；邊拖邊吸附＝整數位移（v7）。幾何線＝頂點連線，階梯＝原始折線內插。
+   * cross：拖過的環自交（偶奇規則會挖出缺口）→ ghost 畫紅、提示；點太多（> 200）不檢查。
+   */
+  const ghostD = (h: Handle, delta: XY, shift: DragArg): { d: string; cross: boolean } => {
     const float = geo?.snap !== 'live';
     const stairs = geo?.outline === 'stairs' || !geo;
     if (h.kind === 'region') {
       const d: XY = float ? delta : [Math.round(delta[0]), Math.round(delta[1])];
-      return [...rings.values()]
+      const path = [...rings.values()]
         .flat()
         .map((x) => pathOf((stairs ? x.raw.flatMap((seg) => seg.slice(0, -1)) : x.pts).map((p) => [p[0] + d[0], p[1] + d[1]] as XY)))
         .join('');
+      return { d: path, cross: false };
     }
     const r = rings.get(h.key)?.[h.ring];
-    if (!r) return '';
+    if (!r) return { d: '', cross: false };
     const disp = float ? dragDispFloat(r, h, delta, shift) : dragDisp(r, h, delta, shift);
-    return pathOf(stairs ? editRing(r, disp) : r.pts.map((p, i) => [p[0] + disp[i][0], p[1] + disp[i][1]] as XY));
+    const edited = editRing(r, disp);
+    const geom = r.pts.map((p, i) => [p[0] + disp[i][0], p[1] + disp[i][1]] as XY);
+    // editRing 的點（原始折線）太多時改查頂點連線（形狀相同、點少）
+    const cross = !!(selfIntersects(edited) ?? selfIntersects(geom));
+    return { d: pathOf(stairs ? edited : geom), cross };
   };
   /** 一幀（§7.2）：Op（＝snap 後的格子，給第二層預覽與 3D）＋浮點 ghost＋提示文字。 */
   const tick = () => {
@@ -471,11 +483,19 @@ export function SliceEditor({
     const delta: XY = [(mv.x - pr.x) / z, (mv.y - pr.y) / z];
     const { op, missed } = opFor(pr.hit, delta, mv.shift);
     dragRef.current = { h: pr.hit, delta, shift: mv.shift, op, missed };
-    ghostRef.current?.setAttribute('d', ghostD(pr.hit, delta, mv.shift));
+    const gd = ghostD(pr.hit, delta, mv.shift);
+    const gp = ghostRef.current;
+    if (gp) {
+      gp.setAttribute('d', gd.d);
+      gp.setAttribute('stroke', gd.cross ? '#f5222d' : '#fa541c');
+      gp.setAttribute('fill', gd.cross ? 'rgba(245,34,45,0.12)' : 'rgba(250,84,28,0.08)');
+    }
     const t = tipRef.current;
     const host = hostRef.current?.getBoundingClientRect();
     if (t && host) {
-      t.textContent = tipText(pr.hit, delta, mv.shift, op);
+      t.textContent = `${tipText(pr.hit, delta, mv.shift, op)}${gd.cross ? `\n${SELF_X}` : ''}`;
+      t.style.whiteSpace = 'pre-line';
+      t.style.color = gd.cross ? '#ff7875' : '';
       t.style.left = `${mv.x - host.left + 14}px`;
       t.style.top = `${mv.y - host.top + 16}px`;
       t.style.display = '';
@@ -578,10 +598,30 @@ export function SliceEditor({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rings]);
+  /** 游標：節點＝依角的象限（往外的對角方向）nwse／nesw、邊＝依法線 ns／ew、區域＝move。 */
   const cursorFor = (h: Handle | null) => {
     if (!h) return '';
-    if (h.kind === 'node') return 'move';
-    if (h.kind === 'region') return 'grab';
+    if (h.kind === 'region') return 'move';
+    if (h.kind === 'node') {
+      const r = rings.get(h.key)?.[h.ring];
+      if (!r) return 'move';
+      const n = r.pts.length;
+      const p = r.pts[h.index];
+      const a = r.pts[(h.index - 1 + n) % n];
+      const b = r.pts[(h.index + 1) % n];
+      const unit = (q: XY): XY => {
+        const l = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
+        return [(p[0] - q[0]) / l, (p[1] - q[1]) / l];
+      };
+      // 離開兩個鄰點的方向相加＝角往外的對角線（凹角是往內，同一條對角線）
+      const ua = unit(a);
+      const ub = unit(b);
+      const du = ua[0] + ub[0];
+      const dv = ua[1] + ub[1];
+      const l = Math.hypot(du, dv);
+      if (l < 1e-6 || Math.abs(du) < 0.25 * l || Math.abs(dv) < 0.25 * l) return 'move';
+      return du * dv > 0 ? 'nwse-resize' : 'nesw-resize';
+    }
     const r = rings.get(h.key)?.[h.ring];
     if (!r) return '';
     const n = groupNormal(r, smoothEdgeGroup(r, h.index));
@@ -694,7 +734,8 @@ export function SliceEditor({
       onPointerDown={(e) => {
         const p = xfRef.current;
         if (!p) return;
-        const pan = e.button === 1 || e.button === 2 || (e.button === 0 && (space.current || e.altKey));
+        // 平移：右鍵／中鍵／空白鍵＋左鍵（Alt＋左鍵改成「自由衰減」拖節點）
+        const pan = e.button === 1 || e.button === 2 || (e.button === 0 && space.current);
         if (e.button !== 0 && !pan) return;
         e.currentTarget.setPointerCapture(e.pointerId);
         press.current = { x: e.clientX, y: e.clientY, pan, tx: p.tx, ty: p.ty, id: e.pointerId, hit: pan ? null : hitAt(e.clientX, e.clientY), dragging: false, button: e.button };
@@ -709,11 +750,11 @@ export function SliceEditor({
         if (pr?.hit) {
           // 拖動：過了 4px 才算；pointermove 只記位置，每一幀算一次（rAF 合併，§8.1）
           if (!pr.dragging && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < CLICK_PX) return;
-          latestMove.current = { x: e.clientX, y: e.clientY, shift: e.shiftKey };
+          latestMove.current = { x: e.clientX, y: e.clientY, shift: dragArgOf(e) };
           if (!pr.dragging) {
             pr.dragging = true;
             onDragState?.(true);
-            setDrag({ h: pr.hit, delta: [0, 0], shift: e.shiftKey, op: null, missed: [] });
+            setDrag({ h: pr.hit, delta: [0, 0], shift: dragArgOf(e), op: null, missed: [] });
           }
           if (!raf.current) raf.current = requestAnimationFrame(tick);
           return;
@@ -742,7 +783,7 @@ export function SliceEditor({
         if (pr.dragging) {
           // 放開＝一步（立刻套用到範圍）。還沒算的那一幀先同步算掉：commit 的就是最後看到的格子
           press.current = pr;
-          latestMove.current = { x: e.clientX, y: e.clientY, shift: e.shiftKey };
+          latestMove.current = { x: e.clientX, y: e.clientY, shift: dragArgOf(e) };
           if (raf.current) cancelAnimationFrame(raf.current);
           tick();
           press.current = null;
@@ -917,7 +958,7 @@ export function SliceEditor({
           <div>在<b>裡面</b>可以搬</div>
         </div>
       )}
-      <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>
+      <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · 拖角：Shift＝單點、Alt＝自由衰減 · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>
     </div>
   );
 }

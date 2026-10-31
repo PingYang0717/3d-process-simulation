@@ -5,7 +5,7 @@ import type { Axis, Labeled, Volume } from '../../volume/volume';
 import type { Op } from '../../volume/ops';
 import { planeAxes, to3D } from '../../volume/scope';
 import type { Ring, XY } from '../../slice/trace';
-import { type GestureCtx, type Handle, dragDisp, gestureToOp, hitTest } from '../../slice/gestures';
+import { type DragArg, type GestureCtx, type Handle, dragDisp, gestureToOp, hitTest } from '../../slice/gestures';
 import { type Shape, mirroredOp } from '../../slice/mirror';
 import { type ModelStore, type SliceModel, applyDisp, exactOp, locate, ringsOf, translateKeys } from '../../slice/model';
 import { type GestureOpts, type PickedHandle, sliceRings } from './SliceEditor';
@@ -72,17 +72,25 @@ export function modelContext(ed: ModelHost, axis: Axis, at: number, keys: string
   return { ...sliceContext(ed.L, ed.vol, axis, at, keys, opts, ringsOf(model, keys)), model };
 }
 
-/** 手勢 → Op：多選且 mirror 開著時對應到其他結構；missed＝配不到的 key。幾何改過的結構參考片用絕對格子。 */
-export function opOfGesture(ctx: SliceCtx, h: Handle, delta: XY, shift: boolean, mirror: boolean): { op: Op | null; missed: string[] } {
-  const r = mirror && ctx.rings.size > 1 && h.kind !== 'region' ? mirroredOp(ctx.rings, h, delta, shift, ctx.g, ctx.shapes) : { op: gestureToOp(ctx.rings, h, delta, shift, ctx.g), missed: [] };
+/**
+ * 手勢 → Op：多選且 mirror 開著時對應到其他結構；missed＝配不到的 key。幾何改過的結構參考片用絕對格子。
+ * shift：拖法（DragArg）。true ≡ 單點／單段、false ≡ 依形狀自動選（矩形角或單點）；也可直接給 'corner'／'single'／'falloff'。
+ */
+export function opOfGesture(ctx: SliceCtx, h: Handle, delta: XY, shift: DragArg, mirror: boolean): { op: Op | null; missed: string[] } {
+  // mirroredOp 的參數型別還是 boolean，但它只把這個值原樣轉給 gestureToOp／dragDisp／recordGesture 等（都吃 DragArg）
+  const r =
+    mirror && ctx.rings.size > 1 && h.kind !== 'region'
+      ? mirroredOp(ctx.rings, h, delta, shift as boolean, ctx.g, ctx.shapes)
+      : { op: gestureToOp(ctx.rings, h, delta, shift, ctx.g), missed: [] };
   return { ...r, op: r.op ? exactOp(ctx.model, r.op) : null };
 }
 
 /**
  * 放開＝一步（§7.3）：幾何層立刻用整數位移更新（先存這個版本的快照、標記等 Worker），再送 Op。
+ * 位移和 Op、ghost 同一個 dragDisp（同一個拖法 shift）。
  * 對應到的其他結構不在這裡移動：Worker 回來驗證時對不上就以 voxel 為準重描（節點 id 保留）。
  */
-export function commitGesture(ed: ModelHost, ctx: SliceCtx, h: Handle, delta: XY, shift: boolean, op: Op | null) {
+export function commitGesture(ed: ModelHost, ctx: SliceCtx, h: Handle, delta: XY, shift: DragArg, op: Op | null) {
   if (!op) return;
   const m = ctx.model;
   if (m) {

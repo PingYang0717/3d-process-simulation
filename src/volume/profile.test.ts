@@ -88,7 +88,7 @@ describe('profile Op 與手勢（§7.3、§6.3、§10.3）', () => {
     r.pts.forEach((p, i) => {
       if (r.nodes.has(i) && p[1] <= r.pts[corner][1] && p[0] >= r.pts[corner][0]) corner = i;
     });
-    const op = gestureToOp(rings, { kind: 'node', key: fin0.key, ring: 0, index: corner }, [2, -2], false, g)!;
+    const op = gestureToOp(rings, { kind: 'node', key: fin0.key, ring: 0, index: corner }, [2, -2], 'falloff', g)!;
     expect(op.kind).toBe('profile');
     const r1 = applyOpLocal(base, op, ctx);
     expect(r1.report.filled + r1.report.pushed).toBeGreaterThan(0);

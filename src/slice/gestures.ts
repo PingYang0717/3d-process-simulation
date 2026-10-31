@@ -7,9 +7,10 @@ import { encodeRle } from '../volume/rle';
 import { recordGesture } from './relative';
 import { type Ring, type XY, ringPolygon } from './trace';
 import { deltaOf, editRing, rasterize } from './raster';
-import { dragDisp, edgeAmount, groupNormal, isAxisEdge, smoothEdgeGroup } from './snap';
+import { type DragArg, type NodeDrag, dragDisp, edgeAmount, groupNormal, isAxisEdge, isSingle, resolveNodeDrag, smoothEdgeGroup } from './snap';
 
-export { dragDisp, dragDispFloat, edgeAmount, falloffWeights, groupNormal, isAxisEdge, smoothEdgeGroup, snapAmount } from './snap';
+export { dragDisp, dragDispFloat, dragModeOf, edgeAmount, falloffWeights, groupNormal, isAxisCorner, isAxisEdge, isSingle, resolveNodeDrag, smoothEdgeGroup, snapAmount } from './snap';
+export type { DragArg, DragMode, NodeDrag } from './snap';
 
 export type HandleKind = 'node' | 'edge' | 'region';
 export interface Handle {
@@ -21,9 +22,8 @@ export interface Handle {
 }
 
 /** 熱區（螢幕像素，不隨縮放變）。 */
-export const NODE_PX = 8;
+export const NODE_PX = 6;
 export const EDGE_PX = 6;
-/** 角：前後夾角 ≥ 50°（smoothEdgeGroup 停在角上）。 */
 
 const segDist = (p: XY, a: XY, b: XY) => {
   const dx = b[0] - a[0];
@@ -34,7 +34,8 @@ const segDist = (p: XY, a: XY, b: XY) => {
 };
 
 /**
- * 游標在 p（切面座標，格子角＝整數）時抓到什麼：節點 > 邊 > 區域。zoom = 每格幾個螢幕像素。
+ * 游標在 p（切面座標，格子角＝整數）時抓到什麼：節點和邊都在範圍內時比「距離／各自的半徑」，近的贏（v10：不再節點一律優先，
+ * 想推邊不會老是抓到角）；都沒有才是區域。zoom = 每格幾個螢幕像素。
  * inside(key, u, v)：那一格是不是這個結構（區域判斷用）。only：按住 V／E／R 時只看一種。
  */
 export function hitTest(
@@ -46,34 +47,36 @@ export function hitTest(
 ): Handle | null {
   const nodeR = NODE_PX / zoom;
   const edgeR = EDGE_PX / zoom;
-  let best: Handle | null = null;
-  let bd = Infinity;
+  let node: Handle | null = null;
+  let nd = Infinity;
   if (!only || only === 'node')
     for (const [key, rs] of rings)
       rs.forEach((r, ri) =>
         r.nodes.forEach((i) => {
           const d = Math.hypot(r.pts[i][0] - p[0], r.pts[i][1] - p[1]);
-          if (d <= nodeR && d < bd) {
-            bd = d;
-            best = { kind: 'node', key, ring: ri, index: i };
+          if (d <= nodeR && d < nd) {
+            nd = d;
+            node = { kind: 'node', key, ring: ri, index: i };
           }
         }),
       );
-  if (best) return best;
+  let edge: Handle | null = null;
+  let ed = Infinity;
   if (!only || only === 'edge')
     for (const [key, rs] of rings)
       rs.forEach((r, ri) =>
         r.raw.forEach((seg, i) => {
           for (let k = 0; k + 1 < seg.length; k++) {
             const d = segDist(p, seg[k], seg[k + 1]);
-            if (d <= edgeR && d < bd) {
-              bd = d;
-              best = { kind: 'edge', key, ring: ri, index: i };
+            if (d <= edgeR && d < ed) {
+              ed = d;
+              edge = { kind: 'edge', key, ring: ri, index: i };
             }
           }
         }),
       );
-  if (best) return best;
+  if (node && edge) return nd / nodeR <= ed / edgeR ? node : edge;
+  if (node || edge) return node ?? edge;
   if (!only || only === 'region') {
     const u = Math.floor(p[0]);
     const v = Math.floor(p[1]);
@@ -81,6 +84,9 @@ export function hitTest(
   }
   return null;
 }
+
+/** Op 文字裡的節點拖法（falloff 沿用 v9 的「節點」）。 */
+const NODE_WORD: Record<NodeDrag, string> = { corner: '角', single: '單點', falloff: '節點' };
 
 const DIR_WORD: Record<string, string> = { '0,-1': '往上', '0,1': '往下', '-1,0': '往左', '1,0': '往右' };
 /** 切面上的方向 → 字（主要那一軸）。 */
@@ -110,9 +116,10 @@ export interface GestureCtx {
  * - 推了一條和軸平行、而且就是結構在那一側最外面、橫跨整個結構的直邊 → push
  * - 搬了整個剖面 → translate（多選時每個結構各自搬）
  * - 其他（節點、斜邊、圓弧、部分邊、Shift 單段）→ profile
+ * shift：拖法（DragArg；true ≡ single、false ≡ 依形狀自動選，節點見 resolveNodeDrag；邊只看是不是 single）。
  * 沒有任何改動回傳 null。
  */
-export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, shift: boolean, g: GestureCtx): Op | null {
+export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, shift: DragArg, g: GestureCtx): Op | null {
   const keys = h.kind === 'region' ? g.selKeys : [h.key];
   if (h.kind === 'region') {
     const du = Math.round(delta[0]);
@@ -128,7 +135,7 @@ export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, sh
     if (!n) return null;
     const box = g.sliceBox(h.key);
     const axisN = Math.abs(nrm[0]) > 0.999 || Math.abs(nrm[1]) > 0.999;
-    if (axisN && !shift && isAxisEdge(r, group) && box && !r.hole) {
+    if (axisN && !isSingle(shift) && isAxisEdge(r, group) && box && !r.hole) {
       const du = Math.round(nrm[0]);
       const dv = Math.round(nrm[1]);
       const us = group.map((i) => r.pts[i][0]);
@@ -142,16 +149,18 @@ export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, sh
       }
     }
   }
-  const disp = dragDisp(r, h, delta, shift);
+  // 節點：先決定拖法（auto → corner／single），Op 與相對式記錄用同一個
+  const mode = h.kind === 'node' ? resolveNodeDrag(r, h.index, shift) : shift;
+  const disp = dragDisp(r, h, delta, mode);
   if (disp.every((d) => !d[0] && !d[1])) return null;
   const perKey = profileDelta(rings.get(h.key)!, h.ring, disp, (u, v) => g.inside(h.key, u, v));
   if (!perKey) return null;
   const text =
     h.kind === 'node'
-      ? `${shift ? '單點' : '節點'}${uvWord(Math.round(delta[0]), Math.round(delta[1]))}移 (${Math.round(delta[0])}, ${Math.round(delta[1])})`
-      : `${shift ? '單段' : '邊'}往${edgeAmount(r, h, delta, shift) > 0 ? '外' : '內'} ${Math.abs(edgeAmount(r, h, delta, shift))} vx（${(Math.abs(edgeAmount(r, h, delta, shift)) * g.nm).toFixed(1)} nm）`;
+      ? `${NODE_WORD[mode as NodeDrag]}${uvWord(Math.round(delta[0]), Math.round(delta[1]))}移 (${Math.round(delta[0])}, ${Math.round(delta[1])})`
+      : `${isSingle(shift) ? '單段' : '邊'}往${edgeAmount(r, h, delta, shift) > 0 ? '外' : '內'} ${Math.abs(edgeAmount(r, h, delta, shift))} vx（${(Math.abs(edgeAmount(r, h, delta, shift)) * g.nm).toFixed(1)} nm）`;
   // 相對式（§7.8）：記下手勢本身，每一片找同一個把手重做
-  const rel = recordGesture(rings.get(h.key)!, h, delta, h.kind === 'edge' ? edgeAmount(r, h, delta, shift) : 0, shift);
+  const rel = recordGesture(rings.get(h.key)!, h, delta, h.kind === 'edge' ? edgeAmount(r, h, delta, shift) : 0, mode);
   return { kind: 'profile', keys, scope: g.scope, at: g.at, perKey: { [h.key]: perKey }, follow: g.follow, backfill: g.backfill, text, ...(rel ? { gestures: { [h.key]: rel } } : {}) };
 }
 

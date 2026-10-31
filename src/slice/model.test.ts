@@ -5,7 +5,7 @@ import { applyOpLocal } from '../volume/apply';
 import { sliceRings } from '../pages/Section3D/SliceEditor';
 import { sliceContext } from '../pages/Section3D/handleOps';
 import { type Handle, dragDisp, gestureToOp } from './gestures';
-import { dragDispFloat } from './snap';
+import { dragDispFloat, resolveNodeDrag } from './snap';
 import type { Ring, XY } from './trace';
 import {
   ModelStore,
@@ -54,6 +54,7 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
   const fins = base.L.comps.filter((c) => c.mat === 3);
   const keys = [...fins.map((c) => c.key), base.L.comps.find((c) => c.mat === 6)!.key];
 
+  // v10（§4.2）：節點預設拖法改成依形狀自動選；v7～v9 的衰減走 'falloff'（Alt），這些測試明確走那條路，輸出不變
   it('黃金測試：剛建立的幾何給手勢的環 ≡ v7 traceRings，所有把手產生的 Op 逐欄相同', () => {
     for (const z of [10, 26, 64]) {
       const v7 = sliceRings(base.L, vol, 'z', z, keys);
@@ -78,7 +79,7 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
           [2.4, -1.6],
           [-3, 0],
         ] as XY[])
-          expect(gestureToOp(v8, h, d, false, c8.g)).toEqual(gestureToOp(v7, h, d, false, c7.g));
+          for (const mode of ['falloff', 'corner', false] as const) expect(gestureToOp(v8, h, d, mode, c8.g)).toEqual(gestureToOp(v7, h, d, mode, c7.g));
     }
   });
 
@@ -107,7 +108,7 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     for (let k = 0; k < 3; k++) {
       const at = locate(m, id)!;
       const r = ringsOf(m, keys).get(at.key)![at.ring];
-      applyDisp(m, at.key, at.ring, dragDisp(r, { kind: 'node', ...at }, [1, -1]));
+      applyDisp(m, at.key, at.ring, dragDisp(r, { kind: 'node', ...at }, [1, -1], 'falloff'));
     }
     expect(m.handles).toEqual(handles0);
     expect([m.vertices[id].u, m.vertices[id].v]).toEqual([p0[0] + 3, p0[1] - 3]);
@@ -179,8 +180,8 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     const h = nodeOf(rings, fins[0].key, topRight);
     const id = vidOf(m, h.key, h.ring, h.index)!;
     const c = sliceContext(base.L, vol, 'z', 26, [fins[0].key], opts(false), rings);
-    const op = gestureToOp(rings, h, [1, -1], false, c.g) as Op;
-    applyDisp(m, h.key, h.ring, dragDisp(rings.get(h.key)![0], h, [1, -1]));
+    const op = gestureToOp(rings, h, [1, -1], 'falloff', c.g) as Op;
+    applyDisp(m, h.key, h.ring, dragDisp(rings.get(h.key)![0], h, [1, -1], 'falloff'));
     const r = applyOpLocal(base, op, ctx);
     expect(r.report.blocked).toBeGreaterThan(0);
     const next = { ...r.state, version: 2 };
@@ -199,9 +200,9 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     const id = vidOf(g1, h.key, h.ring, h.index)!;
     const p0: XY = [g1.vertices[id].u, g1.vertices[id].v];
     const c = sliceContext(base.L, vol, 'z', 26, k, opts(), rings);
-    const op = gestureToOp(rings, h, [2, -2], false, c.g) as Op;
+    const op = gestureToOp(rings, h, [2, -2], 'falloff', c.g) as Op;
     store.begin(g1, 1, 0);
-    applyDisp(g1, h.key, h.ring, dragDisp(rings.get(h.key)![0], h, [2, -2]));
+    applyDisp(g1, h.key, h.ring, dragDisp(rings.get(h.key)![0], h, [2, -2], 'falloff'));
     // Worker 還沒回來：同一份、已經在新位置
     expect(store.get(base.L, vol, 'z', 26, k, 1, 0).model.vertices[id].u).toBe(p0[0] + 2);
     const next = applyOpLocal(base, op, ctx).state;
@@ -225,7 +226,7 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     const id = vidOf(g1, h.key, h.ring, h.index)!;
     const u0 = g1.vertices[id].u;
     store.begin(g1, 1, 3);
-    applyDisp(g1, h.key, h.ring, dragDisp(rings.get(h.key)![0], h, [2, -2]));
+    applyDisp(g1, h.key, h.ring, dragDisp(rings.get(h.key)![0], h, [2, -2], 'falloff'));
     expect(store.get(base.L, vol, 'z', 26, k, 1, 3).model.vertices[id].u).toBe(u0 + 2);
     expect(store.get(base.L, vol, 'z', 26, k, 1, 4).model.vertices[id].u).toBe(u0);
   });
@@ -235,8 +236,47 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     const rings = ringsOf(m, [fins[0].key]);
     const r = rings.get(fins[0].key)![0];
     const h = nodeOf(rings, fins[0].key, topRight);
-    const f = dragDispFloat(r, h, [1.6, -2.3]);
-    expect(f[h.index]).toEqual([1.6, -2.3]);
-    expect(dragDisp(r, h, [1.6, -2.3])[h.index]).toEqual([2, -2]);
+    for (const mode of ['falloff', 'corner', 'single', false] as const) {
+      const f = dragDispFloat(r, h, [1.6, -2.3], mode);
+      expect(f[h.index]).toEqual([1.6, -2.3]);
+      const d = dragDisp(r, h, [1.6, -2.3], mode);
+      expect(d[h.index]).toEqual([2, -2]);
+      // 其他頂點：浮點取整（衰減是先取整再乘權重，可能差一格）
+      if (mode !== 'falloff') f.forEach((p, i) => expect(d[i]).toEqual([Math.round(p[0]), Math.round(p[1])]));
+    }
   });
+
+  it('黃金測試（矩形角）：方頭 fin 右上角拖 (2, −1)，幾何層放開後四邊仍和軸平行，格數差＝(w+2)(h+1) − w·h', () => {
+    const sq = applyOpLocal(base, { kind: 'level', keys: [fins[0].key], scope: opts().scope, dir: [0, -1, 0], to: fins[0].bbox.y0, local: { center: [0, 0, 0], radius: null }, backfill: 'orig', follow: true }, ctx).state;
+    const k = [fins[0].key];
+    const m = buildSliceModel(sq.L, sq.vol, 'z', 26, k, 2);
+    const r = ringsOf(m, k).get(fins[0].key)![0];
+    expect(r.nodes.size).toBe(4);
+    const h = nodeOf(ringsOf(m, k), fins[0].key, topRight);
+    expect(resolveNodeDrag(r, h.index, false)).toBe('corner');
+    const id = vidOf(m, h.key, h.ring, h.index)!;
+    const p0: XY = [m.vertices[id].u, m.vertices[id].v];
+    const xs = r.pts.map((p) => p[0]);
+    const ys = r.pts.map((p) => p[1]);
+    const w = Math.max(...xs) - Math.min(...xs);
+    const hh = Math.max(...ys) - Math.min(...ys);
+    const count = (a: Uint8Array) => a.reduce((n, x) => n + x, 0);
+    const before = count(rasterizeModel(m, fins[0].key, 0, 0, vol.X, vol.Y));
+    expect(before).toBe(w * hh);
+    applyDisp(m, h.key, h.ring, dragDisp(r, h, [2.3, -0.8]));
+    expect([m.vertices[id].u, m.vertices[id].v]).toEqual([p0[0] + 2, p0[1] - 1]);
+    const after = ringsOf(m, k).get(fins[0].key)![0];
+    expect(after.pts.every((p, i) => {
+      const q = after.pts[(i + 1) % after.pts.length];
+      return p[0] === q[0] || p[1] === q[1];
+    })).toBe(true);
+    expect(count(rasterizeModel(m, fins[0].key, 0, 0, vol.X, vol.Y)) - before).toBe((w + 2) * (hh + 1) - w * hh);
+    // Op 和幾何層同一套位移：profile 的 add 格數＝面積差
+    // 剛描好的另一份（上面那份幾何已經改過）
+    const c = sliceContext(sq.L, sq.vol, 'z', 26, k, opts());
+    const op = gestureToOp(c.rings, nodeOf(c.rings, fins[0].key, topRight), [2.3, -0.8], false, c.g) as Op;
+    expect(op.kind).toBe('profile');
+    expect(op.kind === 'profile' && op.text?.startsWith('角')).toBe(true);
+    expect(op.kind === 'profile' && op.gestures?.[fins[0].key]?.drag).toBe('corner');
+  }, 30_000);
 });

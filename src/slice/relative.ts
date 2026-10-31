@@ -88,13 +88,68 @@ export function findHandle(rs: Ring[], g: RelGesture, key = ''): Handle | null {
   return best;
 }
 
+/** 一片描好的輪廓與找到的把手（拖拉中每片只描一次，plan v9 §4.5）。 */
+export interface TracedHandle {
+  rings: Ring[];
+  handle: Handle | null;
+}
+
+/**
+ * 拖拉中每片輪廓的快取（plan v9 §4.5）：key（片＋結構＋把手）→ 描好的輪廓；
+ * 輪廓一模一樣的片共用同一份物件（沿法線擠出的結構多半每片都一樣），applyProfileMask 對同一份只重做一次手勢。
+ */
+export function ringCache(max = 8192) {
+  const byKey = new Map<string, TracedHandle>();
+  const byShape = new Map<string, TracedHandle>();
+  const stats = { traced: 0, hits: 0 };
+  const sig = (h: TracedHandle) =>
+    `${h.handle ? `${h.handle.kind}${h.handle.ring}:${h.handle.index}` : '-'}|${h.rings.map((r) => `${r.hole ? 'h' : 'o'}${r.pts.join(';')}`).join('|')}`;
+  return {
+    stats,
+    clear() {
+      byKey.clear();
+      byShape.clear();
+    },
+    get(key: string, make: () => TracedHandle): TracedHandle {
+      const hit = byKey.get(key);
+      if (hit) {
+        stats.hits++;
+        return hit;
+      }
+      stats.traced++;
+      let h = make();
+      const k = sig(h);
+      const same = byShape.get(k);
+      if (same) h = same;
+      else byShape.set(k, h);
+      if (byKey.size >= max) this.clear();
+      byKey.set(key, h);
+      return h;
+    },
+  };
+}
+
+/** 描這一片的輪廓、找同一個把手（relativeCells 的前半；結果可以快取，同一次拖拉裡不變）。 */
+export function traceHandle(inside: (u: number, v: number) => boolean, u0: number, v0: number, u1: number, v1: number, g: RelGesture): TracedHandle {
+  const rings = traceRings(inside, u0, v0, u1, v1);
+  return { rings, handle: findHandle(rings, g) };
+}
+
 /**
  * 這一片重做手勢：inside(u, v) = 這一片的結構；[u0..u1]×[v0..v1] 是找輪廓的範圍。
  * 回傳要加、要拿的格子（切面座標，帶方向碼，加的已由近到遠排好）；對不到把手回傳 null。
+ * pre：快取的 traceHandle 結果（不會被改動）。
  */
-export function relativeCells(inside: (u: number, v: number) => boolean, u0: number, v0: number, u1: number, v1: number, g: RelGesture): { add: ProfileCell[]; remove: ProfileCell[] } | null {
-  const rs = traceRings(inside, u0, v0, u1, v1);
-  const h = findHandle(rs, g);
+export function relativeCells(
+  inside: (u: number, v: number) => boolean,
+  u0: number,
+  v0: number,
+  u1: number,
+  v1: number,
+  g: RelGesture,
+  pre?: TracedHandle,
+): { add: ProfileCell[]; remove: ProfileCell[] } | null {
+  const { rings: rs, handle: h } = pre ?? traceHandle(inside, u0, v0, u1, v1, g);
   if (!h) return null;
   const r = rs[h.ring];
   let delta = g.delta;

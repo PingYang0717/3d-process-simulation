@@ -6,7 +6,7 @@ import type { Backfill, Vec3, Volume } from './volume';
 import { type Report, addCell, removeCell } from './kernel';
 import { type Scope, axisIndex, planeAxes, to3D } from './scope';
 import { type ProfileCell, type Rle2D, decodeRle } from './rle';
-import { type RelGesture, relativeCells } from '../slice/relative';
+import { type RelGesture, type TracedHandle, relativeCells, traceHandle } from '../slice/relative';
 
 export { type ProfileCell, type Rle2D, decodeRle, encodeRle, rleBox } from './rle';
 
@@ -45,8 +45,11 @@ export function dirVec(axis: Scope['axis'], code: number): Vec3 {
 /**
  * 在 vol 上套用 profile（vol 可以是裁下來的一塊，off = 它在整個陣列的起點）。
  * masks：每個 key 的結構體素（和 vol 同大小）。
+ * ringsFor：每片輪廓的快取（拖拉預覽用，plan v9 §4.5）：(key, 片) → 描好的輪廓與把手；沒有就呼叫 make。
+ * 前提：vol 在切面上包住結構這一片整個外框（profileBox 有 gestures 時就是這樣），描出來的環才和範圍無關。
  */
-export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, Uint8Array>, op: ProfileOp, off: Vec3, report?: Report): Volume {
+export type RingsFor = (key: string, t: number, make: () => TracedHandle) => TracedHandle;
+export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, Uint8Array>, op: ProfileOp, off: Vec3, report?: Report, ringsFor?: RingsFor): Volume {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(vol.data);
   const live: Volume = { X, Y, Z, data: out };
@@ -54,13 +57,20 @@ export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, U
   const [ua, va] = planeAxes(op.scope.axis);
   const dims = [X, Y, Z];
   const len = dims[a];
+  // 切面座標 → index：三個 stride 先算好，熱迴圈裡不配陣列（plan v9 P19）
+  const stride = [1, X, X * Y];
+  const [su, sv, st] = [stride[ua], stride[va], stride[a]];
+  const [ou, ov] = [off[ua], off[va]];
+  const [nu, nv] = [dims[ua], dims[va]];
   const at = (u: number, v: number, t: number) => {
-    const p = to3D(op.scope.axis, u - off[ua], v - off[va], t);
-    return p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= X || p[1] >= Y || p[2] >= Z ? -1 : (p[2] * Y + p[1]) * X + p[0];
+    const lu = u - ou;
+    const lv = v - ov;
+    return lu < 0 || lv < 0 || t < 0 || lu >= nu || lv >= nv || t >= len ? -1 : lu * su + lv * sv + t * st;
   };
   const absolute = Object.fromEntries(Object.entries(op.perKey).map(([k, v]) => [k, { add: decodeRle(v.add), remove: decodeRle(v.remove) }]));
   const [A0, B0] = [dims[ua], dims[va]];
   const fellBack = new Set<number>();
+  const relMemo = new Map<TracedHandle, ReturnType<typeof relativeCells>>();
   const lo = Math.max(0, op.scope.lo - off[a]);
   const hi = Math.min(len - 1, op.scope.hi - off[a]);
   for (let t = lo; t <= hi; t++) {
@@ -73,30 +83,33 @@ export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, U
       const pl = [0, 0, 0];
       pl[a] = t;
       const [A, B] = [dims[ua], dims[va]];
-      for (let v = 0; v < B && !has; v++)
-        for (let u = 0; u < A; u++) {
-          pl[ua] = u;
-          pl[va] = v;
-          if (mask[(pl[2] * Y + pl[1]) * X + pl[0]]) {
+      for (let v = 0, base = t * st; v < B && !has; v++, base += sv)
+        for (let u = 0, i = base; u < A; u++, i += su)
+          if (mask[i]) {
             has = true;
             break;
           }
-        }
       if (!has) continue;
       any = true;
       // 相對式：這一片自己的輪廓上找同一個把手、重做手勢（切面座標＝整個陣列的）
       let c: { add: ProfileCell[]; remove: ProfileCell[] } = absolute[key];
       const g = op.gestures?.[key];
       if (g && !(op.refExact && t + off[a] === op.at)) {
+        const tb = t * st;
         const local = (u: number, v: number) => {
-          const lu = u - off[ua];
-          const lv = v - off[va];
-          if (lu < 0 || lv < 0 || lu >= A0 || lv >= B0) return false;
-          pl[ua] = lu;
-          pl[va] = lv;
-          return !!mask[(pl[2] * Y + pl[1]) * X + pl[0]];
+          const lu = u - ou;
+          const lv = v - ov;
+          return lu >= 0 && lv >= 0 && lu < A0 && lv < B0 && !!mask[tb + lu * su + lv * sv];
         };
-        const rel = relativeCells(local, off[ua], off[va], off[ua] + A0 - 1, off[va] + B0 - 1, g);
+        const [ru0, rv0, ru1, rv1] = [off[ua], off[va], off[ua] + A0 - 1, off[va] + B0 - 1];
+        const pre = ringsFor?.(key, t + off[a], () => traceHandle(local, ru0, rv0, ru1, rv1, g));
+        // 快取把輪廓一模一樣的片合成同一份（沿法線擠出的結構多半每片都一樣）：同一份只重做一次手勢。
+        // 輪廓（含洞）就是這一片結構的邊界，所以輪廓相同＝結構這一片相同，重做的結果也相同。
+        let rel = pre ? relMemo.get(pre) : undefined;
+        if (rel === undefined) {
+          rel = relativeCells(local, ru0, rv0, ru1, rv1, g, pre);
+          if (pre) relMemo.set(pre, rel);
+        }
         if (rel) c = rel;
         else fellBack.add(t + off[a]);
       }

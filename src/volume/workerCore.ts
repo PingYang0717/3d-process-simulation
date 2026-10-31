@@ -4,7 +4,11 @@
 import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, greedyMesh, labelComponents } from './volume';
 import { type Scope, clipBox } from './scope';
 import { type Op, upgradeOp } from './ops';
-import { applyOpInPlace } from './apply';
+import { applyOpInPlace, globalIndex } from './apply';
+import { previewOp } from './preview';
+import { previewMesh } from './previewMesh';
+import { newReport } from './kernel';
+import { type TracedHandle, ringCache } from '../slice/relative';
 import { type Step, applyStepInPlace, carryStepStats } from './patch';
 import type { Report } from './kernel';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
@@ -81,6 +85,14 @@ export interface Requests {
   };
   /** 保留給測試與保險。 */
   count: { req: { sid: number }; res: number[] };
+  /**
+   * 拖拉第 2 級預覽（§4.5）：在 Worker 裡裁切重算＋預覽網格；拖拉期間 Worker 閒著、狀態已常駐，不必傳陣列。
+   * 每片的輪廓同一次拖拉只描一次（快取 key 含 sid 與手勢的把手，換 sid 就清空）。超過 cap 回 none。
+   */
+  preview: {
+    req: { sid: number; comps: Comp[]; op: Op; cap: number; hidden: Uint8Array; palette: Float32Array; showDiff: boolean; seq: number; mesh: boolean };
+    res: { seq: number; sid: number; box: BBox; data: Uint8Array; blockedAt: number[]; mesh: MeshData | null } | { seq: number; sid: number; none: true };
+  };
 }
 export type Kind = keyof Requests;
 
@@ -100,6 +112,11 @@ const heads = new Map<string, number>();
 /** 每個版本從哪一版、改了哪個外框來的（box：體素；labelBox：結構編號，⊇ box）。chunk／圖層只重算改到的地方。 */
 const parents = new Map<number, { from: number; box: BBox | null; labelBox: BBox | null }>();
 let origSid = 0;
+/** 拖拉預覽的每片輪廓快取（§4.5）：只對 previewSid 有效。 */
+const rings = ringCache();
+let previewSid = -1;
+/** 測試用：輪廓快取命中／描了幾次。 */
+export const previewStats = rings.stats;
 
 /** 測試用：看 Worker 的內部狀態。 */
 export const inspect = () => ({ books, heads, parents, origSid });
@@ -379,6 +396,28 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: b.diffCount }, [mask.buffer]];
   },
   count: ({ sid }) => [Array.from(stateOf(sid).book.counts), []],
+  preview: ({ sid, comps, op, cap, hidden, palette, showDiff, seq, mesh }) => {
+    const { vol, labels, book } = stateOf(sid);
+    if (previewSid !== sid) {
+      rings.clear();
+      previewSid = sid;
+    }
+    const report = newReport();
+    const gestures = op.kind === 'profile' ? op.gestures : undefined;
+    const ringsFor = gestures
+      ? (key: string, t: number, make: () => TracedHandle) => {
+          const g = gestures[key];
+          return rings.get(`${op.scope.axis}|${t}|${key}|${g.kind}|${g.ref.join(';')}|${g.shift}|${g.hole}`, make);
+        }
+      : undefined;
+    const p = previewOp({ vol, L: { labels, comps } }, volOf(origBook()), op, cap, report, ringsFor);
+    if (!p) return [{ seq, sid, none: true }, []];
+    const blockedAt = globalIndex(p.box, vol, report.blockedAt);
+    const m = mesh ? previewMesh(vol, p.box, p.data, (id) => !!hidden[id], colorFn(palette), showDiff && book.diff ? origBook().data : null) : null;
+    const transfer: Transferable[] = [p.data.buffer];
+    if (m) transfer.push(m.positions.buffer, m.normals.buffer, m.colors.buffer);
+    return [{ seq, sid, box: p.box, data: p.data, blockedAt, mesh: m }, transfer];
+  },
 };
 
 /** 處理一個請求（worker.ts 與測試共用）。 */

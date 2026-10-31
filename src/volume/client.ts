@@ -145,3 +145,8 @@ export function deriveIn(from: EditState, to: number, step: Step, dir: 'fwd' | '
     throw e;
   });
 }
+
+/** 拖拉第 2 級預覽（§4.5）：在 Worker 裡對 s（目前的版本）算預覽與網格。s 過期時 Worker 回錯誤。 */
+export function previewIn(s: EditState, req: Omit<Requests['preview']['req'], 'sid' | 'comps'>) {
+  return call('preview', { ...req, sid: sidOf(s), comps: s.L.comps });
+}

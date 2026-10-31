@@ -43,7 +43,6 @@ import {
   DIFF_BIT,
   VOID,
   directionName,
-  greedyMesh,
   hexToRgb,
   idx,
   voxelFromHit,
@@ -51,6 +50,8 @@ import {
 import { call, sidOf } from '../../volume/client';
 import type { EditState, Local, Op } from '../../volume/ops';
 import type { Preview } from '../../volume/preview';
+import { HOLE_EPS, previewMesh } from '../../volume/previewMesh';
+import { hiddenTable, palette } from './tables';
 import type { CellCloud } from './cellCloud';
 import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
 
@@ -154,19 +155,6 @@ interface CamAnim {
   ms: number;
 }
 
-const palette = (materials: Material[]) => {
-  const out = new Float32Array(768);
-  materials.forEach((m) => {
-    const [r, g, b] = hexToRgb(m.color);
-    out.set([r / 255, g / 255, b / 255], m.id * 3);
-  });
-  return out;
-};
-const hiddenTable = (hidden: Set<number>) => {
-  const out = new Uint8Array(256);
-  hidden.forEach((m) => (out[m] = 1));
-  return out;
-};
 const toGeometry = (m: MeshData) => {
   const g = new BufferGeometry();
   g.setAttribute('position', new BufferAttribute(m.positions, 3));
@@ -195,7 +183,6 @@ const boxEdges = (b: BBox) => new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1,
 const axisOf = (d: Vec3) => (d[0] ? 0 : d[1] ? 1 : 2);
 const AXIS_RGB: Record<Axis, string> = { x: '#e5484d', y: '#30a46c', z: '#3e63dd' };
 /** 挖洞的邊界多留一點點，剛好落在範圍邊界平面上的面也挖掉（預覽網格會重畫它們）。 */
-const HOLE_EPS = 1e-3;
 
 /**
  * 主網格與選取層的材質：加一個 uniform 盒子，落在盒子裡的片段 discard。
@@ -382,7 +369,7 @@ export function View3D({
   orig: Volume | null;
   /** 即時預覽（主執行緒裁切重算的結果，base = 它根據的陣列）；null = 沒有。網格在這裡畫，正式網格到了就收掉。 */
   /** base = 預覽根據的狀態版本號（sidOf）。 */
-  preview: (Preview & { base: number }) | null;
+  preview: (Preview & { base: number; mesh?: MeshData }) | null;
   /** 拖拉中每改一格就要一次預覽；null = 收掉。回傳 false 表示範圍太大沒算（改畫橘色塊）。 */
   onPreview: (op: Op | null) => boolean;
   /** 2D 拖拉超過即時預覽上限時：要加／拿的格子沿範圍擠出（概略，§8.3）。 */
@@ -875,55 +862,15 @@ export function View3D({
       return;
     }
     const b = preview.box;
-    const bx = b.x1 - b.x0 + 1;
-    const by = b.y1 - b.y0 + 1;
-    const bz = b.z1 - b.z0 + 1;
-    const hx = bx + 2;
-    const hy = by + 2;
-    const hz = bz + 2;
-    const codes = new Uint16Array(hx * hy * hz);
-    const o = origRef.current;
-    for (let z = 0; z < hz; z++) {
-      const vz = b.z0 - 1 + z;
-      if (vz < 0 || vz >= vol.Z) continue;
-      for (let y = 0; y < hy; y++) {
-        const vy = b.y0 - 1 + y;
-        if (vy < 0 || vy >= vol.Y) continue;
-        for (let x = 0; x < hx; x++) {
-          const vx = b.x0 - 1 + x;
-          if (vx < 0 || vx >= vol.X) continue;
-          const i = (vz * vol.Y + vy) * vol.X + vx;
-          const inside = x >= 1 && x <= bx && y >= 1 && y <= by && z >= 1 && z <= bz;
-          const m = inside ? preview.data[((z - 1) * by + (y - 1)) * bx + (x - 1)] : vol.data[i];
-          if (!m || hidden.has(m)) continue;
-          codes[(z * hy + y) * hx + x] = showDiff && o && o.data[i] !== m ? m | DIFF_BIT : m;
-        }
-      }
-    }
-    const m = greedyMesh(hx, hy, hz, codes, (code) => {
-      const [r, g, bl] = rgb.get(code & 255) ?? [255, 0, 255];
-      return code & DIFF_BIT ? [(r / 255) * 0.35 + 0.65, (g / 255) * 0.35 + 0.2, (bl / 255) * 0.35 + 0.2] : [r / 255, g / 255, bl / 255];
-    });
-    // 只留重心落在裁切範圍（含邊界面）裡的三角形：外圈鄰居之間的面與外圈最外面的面主網格本來就有
-    const keep: number[] = [];
-    for (let t = 0; t < m.positions.length; t += 9) {
-      const cx = (m.positions[t] + m.positions[t + 3] + m.positions[t + 6]) / 3;
-      const cy = (m.positions[t + 1] + m.positions[t + 4] + m.positions[t + 7]) / 3;
-      const cz = (m.positions[t + 2] + m.positions[t + 5] + m.positions[t + 8]) / 3;
-      if (cx >= 1 - HOLE_EPS && cx <= bx + 1 + HOLE_EPS && cy >= 1 - HOLE_EPS && cy <= by + 1 + HOLE_EPS && cz >= 1 - HOLE_EPS && cz <= bz + 1 + HOLE_EPS) keep.push(t);
-    }
-    const positions = new Float32Array(keep.length * 9);
-    const normals = new Float32Array(keep.length * 9);
-    const colors = new Float32Array(keep.length * 9);
-    keep.forEach((t, k) => {
-      for (let j = 0; j < 9; j++) {
-        positions[k * 9 + j] = m.positions[t + j] + [b.x0 - 1, b.y0 - 1, b.z0 - 1][j % 3];
-        normals[k * 9 + j] = m.normals[t + j];
-        colors[k * 9 + j] = m.colors[t + j];
-      }
-    });
+    // Worker 算好的網格（拖拉第 2 級，§4.5）直接用；否則主執行緒自己做（同一個純函式）
+    const m =
+      preview.mesh ??
+      previewMesh(vol, b, preview.data, (id) => hidden.has(id), (code) => {
+        const [r, g, bl] = rgb.get(code & 255) ?? [255, 0, 255];
+        return code & DIFF_BIT ? [(r / 255) * 0.35 + 0.65, (g / 255) * 0.35 + 0.2, (bl / 255) * 0.35 + 0.2] : [r / 255, g / 255, bl / 255];
+      }, showDiff ? (origRef.current?.data ?? null) : null);
     c.previewMesh.geometry.dispose();
-    c.previewMesh.geometry = toGeometry({ positions, normals, colors, quads: keep.length / 2 });
+    c.previewMesh.geometry = toGeometry(m);
     c.previewMesh.visible = true;
     c.hole.min.value.set(b.x0 - HOLE_EPS, b.y0 - HOLE_EPS, b.z0 - HOLE_EPS);
     c.hole.max.value.set(b.x1 + 1 + HOLE_EPS, b.y1 + 1 + HOLE_EPS, b.z1 + 1 + HOLE_EPS);

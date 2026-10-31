@@ -16,7 +16,7 @@ import {
 } from './volume';
 import { type EditState, type LegacyOp, type Op, radiusOf, upgradeOp } from './ops';
 import { axisIndex, planeAxes } from './scope';
-import { type ProfileOp, applyProfileMask, decodeRle, dirVec, rleBox } from './profile';
+import { type ProfileOp, type RingsFor, applyProfileMask, decodeRle, dirVec, rleBox } from './profile';
 import type { Report } from './kernel';
 
 export interface Preview {
@@ -157,13 +157,15 @@ function profileBox(s: EditState, op: ProfileOp, b: BBox): BBox | null {
   }
   if (u0 > u1) return null;
   // 襯層：每一格沿它的方向，這一段每一片實際要讀到多遠（同一條線上前面先加的格子會把襯層再往前推）
-  const addAt = new Set(cells.filter((c) => c.add).map((c) => `${c.u},${c.v}`));
+  // 數字 key（plan v9 P19）：切面座標 < 65536
+  const cellKey = (u: number, v: number) => (v + 1) * 65538 + u + 1;
+  const addAt = new Set(cells.filter((c) => c.add).map((c) => cellKey(c.u, c.v)));
   let pad = [1, 1, 1, 1];
   if (op.follow)
     for (const c of cells) {
       const [du, dv] = [c.dir === 0 ? 1 : c.dir === 1 ? -1 : 0, c.dir === 2 ? 1 : c.dir === 3 ? -1 : 0];
       let behind = 0;
-      if (c.add) while (addAt.has(`${c.u - (behind + 1) * du},${c.v - (behind + 1) * dv}`)) behind++;
+      if (c.add) while (addAt.has(cellKey(c.u - (behind + 1) * du, c.v - (behind + 1) * dv))) behind++;
       const d3 = dirVec(op.scope.axis, c.dir);
       let reach = 0;
       for (let t = t0; t <= t1; t++) {
@@ -188,7 +190,16 @@ function profileBox(s: EditState, op: ProfileOp, b: BBox): BBox | null {
   h[va] = v1 + pad[3];
   l[a] = t0;
   h[a] = t1;
-  return clampBox(fromLoHi(l, h), s.vol);
+  const out = clampBox(fromLoHi(l, h), s.vol);
+  // 每片輪廓快取（plan v9 §4.5）的前提：有手勢時切面上包住結構整個外框（描出來的環才和這一幀的範圍無關）
+  if (out && op.gestures && Object.keys(op.gestures).length) {
+    const ob = lo(out);
+    const oh = hi(out);
+    const bl = lo(b);
+    const bh = hi(b);
+    if (ob[ua] > bl[ua] || ob[va] > bl[va] || oh[ua] < bh[ua] || oh[va] < bh[va]) throw new Error('profileBox 沒有包住結構外框');
+  }
+  return out;
 }
 
 /** 已選結構在第 at 片的外框（切面座標，含端點）；那一片沒有回傳 null。 */
@@ -281,17 +292,18 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
  * 在裁切範圍內算這一步的結果；範圍超過 cap 個體素就回傳 null（留給 Worker）。
  * 範圍內逐體素和 applyOp 的結果相同；範圍外這一步本來就不會改到。
  */
-export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity, report?: Report): Preview | null {
+export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity, report?: Report, ringsFor?: RingsFor): Preview | null {
   const op = upgradeOp(input);
   const box = previewBox(s, op);
   if (!box || boxVoxels(box) > cap) return null;
   const vol = cropVolume(s.vol, box);
   const o = cropVolume(orig, box);
-  const mask = cropMask(s.L, new Set(op.keys), s.vol, box);
   if (op.kind === 'profile') {
+    // profile 只用每個 key 自己的 mask（不必另外做一份聯集）
     const masks = new Map(op.keys.map((k) => [k, cropMask(s.L, new Set([k]), s.vol, box)] as const));
-    return { box, data: applyProfileMask(vol, o, masks, op, [box.x0, box.y0, box.z0], report).data };
+    return { box, data: applyProfileMask(vol, o, masks, op, [box.x0, box.y0, box.z0], report, ringsFor).data };
   }
+  const mask = cropMask(s.L, new Set(op.keys), s.vol, box);
   // scope 換成裁切範圍裡的座標（超出的部分本來就不會被改）
   const off = [box.x0, box.y0, box.z0][axisIndex(op.scope.axis)];
   const zr = { axis: op.scope.axis, lo: op.scope.lo - off, hi: op.scope.hi - off };

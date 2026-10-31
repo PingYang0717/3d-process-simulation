@@ -9,6 +9,8 @@ import { applyOpLocal } from '../src/volume/apply';
 import { applyStep } from '../src/volume/patch';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from '../src/volume/chunks';
 import { previewOp } from '../src/volume/preview';
+import { previewMesh } from '../src/volume/previewMesh';
+import { type TracedHandle, ringCache } from '../src/slice/relative';
 import { newReport } from '../src/volume/kernel';
 import { ModelStore, ringsOf } from '../src/slice/model';
 import { dragDispFloat } from '../src/slice/snap';
@@ -113,6 +115,13 @@ function benchDrag(scale: number) {
   });
   const h = { kind: 'node' as const, key: fin.key, ring: 0, index: node };
   const frames: number[] = [];
+  const l2raw: number[] = [];
+  const l2: number[] = [];
+  const l2mesh: number[] = [];
+  const cache = ringCache();
+  const ringsFor = (key: string, tt: number, make: () => TracedHandle) => cache.get(`${key}|${tt}`, make);
+  const color = (): [number, number, number] => [1, 1, 1];
+  let box = 0;
   for (let k = 1; k <= 60; k++) {
     const delta: [number, number] = [(k * 3 * scale) / 60, -(k * 3 * scale) / 60];
     t = performance.now();
@@ -123,10 +132,26 @@ function benchDrag(scale: number) {
       previewOp(s, vol, one, 2_000_000, newReport());
     }
     frames.push(performance.now() - t);
+    // 第 2 級（整個 scope，現在在 Worker）：每 6 幀量一次沒有快取的，每幀量有快取的＋預覽網格
+    if (!op) continue;
+    if (k % 6 === 0) {
+      t = performance.now();
+      previewOp(s, vol, op, Infinity, newReport());
+      l2raw.push(performance.now() - t);
+    }
+    t = performance.now();
+    const p2 = previewOp(s, vol, op, Infinity, newReport(), ringsFor)!;
+    l2.push(performance.now() - t);
+    box = Math.max(box, p2.data.length);
+    t = performance.now();
+    previewMesh(vol, p2.box, p2.data, () => false, color, null);
+    l2mesh.push(performance.now() - t);
   }
-  frames.sort((a, b) => a - b);
-  const p = (q: number) => frames[Math.min(frames.length - 1, Math.floor(q * frames.length))].toFixed(1);
-  console.log(`範例 ×${scale}（切面 ${vol.X}×${vol.Y}）：建立幾何層 ${build}｜拖拉每幀 中位數 ${p(0.5)} ms、p95 ${p(0.95)} ms、最大 ${p(1)} ms`);
+  const q = (xs: number[], f: number) => (xs.sort((a, b) => a - b), xs[Math.min(xs.length - 1, Math.floor(f * xs.length))]?.toFixed(1) ?? '-');
+  console.log(`範例 ×${scale}（切面 ${vol.X}×${vol.Y}）：建立幾何層 ${build}｜主執行緒（第 1 級）每幀 中位數 ${q(frames, 0.5)} ms、p95 ${q(frames, 0.95)} ms、最大 ${q(frames, 1)} ms`);
+  console.log(
+    `  第 2 級（Worker，fin 整根 ${vol.Z} 片、外框最大 ${(box / 1e3).toFixed(0)} K 格）：沒有輪廓快取 中位數 ${q(l2raw, 0.5)} ms｜有快取 中位數 ${q(l2, 0.5)} ms、p95 ${q(l2, 0.95)} ms｜預覽網格 中位數 ${q(l2mesh, 0.5)} ms`,
+  );
 }
 
 if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);

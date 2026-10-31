@@ -34,10 +34,12 @@ import { type Op, type SelectMode, slicesWith, useEditor } from './editor';
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
 import { FloatingToolbar } from './FloatingToolbar';
 import { axisIndex, clipBox } from '../../volume/scope';
-import { type Preview, previewOp } from '../../volume/preview';
+import { type Preview, boxVoxels, previewBox, previewOp } from '../../volume/preview';
 import { newReport } from '../../volume/kernel';
 import { type CellCloud, cellCloud, globalIndex } from './cellCloud';
-import { sidOf } from '../../volume/client';
+import { previewIn, sidOf } from '../../volume/client';
+import { hiddenTable, palette } from './tables';
+import type { MeshData } from '../../volume/volume';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceEditor, SliceView, View3D } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
@@ -112,7 +114,7 @@ const LIVE_PREVIEW_CAP = 400_000;
 // 正式結果現在只在外框裡算（§8.2），幾百毫秒就到；放開後的預覽只在範圍小時做（§7.5 第 2 級）
 const COMMIT_PREVIEW_CAP = 400_000;
 /** base = 預覽根據的狀態版本號。 */
-type PV = Preview & { base: number; committed: boolean; blocked?: number[] };
+type PV = Preview & { base: number; committed: boolean; blocked?: number[]; mesh?: MeshData };
 
 /** 3D 雕刻關著時給 View3D 的筆刷：拖拉一律轉視角。 */
 const OFF_BRUSH = { mode: 'off' as const, radius: 6, shape: 'round' as const };
@@ -179,11 +181,75 @@ export default function Section3DPage() {
   const view = useRef<View3DHandle | null>(null);
   /** 即時預覽：這一步在主執行緒裁切重算的結果；3D 與切面先畫它，Worker 的正式結果到了再換掉。 */
   const [pv, setPv] = useState<PV | null>(null);
+  /**
+   * 第 2 級預覽（plan v9 §4.5）搬到 Worker：同時最多一個拖拉預覽在飛、永遠送最新的 op、拖拉結束後晚到的丟掉；
+   * 放開／按鈕的預覽（committed）在 apply 之前送出（Worker 依序處理，先回預覽再算正式結果）。
+   */
+  const live2 = useRef({ inflight: false, pending: null as Op | null, sent: null as Op | null, seq: 0, dragging: false });
+  const look = useRef({ ed, showDiff });
+  look.current = { ed, showDiff };
+  const sendPreview = (op: Op, committed: boolean, cap: number) => {
+    const L = live2.current;
+    const { ed: e, showDiff: sd } = look.current;
+    const cur = e.cur;
+    const base = sidOf(cur);
+    const seq = ++L.seq;
+    if (!committed) {
+      L.inflight = true;
+      L.sent = op;
+    }
+    const done = () => {
+      if (committed) return;
+      L.inflight = false;
+      if (L.dragging && L.pending && L.pending !== L.sent) sendPreview(L.pending, false, cap);
+    };
+    previewIn(cur, { op, cap, hidden: hiddenTable(e.hidden), palette: palette(e.materials), showDiff: sd, seq, mesh: true }).then(
+      (r) => {
+        const fresh = r.seq === L.seq && sidOf(look.current.ed.cur) === base && (committed || L.dragging);
+        if (fresh) {
+          if ('none' in r) {
+            setPv((p) => (committed || (p && !p.committed) ? null : p));
+            if (!committed) setLiveCells(cellCloud(op, look.current.ed.vol));
+          } else {
+            setPv({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
+            if (!committed) setLiveCells(null);
+          }
+        }
+        done();
+      },
+      () => done(),
+    );
+  };
+  /**
+   * 預覽一步：沒有 profile 的 Op 在主執行緒先用 previewBox 判斷上限（同步回傳畫不畫得出來，3D 筆刷用它收掉橘色塊）；
+   * profile 的外框要描襯層，交給 Worker 判斷，超過上限回 none 再畫點雲。
+   */
   const makePreview = (op: Op, cap: number, committed: boolean) => {
     if (mode !== 'now' || op.kind === 'material') return false;
-    const p = previewOp(ed.cur, ed.orig.vol, op, cap);
-    setPv(p ? { ...p, base: sidOf(ed.cur), committed } : null);
-    return !!p;
+    if (op.kind !== 'profile') {
+      const box = previewBox(ed.cur, op);
+      if (!box || boxVoxels(box) > cap) {
+        if (committed) setPv(null);
+        else setPv((p) => (p && !p.committed ? null : p));
+        return false;
+      }
+    }
+    if (committed) {
+      live2.current.dragging = false;
+      sendPreview(op, true, cap);
+      return true;
+    }
+    const L = live2.current;
+    L.dragging = true;
+    L.pending = op;
+    if (!L.inflight) sendPreview(op, false, cap);
+    return true;
+  };
+  /** 拖拉結束或取消：之後晚到的拖拉預覽一律丟掉。 */
+  const endLive = () => {
+    live2.current.dragging = false;
+    live2.current.pending = null;
+    setPv((p) => (p && !p.committed ? null : p));
   };
   // 每一步送 Worker 前先預覽（按鈕、方向鍵、筆刷放開都走 commit）
   useEffect(() => {
@@ -269,7 +335,7 @@ export default function Section3DPage() {
     if (!op) {
       setDragPv(null);
       setLiveCells(null);
-      setPv((p) => (p && !p.committed ? null : p));
+      endLive();
       return;
     }
     const a = ed.editAxis;
@@ -280,9 +346,8 @@ export default function Section3DPage() {
       const p = previewOp(ed.cur, ed.orig.vol, { ...op, scope: { axis: a, lo: t, hi: t } } as Op, 2_000_000, rep);
       setDragPv(p ? { ...p, base: sidOf(ed.cur), committed: false, blocked: globalIndex(p.box, ed.vol, rep.blockedAt) } : null);
     } else setDragPv(null);
-    // 第 2 級：3D 與小切面；範圍太大就畫加／拿格子的點雲（§8.3）
-    const ok = makePreview(op, LIVE_PREVIEW_CAP, false);
-    setLiveCells(ok ? null : cellCloud(op, ed.vol));
+    // 第 2 級：3D 與小切面（Worker）；範圍太大就畫加／拿格子的點雲（§8.3，Worker 回 none 時）
+    if (!makePreview(op, LIVE_PREVIEW_CAP, false)) setLiveCells(cellCloud(op, ed.vol));
   };
   /** 超過即時預覽上限時，3D 畫的加／拿格子（沿範圍擠出；不算 kernel，被擋的不會顯示）。 */
   const [liveCells, setLiveCells] = useState<CellCloud | null>(null);
@@ -870,7 +935,7 @@ export default function Section3DPage() {
           cells={liveCells}
           onPreview={(op) => {
             if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
-            setPv((p) => (p && !p.committed ? null : p));
+            endLive();
             return false;
           }}
           toOp={ed.opFor}

@@ -46,7 +46,7 @@ export interface Requests {
   /** 從 src（版本 from）複製出 owner，原地逐個套 ops，結果是版本 to；複本 transfer 回主執行緒（新 split 一次）。 */
   replay: {
     req: { owner: string; src: string; from: number; to: number; comps: Comp[]; ops: Op[]; matNames: Record<number, string>; keyCounter: number };
-    res: { data: Uint8Array; labels: Int32Array; diff: Uint8Array; diffCount: number; counts: Float64Array; comps: Comp[]; keyCounter: number };
+    res: { data: Uint8Array; labels: Int32Array; diff: Uint8Array; diffCount: number; counts: Float64Array; comps: Comp[]; keyCounter: number; blocked: number };
   };
   mesh: {
     req: {
@@ -305,14 +305,19 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     const b = copyBook(bookAt(src, from));
     const { ctx, seq } = ctxOf(matNames, keyCounter);
     let cs = comps;
-    for (const op of ops) cs = applyTo(b, cs, upgradeOp(op), ctx).comps;
+    let blocked = 0;
+    for (const op of ops) {
+      const r = applyTo(b, cs, upgradeOp(op), ctx);
+      cs = r.comps;
+      blocked += r.report.blocked;
+    }
     books.set(owner, b);
     heads.set(owner, to);
     parents.delete(to);
     // Worker 自己留一份，複本 transfer 回主執行緒（新 split 一次）
     const out = copyBook(b);
     return [
-      { data: out.data, labels: out.labels, diff: out.diff!, diffCount: out.diffCount, counts: out.counts, comps: cs, keyCounter: seq() },
+      { data: out.data, labels: out.labels, diff: out.diff!, diffCount: out.diffCount, counts: out.counts, comps: cs, keyCounter: seq(), blocked },
       [out.data.buffer, out.labels.buffer, out.diff!.buffer, out.counts.buffer],
     ];
   },

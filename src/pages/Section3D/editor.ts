@@ -18,7 +18,8 @@ import {
   nameComponents,
   unionBBox,
 } from '../../volume/volume';
-import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
+import { type EditState, type Local, type Op, type Policy, bboxOfKeys, defectBox, levelRefTo, matNameOf, opText } from '../../volume/ops';
+import { type Design, type FactorCtx, combosOf, nameOfCombo, opsOfCombo } from '../../volume/factors';
 import type { BrushShape } from '../../volume/volume';
 import type { FractionArray } from '../../volume/vti';
 import { type Scope, axisIndex, axisLen, boxRange, clampScope, fullScope, isFullScope, scopeBox } from '../../volume/scope';
@@ -83,7 +84,7 @@ import { ModelStore } from '../../slice/model';
 import { pushOpOf } from './handles3d';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
-export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
+export { type EditState, type Op, applyOp, matNameOf, opText, replay } from '../../volume/ops';
 
 /**
  * 復原／重做堆疊的一格（§8.3）：補丁＋另一邊的 ops 與版本號。不存整個陣列。
@@ -117,6 +118,14 @@ export interface Split {
   future: HistEntry[];
   /** null＝還沒改過，借用原始的陣列。 */
   buf: SplitBuffers | null;
+  /** 這個 split 是哪些水平（以 factor.unit 記；plan v11 §4.1）。標註，不影響重播。 */
+  levels?: Record<string, number>;
+  /** 哪一次產生（Design.id）。 */
+  designId?: string;
+  /** 'baseline'、'DOE-1'、使用者自訂。 */
+  tags?: string[];
+  /** 產生時被擋的格數（Report 加總；矩陣表「被擋」欄）。 */
+  blocked?: number;
 }
 
 /** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。 */
@@ -239,6 +248,19 @@ export function useEditor() {
   const [handle, setHandle] = useState<PickedHandle | null>(null);
   // 跨次記住：襯層跟推、nm 比例（載入有 spacing 的 .vti 會覆蓋）、筆刷
   const [follow, setFollow] = usePersisted('follow', true);
+  /** 3D 推面碰到厚的別的材質：預設擋住（plan v11 §4.10）；設定裡可改回蓋過去。 */
+  const [pushPolicy, setPushPolicy] = usePersisted<Policy>('pushPolicy', 'block', (v): v is Policy => v === 'block' || v === 'overwrite');
+  /** 進階：自由形變（2D 節點可任意拖、Alt／Shift 修飾鍵、單點）；預設關（§4.10 P13）。 */
+  const [freeform, setFreeform] = usePersisted('freeform', false);
+  /** 進階：筆刷頁籤（§4.10 P15）；預設關。 */
+  const [brushOn, setBrushOn] = usePersisted('brushOn', false);
+  /** 並排／疊圖的基準：原始（BASE_ID）或某個 split（§4.4 A vs B）。 */
+  const [compareBase, setCompareBase] = useState<string>('base');
+  /** 產生過的實驗設計（manifest 的 designs）。 */
+  const [designs, setDesigns] = useState<Design[]>([]);
+  const designSeq = useRef(1);
+  /** 矩陣表的「匯出時不包含」（預設全包含）。 */
+  const [exportOff, setExportOff] = useState<Set<string>>(new Set());
   const [backfill, setBackfill] = useState<Backfill>('orig');
   const [nmPerVoxel, setNmPerVoxel] = usePersisted('nmPerVoxel', 0.5, (v): v is number => typeof v === 'number' && v > 0);
   const [brush, setBrush] = usePersisted<Brush>(
@@ -403,14 +425,14 @@ export function useEditor() {
 
   /** 在 Worker 裡從 from 複製出帳簿 owner、重播 ops（含 relabel）；busy 橫條顯示 label。失敗回 null 並提示，不會卡在計算中。 */
   const run = useCallback(
-    async (owner: string, from: EditState, ops: Op[], label: string): Promise<{ cur: EditState; buf: SplitBuffers } | null> => {
+    async (owner: string, from: EditState, ops: Op[], label: string): Promise<{ cur: EditState; buf: SplitBuffers; blocked: number } | null> => {
       setBusy(label);
       running.current = true;
       try {
         const r = await replayIn(owner, from, { ops, matNames, keyCounter: keySeq.current });
         keySeq.current = r.keyCounter;
         const buf: SplitBuffers = { data: r.data, labels: r.labels, diff: r.diff, diffCount: r.diffCount, counts: r.counts };
-        return { cur: wrap(owner, buf, r.comps, r.version, from.vol), buf };
+        return { cur: wrap(owner, buf, r.comps, r.version, from.vol), buf, blocked: r.blocked };
       } catch (e) {
         dropOwners([owner]);
         message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
@@ -695,30 +717,106 @@ export function useEditor() {
     [],
   );
 
-  /** 一次產生多個 split，接在現有的後面；從原始或接在目前 split 之後。 */
-  const addSweep = useCallback(
-    async (kind: SweepKind, values: number[], unit: 'nm' | 'vx', nameOf: (v: number) => string, extend: boolean) => {
-      if (!sel.size || running.current) return [];
-      const keys = [...sel];
-      const prefix = extend && active ? active.ops : [];
-      const from = extend && active ? active.cur : orig;
-      const voxels = values.map((v) => Math.round(unit === 'nm' ? v / nmPerVoxel : v));
-      const ops = sweepOps(kind, keys, scope, voxels, follow, backfill);
+  /** 實驗設計用的情境（opsOfCombo）：從哪個狀態量、全域的襯層／回填／policy。 */
+  const factorCtx = useCallback(
+    (from: EditState): FactorCtx => ({ L: from.L, vol: from.vol, nmPerVoxel, follow, backfill, policy: pushPolicy }),
+    [nmPerVoxel, follow, backfill, pushPolicy],
+  );
+
+  /**
+   * 對指定的 split 依序 commit 一串 Op（不必是目前的 split；每個 Op 一步復原）。levels 合併進去。
+   * 回傳這幾步被擋的格數；失敗回 null。plan v11 §4.2「套用到所有現有 split」用。
+   */
+  const commitTo = async (splitId: string, ops: Op[], levels?: Record<string, number>, designId?: string) => {
+    let sp = splitsRef.current.find((x) => x.id === splitId);
+    if (!sp) return null;
+    sp = own(sp);
+    const owned = sp;
+    setSplits((all) => all.map((x) => (x.id === owned.id ? owned : x)));
+    let blocked = 0;
+    for (const op0 of ops) {
+      const cur = splitsRef.current.find((x) => x.id === splitId)!;
+      const from = cur.cur;
+      const r = await applyOne(cur, op0);
+      if (!r) return null;
+      blocked += r.report.blocked;
+      if (!r.next) continue;
+      const rep = summarize(r.report, op0, from.vol);
+      const t = rep.total;
+      const op = { ...op0, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed: changedCount(r.step) } } as unknown as Op;
+      const entry: HistEntry = { step: r.step, ops: cur.ops, version: sidOf(from) };
+      const next = r.next;
+      setSplits((all) => all.map((x) => (x.id === splitId ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)));
+    }
+    setSplits((all) =>
+      all.map((x) =>
+        x.id === splitId ? { ...x, levels: { ...x.levels, ...levels }, designId: x.designId ?? designId, blocked: (x.blocked ?? 0) + blocked } : x,
+      ),
+    );
+    return blocked;
+  };
+
+  /**
+   * 照實驗設計產生 split（plan v11 §4.2，取代 addSweep）：每個組合 → opsOfCombo → 一個 split（Worker 重播）。
+   * from 'base'／'active'：產生新 split；'all'：只允許單一組合，對每個現有 split 各 commit 一次同一組 Op（§9 D9）。
+   * 水平等於標稱的組合沒有 Op（對照組），仍佔一個 split。回傳產生（或改到）的 split id。
+   */
+  const addDesign = useCallback(
+    async (design: Design, onProgress?: (done: number, total: number) => void): Promise<string[]> => {
+      if (running.current || !origRef.current) return [];
+      const combos = combosOf(design, nmPerVoxel);
+      if (!combos.length) return [];
+      const id = design.id ?? `d${designSeq.current++}`;
+      const d: Design = { ...design, id };
+      setDesigns((all) => [...all.filter((x) => x.id !== id), d]);
+      if (design.from === 'all' && splitsRef.current.length) {
+        if (combos.length !== 1) return [];
+        const ids = splitsRef.current.map((x) => x.id);
+        running.current = true;
+        try {
+          for (let k = 0; k < ids.length; k++) {
+            setBusy(`套用到 ${k + 1}／${ids.length} 個 split…`);
+            onProgress?.(k, ids.length);
+            const sp = splitsRef.current.find((x) => x.id === ids[k])!;
+            await commitTo(sp.id, opsOfCombo(d, combos[0], factorCtx(sp.cur)), combos[0], id);
+          }
+        } finally {
+          running.current = false;
+          setBusy(null);
+        }
+        setLast({ text: `已套用到 ${ids.length} 個 split`, at: Date.now() });
+        return ids;
+      }
+      const act = design.from === 'active' ? splitsRef.current.find((x) => x.id === activeRef.current) ?? null : null;
+      const from = act ? act.cur : origRef.current;
+      const prefix = act ? act.ops : [];
+      const ctx = factorCtx(from);
+      const names = new Set(splitsRef.current.map((x) => x.name));
       const made: Split[] = [];
-      for (let i = 0; i < ops.length; i++) {
-        const id = newSplitId();
-        const r = await run(id, from, [ops[i]], `產生 ${nameOf(values[i])}…`);
+      for (let i = 0; i < combos.length; i++) {
+        const ops = opsOfCombo(d, combos[i], ctx);
+        let name = nameOfCombo(d, combos[i], i + 1);
+        for (let k = 2; names.has(name); k++) name = `${nameOfCombo(d, combos[i], i + 1)}_${k}`;
+        names.add(name);
+        const sid = newSplitId();
+        onProgress?.(i, combos.length);
+        const r = !ops.length && !act ? { cur: from, buf: null, blocked: 0 } : await run(sid, from, ops, `產生 ${name}（${i + 1}／${combos.length}）…`);
         if (!r) break;
-        made.push({ id, name: nameOf(values[i]), cur: r.cur, buf: r.buf, ops: [...prefix, ops[i]], hist: [], future: [] });
+        const cur = r.buf ? r.cur : from;
+        made.push({ id: sid, name, cur, buf: r.buf, ops: [...prefix, ...ops], hist: [], future: [], levels: { ...act?.levels, ...combos[i] }, designId: id, tags: ops.length ? [] : ['baseline'], blocked: r.blocked });
       }
       if (!made.length) return [];
       setSplits((all) => [...all, ...made]);
       setActiveId(made[0].id);
       setLast({ text: `已產生 ${made.length} 個 split`, at: Date.now() });
-      return made.map((s) => s.id);
+      return made.map((x) => x.id);
     },
-    [sel, active, orig, scope, nmPerVoxel, follow, backfill, run],
+    // commitTo／applyOne 每次 render 都換新的，只讀 ref 裡的最新狀態
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nmPerVoxel, factorCtx, run],
   );
+
+  const setSplitTags = useCallback((id: string, tags: string[]) => setSplits((all) => all.map((x) => (x.id === id ? { ...x, tags } : x))), [setSplits]);
 
   // ---- 選取 ----
 
@@ -777,10 +875,38 @@ export function useEditor() {
   );
   /** 長／縮：dir 那一面沿法線 n 格（負＝縮）；local＝筆刷。 */
   const pushOp = useCallback(
-    (dir: Vec3, n: number, local?: Local): Op | null => pushOpOf([...sel], scope, dir, n, follow, backfill, local),
-    [sel, scope, follow, backfill],
+    (dir: Vec3, n: number, local?: Local, policy: Policy = pushPolicy): Op | null => pushOpOf([...sel], scope, dir, n, follow, backfill, local, policy),
+    [sel, scope, follow, backfill, pushPolicy],
   );
   const materialOp = useCallback((m: number): Op | null => (sel.size ? { kind: 'material', keys: [...sel], scope, m } : null), [sel, scope]);
+  /** 對稱 CD（plan v11 §4.5）：axis 那一軸總寬 +delta（兩側或單側）。 */
+  const cdOp = useCallback(
+    (axis: 0 | 1 | 2, delta: number, anchor: 'center' | 'lo' | 'hi', policy: Policy = pushPolicy): Op | null =>
+      !sel.size || !delta ? null : { kind: 'cd', keys: [...sel], scope, axis, delta, anchor, follow, backfill, policy },
+    [sel, scope, follow, backfill, pushPolicy],
+  );
+  /** 保形層加厚／減薄（§4.6）。 */
+  const dilateOp = useCallback(
+    (n: number): Op | null => (!sel.size || !n ? null : { kind: 'dilate', keys: [...sel], scope, n, metric: 'euclid', follow, backfill }),
+    [sel, scope, follow, backfill],
+  );
+  /** 側壁斜度（§4.8）：along＝高度軸。 */
+  const taperOp = useCallback(
+    (face: Vec3, along: 0 | 1 | 2, top: number, bottom: number, both: boolean, policy: Policy = pushPolicy): Op | null =>
+      !sel.size || (!top && !bottom) ? null : { kind: 'taper', keys: [...sel], scope, face, along, top, bottom, ...(both ? { both: true } : {}), follow, backfill, policy },
+    [sel, scope, follow, backfill, pushPolicy],
+  );
+  /** 缺陷注入（§4.7）：只對一個 host；center 0～1、size 格。 */
+  const defectOp = useCallback(
+    (shape: 'slab' | 'sphere' | 'box', center: Vec3, size: Vec3, mat: number): Op | null => {
+      if (sel.size !== 1) return null;
+      const keys = [...sel];
+      const b = bboxOfKeys(L, keys);
+      const abs = b && defectBox(b, center, size);
+      return abs ? { kind: 'defect', keys, scope, shape, center, size, mat, abs } : null;
+    },
+    [sel, scope, L],
+  );
   const translate = useCallback(
     (d: Vec3, withShell = false) => {
       const op = translateOp(d, withShell);
@@ -809,9 +935,9 @@ export function useEditor() {
       const keys = [...sel];
       if (s.kind === 'level') return { kind: 'level', keys, scope, dir: s.dir, to: s.to, local: s.local, backfill, follow };
       if (!s.n) return null;
-      return { kind: 'push', keys, scope, dir: s.dir, n: s.n, follow, backfill, local: s.local };
+      return { kind: 'push', keys, scope, dir: s.dir, n: s.n, follow, backfill, local: s.local, policy: pushPolicy };
     },
-    [sel, scope, follow, backfill],
+    [sel, scope, follow, backfill, pushPolicy],
   );
   const sculpt = useCallback(
     (s: Sculpt) => {
@@ -836,14 +962,14 @@ export function useEditor() {
   );
   /** 方頭（整個選取沿 dir 補到最外側）。 */
   const levelOp = useCallback(
-    (dir: Vec3): Op | null => {
+    (dir: Vec3, ref?: { key: string; side: 'lo' | 'hi'; offset: number }): Op | null => {
       const b = unionBBox(selComps);
-      const to = levelTarget(dir);
+      const to = ref ? levelRefTo(L, dir, ref) : levelTarget(dir);
       if (!b || to === null || !sel.size) return null;
       const center: Vec3 = [(b.x0 + b.x1) >> 1, (b.y0 + b.y1) >> 1, (b.z0 + b.z1) >> 1];
-      return { kind: 'level', keys: [...sel], scope, dir, to, local: { center, radius: null }, backfill, follow };
+      return { kind: 'level', keys: [...sel], scope, dir, to, local: { center, radius: null }, backfill, follow, ...(ref ? { ref } : {}) };
     },
-    [selComps, levelTarget, sel, scope, backfill, follow],
+    [selComps, levelTarget, sel, scope, backfill, follow, L],
   );
   const levelWhole = useCallback(
     (dir: Vec3) => {
@@ -880,6 +1006,9 @@ export function useEditor() {
       keySeq.current = 1000;
       splitSeq.current = 1;
       setSplits([]);
+      setDesigns([]);
+      designSeq.current = 1;
+      setCompareBase(BASE_ID);
       setActiveId(BASE_ID);
       setSel(new Set());
       setHidden(new Set());
@@ -1039,7 +1168,25 @@ export function useEditor() {
     duplicateSplit,
     renameSplit,
     removeSplit,
-    addSweep,
+    addDesign,
+    commitTo,
+    factorCtx,
+    designs,
+    setSplitTags,
+    exportOff,
+    setExportOff,
+    compareBase,
+    setCompareBase,
+    pushPolicy,
+    setPushPolicy,
+    freeform,
+    setFreeform,
+    brushOn,
+    setBrushOn,
+    cdOp,
+    dilateOp,
+    taperOp,
+    defectOp,
     opText: describe,
     sel,
     selComps,

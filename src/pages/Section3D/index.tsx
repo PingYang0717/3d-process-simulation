@@ -75,9 +75,10 @@ import { SliceEditor, SliceView, View3D } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { Inspector, matOf } from './Inspector';
 import { ChangesTab } from './ChangesTab';
-import { SplitsTab } from './SplitsTab';
+import { MatrixTab } from './MatrixTab';
+import { ExperimentTab } from './ExperimentTab';
+import { buildManifest } from './matrix';
 import { SplitBar } from './SplitBar';
-import { SweepModal } from './SweepModal';
 import { AXIS_NAME, CompareView } from './CompareView';
 import { StructureList } from './StructureList';
 import { SettingsDrawer } from './SettingsDrawer';
@@ -217,7 +218,6 @@ export default function Section3DPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sweepOpen, setSweepOpen] = useState(false);
   const [compare, setCompare] = useState(false);
   const [cmpAxis, setCmpAxis] = useState<Axis>('z');
   const tagRef = useRef<HTMLDivElement>(null);
@@ -598,14 +598,14 @@ export default function Section3DPage() {
   const confirmExportAll = (fmt: Fmt = 'vti') => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
     modal.confirm({
-      title: `打包 ${ed.splits.length} 個 split 成 zip（.${ext(fmt)}${fmt === 'vti1' ? '，單一編號' : ''}）`,
+      title: `打包 ${ed.splits.filter((s) => !ed.exportOff.has(s.id)).length} 個 split 成 zip（.${ext(fmt)}${fmt === 'vti1' ? '，單一編號' : ''}）`,
       icon: <DownloadOutlined style={{ color: 'var(--c-primary)' }} />,
       width: 520,
       okText: '匯出 zip',
       cancelText: '取消',
       content: (
         <Flex vertical gap={6} style={{ marginTop: 8 }}>
-          {ed.splits.map((s) => (
+          {ed.splits.filter((s) => !ed.exportOff.has(s.id)).map((s) => (
             <Flex key={s.id} justify="space-between" gap={12} style={{ fontSize: 13 }}>
               <span>
                 {s.name}
@@ -629,29 +629,27 @@ export default function Section3DPage() {
   const exportAll = async (fmt: Fmt = 'vti') => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
     const files: { name: string; data: Uint8Array }[] = [];
+    const chosen = ed.splits.filter((s) => !ed.exportOff.has(s.id));
     try {
-      for (const s of ed.splits) files.push({ name: fileOf(s), data: await encode(s.cur.vol, fmt) });
+      for (const s of chosen) files.push({ name: fileOf(s), data: await encode(s.cur.vol, fmt) });
     } catch (e) {
       message.error(`匯出失敗：${(e as Error)?.message ?? e}`);
       return;
     }
-    const manifest = {
+    const manifest = buildManifest({
       source: ed.meta.name ?? 'demo',
       format: ext(fmt),
       ...(ed.meta.input ? { input: { ...ed.meta.input, output: fmt === 'vti' && like ? 'same-as-input' : fmt === 'npy' ? 'npy-uint8' : 'CellData-uint8' } } : {}),
-      materials: ed.materials.map(({ id, name, color }) => ({ id, name, color, source: ed.meta.materialSource ?? 'auto' })),
+      materials: ed.materials.map((m) => ({ ...m, source: ed.meta.materialSource ?? 'auto' })),
       shape: [ed.vol.Z, ed.vol.Y, ed.vol.X],
-      dtype: 'uint8',
       spacing,
       origin,
       nmPerVoxel: ed.nmPerVoxel,
-      splits: ed.splits.map((s) => ({
-        name: s.name,
-        file: fileOf(s),
-        changedVoxels: s.buf?.diffCount ?? 0,
-        ops: s.ops.map((op) => ({ ...op, text: ed.opText(op, ed.orig.L) })),
-      })),
-    };
+      designs: ed.designs,
+      splits: chosen.map((s) => ({ ...s, changedVoxels: s.buf?.diffCount ?? 0 })),
+      fileOf,
+      opText: (op) => ed.opText(op, ed.orig.L),
+    });
     files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
     const name = `${stem}__splits.zip`;
     download(zipStore(files), name, 'application/zip')
@@ -1295,16 +1293,32 @@ export default function Section3DPage() {
             ),
           },
           {
+            key: 'experiment',
+            label: '實驗',
+            children: (
+              <div className="insp-body">
+                <ExperimentTab ed={ed} onMade={() => setTab('splits')} />
+              </div>
+            ),
+          },
+          {
             key: 'splits',
             label: (
               <Flex align="center" gap={6}>
-                Split
+                矩陣
                 {ed.splits.length > 1 && <Badge count={ed.splits.length} size="small" color="var(--c-text-3)" />}
               </Flex>
             ),
             children: (
               <div className="insp-body">
-                <SplitsTab ed={ed} />
+                <MatrixTab
+                  ed={ed}
+                  fileOf={(sp) => `${stem}__${safeName(sp.name)}.vti`}
+                  onCompare={(id) => {
+                    if (id) ed.setActiveId(id);
+                    setCompare(true);
+                  }}
+                />
               </div>
             ),
           },
@@ -1410,7 +1424,7 @@ export default function Section3DPage() {
           </>
         )}
         <main className="stage" id="stage">
-          <SplitBar ed={ed} compare={compare} setCompare={setCompare} onSweep={() => setSweepOpen(true)} />
+          <SplitBar ed={ed} compare={compare} setCompare={setCompare} onSweep={() => setTab('experiment')} />
           {!compare && ed.sel.size > 0 && <EditToolbar ed={ed} onTab={onTab} />}
           {ed.busy && (
             <div className="busy-bar" role="status">
@@ -1460,16 +1474,6 @@ export default function Section3DPage() {
         onLoad={() => setUploadOpen(true)}
       />
       <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
-      <SweepModal
-        ed={ed}
-        open={sweepOpen}
-        onClose={() => setSweepOpen(false)}
-        onMade={(axis) => {
-          // 產生後自動切到看得到差異的切面：z 方向 → XZ 上視
-          setCmpAxis(axis === 'z' ? 'y' : 'z');
-          setCompare(true);
-        }}
-      />
     </div>
     </CardHostCtx.Provider>
   );

@@ -2,7 +2,7 @@
 // 面把手 ×6：選取外框每一面中央，沿法線拖 n 格 → push（和卡片「長／縮 n」同一個 Op 產生函式）。
 // 角把手 ×4：剖面（軸＝結構最長軸的法線）四個角，畫在範圍中點那一片；沿角平分線往內拖＝圓角半徑 r → round。
 import type { Axis, Backfill, BBox, Vec3 } from '../../volume/volume';
-import type { Op } from '../../volume/ops';
+import type { Op, Policy } from '../../volume/ops';
 import { type Scope, axisIndex, planeAxes } from '../../volume/scope';
 import type { CornerId } from '../../slice/round';
 
@@ -119,7 +119,16 @@ export function pickHandle<T>(items: { h: T; screen: [number, number] | null }[]
 }
 
 /** 長／縮的 Op（卡片、面把手、右鍵、方向鍵共用同一個產生函式，plan v10 §3）。 */
-export function pushOpOf(keys: string[], scope: Scope, dir: Vec3, n: number, follow: boolean, backfill: Backfill, local?: Extract<Op, { kind: 'push' }>['local']): Op | null {
+export function pushOpOf(
+  keys: string[],
+  scope: Scope,
+  dir: Vec3,
+  n: number,
+  follow: boolean,
+  backfill: Backfill,
+  local?: Extract<Op, { kind: 'push' }>['local'],
+  policy?: Policy,
+): Op | null {
   if (!keys.length || !n) return null;
-  return { kind: 'push', keys, scope, dir, n, follow, backfill, ...(local ? { local } : {}) };
+  return { kind: 'push', keys, scope, dir, n, follow, backfill, ...(local ? { local } : {}), ...(policy ? { policy } : {}) };
 }

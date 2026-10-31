@@ -1,5 +1,5 @@
 // 數值操作的卡片（plan v10 §4.4）：每一張都是「參數 → 一句話 → 套用」。
-// 參數一變（150 ms）就用既有的拖拉預覽管線畫出結果（3D 即時網格、主切面淡綠／淡紅），按「套用」（Enter）才 commit；
+// 參數一變（50 ms）就用既有的拖拉預覽管線畫出結果（3D 即時網格、主切面淡綠／淡紅），按「套用」（Enter）才 commit；
 // 點別處、Esc、收合 → 預覽收掉。右欄與 3D／2D 工具列的 Popover 是同一個元件（compact）。
 import { type ReactNode, createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Checkbox, Flex, InputNumber, Popover, Segmented, Select, Slider, Tooltip, Typography } from 'antd';
@@ -16,6 +16,12 @@ import { RoundCard } from './RoundCard';
 import type { RoundGesture } from '../../slice/round';
 
 const { Text } = Typography;
+
+/**
+ * 參數變了多久之後預覽（plan v10 §4.4 原訂 150 ms）。Worker 一次只算一個拖拉預覽、永遠送最新的，
+ * 連續改不會堆積，所以縮短到 50 ms，讓「改數值 → 畫面出現」更接近 200 ms 的目標。
+ */
+const PREVIEW_DEBOUNCE_MS = 50;
 
 /** 卡片要的畫面功能：index.tsx 提供（預覽管線、3D 亮面、換材質的即時變色）。 */
 export interface CardHost {
@@ -89,7 +95,7 @@ function useCardPreview(op: Op | null, previewable = true) {
     const t = setTimeout(() => {
       was.current = true;
       setBig(!host.preview(op));
-    }, 150);
+    }, PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [active, op, previewable, host]);
   useEffect(() => {

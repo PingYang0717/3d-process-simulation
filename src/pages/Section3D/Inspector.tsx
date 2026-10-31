@@ -7,7 +7,7 @@ import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
 import { ScopeControl } from './PositionBar';
-import { opOfGesture, resolveHandle, sliceContext } from './handleOps';
+import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handleOps';
 import { groupNormal, smoothEdgeGroup } from '../../slice/gestures';
 import { Checkbox } from 'antd';
 
@@ -149,15 +149,17 @@ function HandleRow({ ed }: { ed: Editor }) {
     setLastP(h.p);
     setPos([h.p[0], h.p[1]]);
   }
-  const ctx = () => sliceContext(ed.L, ed.vol, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel });
+  const ctx = () => modelContext(ed, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel });
   const run = (delta: [number, number], shift = false) => {
     const c = ctx();
     const hh = resolveHandle(c, h);
     if (!hh) return;
     const { op } = opOfGesture(c, hh, delta, shift, ed.mirror);
     if (op) {
-      ed.commit(op);
-      ed.setHandle({ ...h, p: [h.p[0] + Math.round(delta[0]), h.p[1] + Math.round(delta[1])] });
+      // 和拖拉同一條路：幾何層先更新、再送 Op（§7.8）
+      commitGesture(ed, c, hh, delta, shift, op);
+      const p = h.vid ? c.model?.vertices[h.vid] : null;
+      ed.setHandle({ ...h, p: p && h.kind === 'node' ? [p.u, p.v] : [h.p[0] + Math.round(delta[0]), h.p[1] + Math.round(delta[1])] });
     }
   };
   if (h.kind === 'node')

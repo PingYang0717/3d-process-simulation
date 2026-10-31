@@ -20,6 +20,8 @@ import {
   NearestFilter,
   PerspectiveCamera,
   Plane,
+  Points,
+  PointsMaterial,
   PlaneGeometry,
   Raycaster,
   Scene,
@@ -49,6 +51,7 @@ import {
 import { call, ensure, sidOf } from '../../volume/client';
 import type { EditState, Local, Op } from '../../volume/ops';
 import type { Preview } from '../../volume/preview';
+import type { CellCloud } from './cellCloud';
 import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
 
 export type { Sculpt } from './editor';
@@ -343,6 +346,7 @@ export function View3D({
   orig,
   preview,
   onPreview,
+  cells,
   toOp,
   onPick,
   onMenu,
@@ -381,6 +385,8 @@ export function View3D({
   preview: (Preview & { base: number }) | null;
   /** 拖拉中每改一格就要一次預覽；null = 收掉。回傳 false 表示範圍太大沒算（改畫橘色塊）。 */
   onPreview: (op: Op | null) => boolean;
+  /** 2D 拖拉超過即時預覽上限時：要加／拿的格子沿範圍擠出（概略，§8.3）。 */
+  cells?: CellCloud | null;
   /** 筆刷的一筆 → 完整 Op（補上選取、z 範圍、襯層設定）。 */
   toOp: (s: Sculpt) => Op | null;
   onPick: (voxel: number | null, mode: SelectMode) => void;
@@ -816,6 +822,49 @@ export function View3D({
       mat.needsUpdate = true;
     }
   }, [translucent]);
+
+  // 格子點雲（§8.3）：每個要加／拿的格子一個點（綠＝會加、紅＝會拿），半透明、不寫深度。
+  // 用 Points 而不是一格一個方塊：一格一個頂點，幾萬格每幀重畫也便宜。物件與材質一直留著，只換位置。
+  // 不做深度測試：加的格子多半在別的結構裡面（被擋住的也畫），要從外面看得到。
+  const cloud = useRef<Points[]>([]);
+  useEffect(() => {
+    const c = ctxRef.current;
+    if (!c) return;
+    const lists = cells ? [cells.add, cells.remove] : [new Int32Array(0), new Int32Array(0)];
+    lists.forEach((arr, k) => {
+      let m = cloud.current[k];
+      if (!m) {
+        m = new Points(new BufferGeometry(), new PointsMaterial({ color: k ? 0xff4d4f : 0x52c41a, size: 3, sizeAttenuation: false, transparent: true, opacity: 0.7, depthWrite: false, depthTest: false }));
+        // 體素座標：翻 y（同 voxelSpace）
+        m.scale.set(1, -1, 1);
+        m.renderOrder = 3;
+        m.frustumCulled = false;
+        m.raycast = () => {};
+        cloud.current[k] = m;
+      }
+      // 載入新檔案時場景會重建：點雲掛到現在的場景上
+      if (m.parent !== c.scene) c.scene.add(m);
+      m.position.y = vol.Y;
+      const n = arr.length / 3;
+      const pos = new Float32Array(arr.length);
+      for (let i = 0; i < arr.length; i++) pos[i] = arr[i] + 0.5;
+      m.geometry.dispose();
+      m.geometry = new BufferGeometry();
+      m.geometry.setAttribute('position', new BufferAttribute(pos, 3));
+      m.visible = n > 0;
+    });
+    kick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cells]);
+  useEffect(
+    () => () => {
+      for (const m of cloud.current) {
+        m.geometry.dispose();
+        (m.material as PointsMaterial).dispose();
+      }
+    },
+    [],
+  );
 
   // 即時預覽：裁切範圍（外加一圈鄰居）在主執行緒 greedy mesh，主網格同一範圍挖掉；正式網格 swap 時收掉
   useEffect(() => {

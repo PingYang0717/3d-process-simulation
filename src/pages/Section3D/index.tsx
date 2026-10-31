@@ -35,6 +35,8 @@ import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar'
 import { FloatingToolbar } from './FloatingToolbar';
 import { axisIndex, clipBox } from '../../volume/scope';
 import { type Preview, previewOp } from '../../volume/preview';
+import { newReport } from '../../volume/kernel';
+import { type CellCloud, cellCloud, globalIndex } from './cellCloud';
 import { sidOf } from '../../volume/client';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceEditor, SliceView, View3D } from './views.lazy';
@@ -110,7 +112,7 @@ const LIVE_PREVIEW_CAP = 400_000;
 // 正式結果現在只在外框裡算（§8.2），幾百毫秒就到；放開後的預覽只在範圍小時做（§7.5 第 2 級）
 const COMMIT_PREVIEW_CAP = 400_000;
 /** base = 預覽根據的狀態版本號。 */
-type PV = Preview & { base: number; committed: boolean };
+type PV = Preview & { base: number; committed: boolean; blocked?: number[] };
 
 /** 3D 雕刻關著時給 View3D 的筆刷：拖拉一律轉視角。 */
 const OFF_BRUSH = { mode: 'off' as const, radius: 6, shape: 'round' as const };
@@ -264,17 +266,24 @@ export default function Section3DPage() {
   const onLive = (op: Op | null) => {
     if (!op) {
       setDragPv(null);
+      setLiveCells(null);
       setPv((p) => (p && !p.committed ? null : p));
       return;
     }
     const a = ed.editAxis;
     const t = cursorAt(a);
     if (op.scope.axis === a && t >= op.scope.lo && t <= op.scope.hi) {
-      const p = previewOp(ed.cur, ed.orig.vol, { ...op, scope: { axis: a, lo: t, hi: t } } as Op, 2_000_000);
-      setDragPv(p ? { ...p, base: sidOf(ed.cur), committed: false } : null);
+      // 第 1 級：主切面這一片（第二層的加／拿格子與「會被擋住」都從這裡來）
+      const rep = newReport();
+      const p = previewOp(ed.cur, ed.orig.vol, { ...op, scope: { axis: a, lo: t, hi: t } } as Op, 2_000_000, rep);
+      setDragPv(p ? { ...p, base: sidOf(ed.cur), committed: false, blocked: globalIndex(p.box, ed.vol, rep.blockedAt) } : null);
     } else setDragPv(null);
-    makePreview(op, LIVE_PREVIEW_CAP, false);
+    // 第 2 級：3D 與小切面；範圍太大就畫加／拿格子的點雲（§8.3）
+    const ok = makePreview(op, LIVE_PREVIEW_CAP, false);
+    setLiveCells(ok ? null : cellCloud(op, ed.vol));
   };
+  /** 超過即時預覽上限時，3D 畫的加／拿格子（沿範圍擠出；不算 kernel，被擋的不會顯示）。 */
+  const [liveCells, setLiveCells] = useState<CellCloud | null>(null);
   /** 「看這些片」：跳到下一個有被擋住的片（循環）。 */
   const jumpBlocked = () => {
     const r = ed.report;
@@ -599,6 +608,7 @@ export default function Section3DPage() {
             mirror={ed.mirror && ed.sel.size > 1}
             onNote={(t) => message.warning({ key: 'mirror', content: t })}
             overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} onMaterial={changeMaterial} /> : undefined}
+            geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, outline: ed.outlineStyle, snap: ed.snapMode }}
             onMenu={(p, x, y) => {
               const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
               setMenuAt({ x, y });
@@ -856,6 +866,7 @@ export default function Section3DPage() {
           nmPerVoxel={ed.nmPerVoxel}
           orig={ed.orig.vol}
           preview={pv}
+          cells={liveCells}
           onPreview={(op) => {
             if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
             setPv((p) => (p && !p.committed ? null : p));

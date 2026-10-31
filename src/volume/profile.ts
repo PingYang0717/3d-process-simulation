@@ -28,6 +28,11 @@ export interface ProfileOp {
    * 對不到的片才用上面的絕對 add／remove（報告裡記 fallback）。
    */
   gestures?: Record<string, RelGesture>;
+  /**
+   * 參考片（at）用上面的絕對 add／remove，不重做手勢（plan v8：2D 的幾何層是持久的，參考片的格子
+   * 就是那份幾何光柵化出來的，重描 voxel 再重做會差一格）。舊的 Op 沒有這一欄，重播不變。
+   */
+  refExact?: boolean;
 }
 
 /** 方向碼 → 體素方向（切面 axis 上）。 */
@@ -82,7 +87,7 @@ export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, U
       // 相對式：這一片自己的輪廓上找同一個把手、重做手勢（切面座標＝整個陣列的）
       let c: { add: ProfileCell[]; remove: ProfileCell[] } = absolute[key];
       const g = op.gestures?.[key];
-      if (g) {
+      if (g && !(op.refExact && t + off[a] === op.at)) {
         const local = (u: number, v: number) => {
           const lu = u - off[ua];
           const lv = v - off[va];

@@ -25,6 +25,8 @@ npm run build      # 型別檢查 + 打包
 
 **相對式套用（plan v7 M4）**：`profile` Op 另外記下手勢（`gestures`：把手種類、正規化到結構這一片外框的位置、位移），每一片先描自己的輪廓、找同一個節點／邊重做；對不到的片退回參考片的絕對座標，報告記下片數（`slice/relative.ts`，`relative.test.ts`：偏移 1 格的 fin 推斜邊往外 3，每片多的格數相同、沒有被擋）。
 
+**持久幾何層（plan v8）**：進入 2D 編輯時把已選結構的剖面描一次成有頂點 id 的幾何（`slice/model.ts` 的 `SliceModel`），之後拖節點、推邊、搬區域、右欄數值、方向鍵都改這份幾何，不再每一步從 voxel 重描：連拖同一個節點，節點還是那一個、從上一次放開的位置出發；斜邊拖完是一條直線（主輪廓畫頂點連線，8× 以上下面淡淡疊著 voxel 真正的邊界）。拖的時候橘色輪廓跟手（浮點，`slice/snap.ts` 的 `dragDispFloat`），裡面淡綠／淡紅是放開後會加／拿的格子、斜線是會被擋住的（主切面的單片預覽，`SlicePreviewLayer.tsx` 只重畫那一塊），提示「(+1.6, −2.3) → 取 (+2, −2)」；pointermove 用 requestAnimationFrame 合併。放開時幾何先用整數位移更新（不等 Worker），Op 照舊（rasterize → deltaOf → profile）；Worker 回來後只驗證「幾何光柵化 === 這一片 voxel」，對不上（被擋住、3D 那邊改了這片）以 voxel 為準重描、舊節點 ≤ 1.5 格對應沿用 id，訊息「幾何已對齊到實際結果」。每個版本留一份幾何快照，Ctrl+Z／Y 時節點回到那時的位置。幾何改過的結構，profile Op 多帶 `refExact`：參考片用 Op 裡的絕對格子（看到的＝commit 的），其他片照舊相對式；剛描好的幾何產生的 Op 和 v7 逐欄相同（`model.test.ts` 黃金測試）。profile 的即時預覽外框改成只包加／拿的格子＋結構這一段＋實際襯層要讀到的格數（`preview.ts` 的 `profileBox`），拖 fin 節點時 3D 也即時；還是超過 40 萬格時 3D 畫加／拿格子沿範圍擠出的點雲（`cellCloud.ts`，概略）。設定裡可以改回「階梯」輪廓與「邊拖邊吸附」。實作紀錄與量測：`docs/plan-v8-geometry-layer.md`。
+
 **範圍（Scope）**：取代以前只能沿 z 的「要改哪裡」。一個軸＋起止索引，軸＝主切面的法線；三種模式：整個結構（預設）、此片、自訂一段（滑桿上標結構起止與旁邊結構的起止）。位置列與右欄是同一個狀態。所有 Op 存 `scope: {axis, lo, hi}`；舊的 `zRange: [a, b]` 讀進來會轉成 `scope: {axis: 'z', lo: a, hi: b}`（`upgradeOp`），重播逐體素相同（`scope.test.ts`）。
 
 **3D 雕刻（進階，預設關）**：設定裡「在 3D 上雕刻」或 3D 標題列的「3D 雕刻：關」打開。關著時 3D 上怎麼拖都只轉視角。打開後 3D 上的拖拉是**筆刷雕刻**：選好結構後滑鼠移到它的面上會看到筆刷圈與法線箭頭（半徑、圓／方在工具列），按住沿法線拖＝圈圈裡局部長／縮，拖的時候 3D 與切面就顯示結果，放開才套用（橘色虛線框是範圍、游標旁顯示格數與 nm）。先拖過 8px 才算拖拉，手抖不會改到；正對著面看時改用垂直位移估算；格數上限是選取外框在該軸的長度；拖到一半按 Esc 取消。轉視角：左鍵拖在非選取處、中鍵拖、或 Alt＋左鍵拖；筆刷切到「關閉」時怎麼拖都只轉視角。筆刷切到「補平」時點一個面＝圈圈裡每一排補到或削到那一面；整根要變方頭用右欄「補平（圓頭變方頭）」（每一排補到最外側那一點；薄襯層跟著外推、厚的鄰居不吃）。整面長縮、整塊移動、換材質都在右欄輸入；換材質點下去 3D 立刻變色（GPU 上先改面的顏色，Worker 的正式結果幾秒後覆蓋）。
@@ -53,8 +55,9 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/SliceEditor.tsx` | 2D 編輯的主切面：縮放、平移、換片、縮放列（1:1／8×／適合／對準選取）、自動放大到選取 |
 | `src/pages/Section3D/PositionBar.tsx` | 位置列（第幾片、套用到哪裡、「這一片沒有…跳到最近的一片」）與範圍控制 `ScopeControl`（右欄共用）、自動選切面方向 |
 | `src/pages/Section3D/views.lazy.tsx` | `View3D`／`SliceView`／`SliceEditor` 的 lazy 包裝：three.js 等載入檔案後才抓，歡迎頁不用等 |
-| `scripts/e2e/m0.cjs`、`m2.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m2.cjs` |
-| `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、拖法、手勢 → Op） |
+| `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
+| `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、手勢 → Op）、`snap.ts`（拖法：浮點 ghost 與放開時的整數位移）、`model.ts`（持久幾何層：建立、位移、驗證、重描保留 id、每版本快照）、`relative.ts`、`mirror.ts` |
+| `src/pages/Section3D/SlicePreviewLayer.tsx`、`cellCloud.ts` | 主切面的預覽層（只重畫預覽那一塊，拖拉中淡綠／淡紅）；超過即時預覽上限時 3D 的加／拿格子點雲 |
 | `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算、補丁、chunk 網格、profile Op、一步的報告 |
 | `src/ui/` | Swatch、StatTile、download、theme（antd 主題；色票和 `styles.css` 的 `:root` 變數對齊）、persist（`usePersisted`：欄寬、筆刷、襯層跟推、nm 比例、標紅存 localStorage；`overlayOpen`：Modal／Drawer 開著時單鍵快捷鍵不動 3D） |
 

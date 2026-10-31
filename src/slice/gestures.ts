@@ -7,6 +7,9 @@ import { encodeRle } from '../volume/rle';
 import { recordGesture } from './relative';
 import { type Ring, type XY, ringPolygon } from './trace';
 import { deltaOf, editRing, rasterize } from './raster';
+import { dragDisp, edgeAmount, groupNormal, isAxisEdge, smoothEdgeGroup } from './snap';
+
+export { dragDisp, dragDispFloat, edgeAmount, falloffWeights, groupNormal, isAxisEdge, smoothEdgeGroup, snapAmount } from './snap';
 
 export type HandleKind = 'node' | 'edge' | 'region';
 export interface Handle {
@@ -77,106 +80,6 @@ export function hitTest(
     for (const key of rings.keys()) if (inside(key, u, v)) return { kind: 'region', key, ring: -1, index: -1 };
   }
   return null;
-}
-
-/** 段 i 往兩側走到節點（角）為止：回傳這一組的頂點索引（含兩端的角）。single = 只要這一段。 */
-export function smoothEdgeGroup(r: Ring, seg: number, single = false): number[] {
-  const n = r.pts.length;
-  if (single) return [seg, (seg + 1) % n];
-  let a = seg;
-  for (let g = 0; g < n && !r.nodes.has(a); g++) a = (a - 1 + n) % n;
-  let b = (seg + 1) % n;
-  for (let g = 0; g < n && !r.nodes.has(b); g++) b = (b + 1) % n;
-  const out = [a];
-  for (let i = a; i !== b; ) {
-    i = (i + 1) % n;
-    out.push(i);
-  }
-  return out;
-}
-
-/** 一組頂點（連續）的平均外法線（單位向量）。外＝離開結構那一側（內環是往洞裡）。 */
-export function groupNormal(r: Ring, group: number[]): XY {
-  let nx = 0;
-  let ny = 0;
-  for (let k = 0; k + 1 < group.length; k++) {
-    const a = r.pts[group[k]];
-    const b = r.pts[group[k + 1]];
-    nx += -(b[1] - a[1]);
-    ny += b[0] - a[0];
-  }
-  const l = Math.hypot(nx, ny) || 1;
-  return [nx / l, ny / l];
-}
-
-/** 節點拖動時，它和左右兩個節點之間的頂點依 cos 衰減跟著走；回傳每個頂點的權重。 */
-export function falloffWeights(r: Ring, node: number): number[] {
-  const n = r.pts.length;
-  const w = new Array(n).fill(0);
-  w[node] = 1;
-  for (const step of [1, -1]) {
-    // 走到下一個節點，沿途累積長度
-    const path: number[] = [];
-    const lens: number[] = [0];
-    let i = node;
-    for (let g = 0; g < n; g++) {
-      const j = (i + step + n) % n;
-      lens.push(lens[lens.length - 1] + Math.hypot(r.pts[j][0] - r.pts[i][0], r.pts[j][1] - r.pts[i][1]));
-      path.push(j);
-      i = j;
-      if (r.nodes.has(j)) break;
-    }
-    const L = lens[lens.length - 1] || 1;
-    path.forEach((j, k) => {
-      if (r.nodes.has(j)) return;
-      w[j] = Math.max(w[j], 0.5 * (1 + Math.cos((Math.PI * lens[k + 1]) / L)));
-    });
-  }
-  return w;
-}
-
-/** 拖動後每個頂點的位移（整數格）。 */
-export function dragDisp(r: Ring, h: Handle, delta: XY, shift = false): XY[] {
-  const n = r.pts.length;
-  const zero = (): XY[] => r.pts.map(() => [0, 0]);
-  if (h.kind === 'node') {
-    const d: XY = [Math.round(delta[0]), Math.round(delta[1])];
-    if (shift) {
-      const out = zero();
-      out[h.index] = d;
-      return out;
-    }
-    const w = falloffWeights(r, h.index);
-    return w.map((k) => [Math.round(d[0] * k), Math.round(d[1] * k)]);
-  }
-  if (h.kind === 'edge') {
-    const group = smoothEdgeGroup(r, h.index, shift);
-    const nrm = groupNormal(r, group);
-    const amt = Math.round(delta[0] * nrm[0] + delta[1] * nrm[1]);
-    const out = zero();
-    const straight = isAxisEdge(r, group);
-    group.forEach((i, k) => {
-      // 兩端的角是錨點（彎的邊）；和軸平行的直邊整段一起推（＝推面）
-      if (!straight && (k === 0 || k === group.length - 1) && group.length > 2) return;
-      out[i] = [Math.round(nrm[0] * amt), Math.round(nrm[1] * amt)];
-    });
-    void n;
-    return out;
-  }
-  return r.pts.map(() => [Math.round(delta[0]), Math.round(delta[1])]);
-}
-
-/** 這一組頂點是不是一條和軸平行的直邊（所有點同一個 u 或同一個 v）。 */
-export function isAxisEdge(r: Ring, group: number[]) {
-  const us = new Set(group.map((i) => r.pts[i][0]));
-  const vs = new Set(group.map((i) => r.pts[i][1]));
-  return us.size === 1 || vs.size === 1;
-}
-
-/** 邊拖動的量（沿法線幾格）。 */
-export function edgeAmount(r: Ring, h: Handle, delta: XY, shift = false) {
-  const nrm = groupNormal(r, smoothEdgeGroup(r, h.index, shift));
-  return Math.round(delta[0] * nrm[0] + delta[1] * nrm[1]);
 }
 
 const DIR_WORD: Record<string, string> = { '0,-1': '往上', '0,1': '往下', '-1,0': '往左', '1,0': '往右' };

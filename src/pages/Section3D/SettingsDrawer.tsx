@@ -61,6 +61,28 @@ export function SettingsDrawer({
           <Row label="選到結構時自動放大到它" sub="2D 編輯的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />
           </Row>
+          <Row label="2D 輪廓顯示" sub="幾何線：拖過的斜邊是一條直線，放大到 8× 以上下面淡淡疊著真正的格子邊界；階梯：一直畫格子邊界">
+            <Select
+              value={ed.outlineStyle}
+              onChange={ed.setOutlineStyle}
+              style={{ width: 110 }}
+              options={[
+                { value: 'geometry' as const, label: '幾何線' },
+                { value: 'stairs' as const, label: '階梯' },
+              ]}
+            />
+          </Row>
+          <Row label="2D 拖拉吸附" sub="放開才吸附：輪廓跟手、旁邊同時標出放開後會變成的格子；邊拖邊吸附：一格一格跳">
+            <Select
+              value={ed.snapMode}
+              onChange={ed.setSnapMode}
+              style={{ width: 130 }}
+              options={[
+                { value: 'release' as const, label: '放開才吸附' },
+                { value: 'live' as const, label: '邊拖邊吸附' },
+              ]}
+            />
+          </Row>
           <Row label="多選時對應到長得一樣的結構" sub="在一根 fin 上拖，其他長得一樣的 fin 一起改（同材質、長寬比與面積相近）">
             <Switch checked={ed.mirror} onChange={ed.setMirror} />
           </Row>

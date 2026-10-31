@@ -73,6 +73,7 @@ import { type OpReport, blockedPhrase, summarize } from '../../volume/report';
 import { boxVoxels } from '../../volume/preview';
 import { clipBox as clipScopeBox } from '../../volume/scope';
 import type { PickedHandle } from './SliceEditor';
+import { ModelStore } from '../../slice/model';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
@@ -218,6 +219,13 @@ export function useEditor() {
   const [counts, setCounts] = useState<{ before: number[]; after: number[] } | null>(null);
   const keySeq = useRef(1000);
   const splitSeq = useRef(1);
+  /** 2D 編輯的幾何層（plan v8 §6）：每片一份、每個版本留快照；所有拖拉、數值輸入、方向鍵都改它。 */
+  const models = useRef(new ModelStore()).current;
+  /** 已經算完的步數（不論有沒有改到）：幾何層靠它知道「放開的那一步回來了」。 */
+  const [stepSeq, setStepSeq] = useState(0);
+  /** 2D 編輯的設定（plan v8 §5.4）：輪廓畫幾何線或階梯；拖拉中跟手（放開才吸附）或邊拖邊吸附。 */
+  const [outlineStyle, setOutlineStyle] = usePersisted<'geometry' | 'stairs'>('outlineStyle', 'geometry', (v): v is 'geometry' | 'stairs' => v === 'geometry' || v === 'stairs');
+  const [snapMode, setSnapMode] = usePersisted<'release' | 'live'>('snapMode', 'release', (v): v is 'release' | 'live' => v === 'release' || v === 'live');
   const running = useRef(false);
   const newSplitId = () => `s${splitSeq.current++}`;
 
@@ -478,7 +486,11 @@ export function useEditor() {
     try {
       while (queue.current.length) {
         // 每一步都用最新一次 render 的 commitOne（材質名稱、nm 比例等才是最新的）
-        await latest.current.commitOne(queue.current[0]);
+        try {
+          await latest.current.commitOne(queue.current[0]);
+        } finally {
+          setStepSeq((n) => n + 1);
+        }
         queue.current.shift();
         setQueued(Math.max(0, queue.current.length - 1));
       }
@@ -500,6 +512,7 @@ export function useEditor() {
   const enqueue = (op: Op) => {
     if (queue.current.length > QUEUE_MAX) {
       message.warning({ key: 'queue', content: '還在算前面的步驟，請稍等' });
+      setStepSeq((n) => n + 1);
       return;
     }
     if (!running.current) previewHook.current?.(op);
@@ -533,6 +546,8 @@ export function useEditor() {
           okText: '繼續',
           cancelText: '取消',
           onOk: () => latest.current.enqueue(op),
+          // 取消：幾何層回到放開前（當作這一步算完、沒改到）
+          onCancel: () => setStepSeq((n) => n + 1),
         });
         return;
       }
@@ -799,6 +814,7 @@ export function useEditor() {
       setMaterials(table);
       setMeta(m);
       setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) }, version });
+      models.clear();
       keySeq.current = 1000;
       splitSeq.current = 1;
       setSplits([]);
@@ -979,6 +995,13 @@ export function useEditor() {
     commit,
     report,
     setReport,
+    models,
+    stepSeq,
+    version: sidOf(cur),
+    outlineStyle,
+    setOutlineStyle,
+    snapMode,
+    setSnapMode,
     handle,
     setHandle,
     mirror,

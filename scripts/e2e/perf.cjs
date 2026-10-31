@@ -42,6 +42,52 @@ const shots = process.argv[4] || null;
   await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 120000 });
   console.log(`復原：${Date.now() - tu} ms`);
   if (shots) await page.screenshot({ path: `${shots}/perf-x${scale}.png` });
+
+  // 2D 拖拉（plan v8 §8.4）：Si fin 1 進 2D 編輯，拖右上節點 60 步；記 long task（> 50 ms）數，
+  // 拖拉中 3D 小窗有沒有即時變化（截圖比對）
+  await page.locator('.item-name', { hasText: /^Si fin 1$/ }).click();
+  await page.waitForTimeout(500);
+  await page.keyboard.press('e');
+  await page.locator('.main-slice').waitFor();
+  await page.waitForTimeout(1500);
+  await page.addStyleTag({ content: '.float-tb { display: none !important; }' });
+  const node = await page.evaluate(() => {
+    const e = window.__ed;
+    const m = e.models.get(e.L, e.vol, 'z', e.cursor[2], [...e.sel], e.version, e.stepSeq).model;
+    let best = null;
+    for (const id of m.handles) {
+      const p = m.vertices[id];
+      // 右上角：最上面、再最右邊的節點
+      if (!best || p.v < best.v || (p.v === best.v && p.u > best.u)) best = p;
+    }
+    return [best.u, best.v];
+  });
+  const b = await page.locator('.sedit-img').boundingBox();
+  const W = await page.evaluate(() => window.__ed.vol.X);
+  const z = b.width / W;
+  const from = [b.x + node[0] * z, b.y + node[1] * z];
+  await page.evaluate(() => {
+    window.__long = 0;
+    new PerformanceObserver((l) => (window.__long += l.getEntries().length)).observe({ type: 'longtask' });
+  });
+  const pane = page.locator('.pane-3d').first();
+  const shot0 = await pane.screenshot();
+  await page.mouse.move(from[0], from[1]);
+  await page.mouse.down();
+  const t2 = Date.now();
+  for (let k = 1; k <= 60; k++) {
+    await page.mouse.move(from[0], from[1] - (k * 3 * scale * z) / 60);
+    await page.waitForTimeout(16);
+  }
+  const dragMs = Date.now() - t2;
+  await page.waitForTimeout(300);
+  const shot1 = await pane.screenshot();
+  if (shots) await page.screenshot({ path: `${shots}/perf-drag-x${scale}.png` });
+  const longs = await page.evaluate(() => window.__long);
+  await page.mouse.up();
+  await page.waitForFunction(() => !window.__ed.busy && window.__ed.queued === 0, null, { timeout: 120000 });
+  const kind = await page.evaluate(() => window.__ed.active?.ops.at(-1)?.kind);
+  console.log(`2D 拖拉節點 60 步（${kind}）：${dragMs} ms、long task ${longs} 個；拖拉中 3D 小窗${shot0.equals(shot1) ? '沒有變化' : '有即時變化'}`);
   if (errors.length) console.log('頁面錯誤：\n' + errors.join('\n'));
   await browser.close();
 })().catch((e) => {

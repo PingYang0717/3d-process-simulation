@@ -6,7 +6,7 @@ import { uvTo3D } from '../../volume/scope';
 import { MatLabel } from '../../ui/Swatch';
 import type { Editor } from './editor';
 import { scopeWords } from './PositionBar';
-import { opOfGesture, resolveHandle, sliceContext } from './handleOps';
+import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handleOps';
 import { groupNormal, smoothEdgeGroup } from '../../slice/gestures';
 
 const { Text } = Typography;
@@ -36,13 +36,14 @@ export function FloatingToolbar({ ed, axis, onMaterial }: { ed: Editor; axis: Ax
     if (!n) return;
     if (pushDir === 'edge' && ed.handle) {
       // 已選邊的法線：和拖那條邊產生同一個 Op
-      const ctx = sliceContext(ed.L, ed.vol, axis, ed.handle.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel });
+      const ctx = modelContext(ed, axis, ed.handle.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel });
       const h = resolveHandle(ctx, ed.handle);
       if (!h) return;
       const r = ctx.rings.get(h.key)![h.ring];
       const nrm = groupNormal(r, smoothEdgeGroup(r, h.index));
-      const { op } = opOfGesture(ctx, h, [nrm[0] * n, nrm[1] * n], false, ed.mirror);
-      if (op) ed.commit(op);
+      const delta: [number, number] = [nrm[0] * n, nrm[1] * n];
+      const { op } = opOfGesture(ctx, h, delta, false, ed.mirror);
+      commitGesture(ed, ctx, h, delta, false, op);
       return;
     }
     const d = PLANE_DIRS.find((x) => x.id === pushDir)!;

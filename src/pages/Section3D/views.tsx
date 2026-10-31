@@ -2107,6 +2107,7 @@ export function SliceView({
   onPick,
   onStep,
   onHover,
+  box,
 }: {
   vol: Volume;
   axis: Axis;
@@ -2114,6 +2115,8 @@ export function SliceView({
   materials: Material[];
   hidden: Set<number>;
   selMask: Uint8Array | null;
+  /** 只看切面上這一塊（含端點；並排比較自動放大到差異外框，plan v11 §4.4）；省略＝整片。 */
+  box?: { u0: number; v0: number; u1: number; v1: number } | null;
   cursor: Vec3;
   /** 範圍；沿別的軸時在切面上畫藍色虛線框（null = 不畫）。 */
   scope: Scope | null;
@@ -2142,15 +2145,19 @@ export function SliceView({
   const imgRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: W, h: H });
+  const bu0 = box?.u0 ?? 0;
+  const bv0 = box?.v0 ?? 0;
+  const BW = box ? box.u1 - box.u0 + 1 : W;
+  const BH = box ? box.v1 - box.v0 + 1 : H;
 
   useEffect(() => {
     const ro = new ResizeObserver(([e]) => {
-      const s = Math.min(e.contentRect.width / W, e.contentRect.height / H);
-      setSize({ w: Math.floor(W * s), h: Math.floor(H * s) });
+      const s = Math.min(e.contentRect.width / BW, e.contentRect.height / BH);
+      setSize({ w: Math.floor(BW * s), h: Math.floor(BH * s) });
     });
     ro.observe(fitRef.current!);
     return () => ro.disconnect();
-  }, [W, H]);
+  }, [BW, BH]);
 
   useEffect(() => {
     const el = imgRef.current!;
@@ -2164,8 +2171,8 @@ export function SliceView({
 
   const uvOf = (e: { clientX: number; clientY: number; currentTarget: HTMLElement }) => {
     const r = e.currentTarget.getBoundingClientRect();
-    const u = Math.floor(((e.clientX - r.left) / r.width) * W);
-    const v = Math.floor(((e.clientY - r.top) / r.height) * H);
+    const u = Math.floor(bu0 + ((e.clientX - r.left) / r.width) * BW);
+    const v = Math.floor(bv0 + ((e.clientY - r.top) / r.height) * BH);
     return u >= 0 && v >= 0 && u < W && v < H ? toVoxel(u, v) : null;
   };
 
@@ -2181,7 +2188,7 @@ export function SliceView({
       <div
         className="slice-img"
         ref={imgRef}
-        style={{ width: size.w, height: size.h }}
+        style={{ width: size.w, height: size.h, ...(box ? { overflow: 'hidden' } : {}) }}
         onPointerDown={(e) => {
           if (e.button !== 0) return;
           const p = uvOf(e);
@@ -2190,6 +2197,7 @@ export function SliceView({
         onPointerMove={(e) => onHover?.(uvOf(e))}
         onPointerLeave={() => onHover?.(null)}
       >
+        <div style={box ? { position: 'absolute', width: `${(W / BW) * 100}%`, height: `${(H / BH) * 100}%`, left: `${(-bu0 / BW) * 100}%`, top: `${(-bv0 / BH) * 100}%` } : { position: 'absolute', inset: 0 }}>
         <canvas ref={canvasRef} style={{ width: '100%', height: '100%', imageRendering: 'pixelated', display: 'block' }} />
         <SlicePreviewLayer vol={vol} axis={axis} at={at} W={W} H={H} preview={preview} selMask={selMask} rgb={rgb} hidden={hidden} />
         <svg
@@ -2206,6 +2214,7 @@ export function SliceView({
           <line x1={cu + 0.5} y1={0} x2={cu + 0.5} y2={H} stroke="#d46b08" strokeWidth={1} vectorEffect="non-scaling-stroke" />
           <line x1={0} y1={cv + 0.5} x2={W} y2={cv + 0.5} stroke="#d46b08" strokeWidth={1} vectorEffect="non-scaling-stroke" />
         </svg>
+        </div>
       </div>
     </div>
   );

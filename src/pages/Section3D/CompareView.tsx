@@ -1,8 +1,13 @@
-import { Alert, Segmented, Tag, Typography } from 'antd';
+import { useState } from 'react';
+import { Alert, Segmented, Select, Switch, Tag, Typography } from 'antd';
 import { type Axis, bboxDims, sliceHasAny } from '../../volume/volume';
 import { signed } from '../../ui/format';
 import { BASE_ID, type Editor, useSplitDiffs } from './editor';
 import { SliceView } from './views.lazy';
+import { OverlayView } from './OverlayView';
+import { diffPair, sliceDiff, sliceGeom, unionUV } from './overlay';
+import { factorsOf, levelCell } from './matrix';
+import { sidOf } from '../../volume/client';
 
 const { Text } = Typography;
 
@@ -13,18 +18,48 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
   const at = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
   const cards = [
     { id: BASE_ID, name: '原始', vol: ed.orig.vol, L: ed.orig.L, ops: [] as typeof ed.splits[number]['ops'] },
-    ...ed.splits.map((s) => ({ id: s.id, name: s.name, vol: s.cur.vol, L: s.cur.L, ops: s.ops })),
-  ];
-  const diffs = useSplitDiffs(ed);
+    ...ed.splits.map((s) => ({ id: s.id, name: s.name, vol: s.cur.vol, L: s.cur.L, ops: s.ops, levels: s.levels, version: sidOf(s.cur) })),
+  ] as { id: string; name: string; vol: typeof ed.vol; L: typeof ed.L; ops: typeof ed.splits[number]['ops']; levels?: Record<string, number>; version?: number }[];
+  const origDiffs = useSplitDiffs(ed);
+  const [mode, setMode] = useState<'side' | 'overlay'>('side');
+  const [zoom, setZoom] = useState(true);
+  // A vs B（plan v11 §4.4、§9 D6）：基準只影響並排與疊圖；基準是原始時沿用帳簿的 diff
+  const baseSplit = ed.compareBase === BASE_ID ? null : ed.splits.find((s) => s.id === ed.compareBase) ?? null;
+  const baseId = baseSplit ? baseSplit.id : BASE_ID;
+  const baseVol = baseSplit ? baseSplit.cur.vol : ed.orig.vol;
+  const diffOf = (card: (typeof cards)[number]) => {
+    if (card.id === baseId) return null;
+    if (!baseSplit) return card.id === BASE_ID ? null : (origDiffs.get(card.id) ?? null);
+    return diffPair(card.version ?? sidOf(ed.orig), card.vol.data, sidOf(baseSplit.cur), baseVol.data);
+  };
+  const factors = factorsOf(ed.designs);
+  // 卡片自動放大：所有卡片在這一片對基準的差異聯集外框（＋4 格），大家同一個框才好比
+  const { W: SW, H: SH } = sliceGeom(ed.vol, axis);
+  const zoomBox = zoom ? unionUV(cards.filter((c) => c.id !== baseId).map((c) => sliceDiff(c.vol.data, baseVol.data, ed.vol, axis, at(axis)).box), 4, SW, SH) : null;
   const focus = ed.selComps[0];
   const nm = ed.nmPerVoxel;
 
   return (
     <div className="compare">
       <div className="pane-head" style={{ background: '#fff', borderRadius: 8, marginBottom: 12, boxShadow: '0 1px 2px rgba(0,0,0,.06)' }}>
-        <Text strong style={{ fontSize: 12 }}>
-          並排看各 split
-        </Text>
+        <Segmented
+          size="small"
+          value={mode}
+          onChange={(v) => setMode(v as 'side' | 'overlay')}
+          options={[
+            { label: '並排', value: 'side' },
+            { label: '疊圖', value: 'overlay' },
+          ]}
+        />
+        <Text style={{ fontSize: 12 }}>基準</Text>
+        <Select
+          size="small"
+          style={{ minWidth: 120 }}
+          value={baseId}
+          onChange={ed.setCompareBase}
+          options={[{ value: BASE_ID, label: '原始' }, ...ed.splits.map((s) => ({ value: s.id, label: s.name }))]}
+          aria-label="基準"
+        />
         <Segmented
           size="small"
           value={axis}
@@ -32,17 +67,25 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
           options={(['z', 'y', 'x'] as Axis[]).map((a) => ({ label: AXIS_NAME[a], value: a }))}
         />
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {axis} = {at(axis)}；切面上滾輪可以換片，紅框＝和原始不同
+          {axis} = {at(axis)}；切面上滾輪可以換片，紅框＝和{baseSplit ? baseSplit.name : '原始'}不同
           {focus ? `；數字是 ${focus.label} 的尺寸` : '；選一個結構會顯示它在每個 split 的尺寸'}
         </Text>
         <span className="grow" />
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          點卡片標題切到那個 split
-        </Text>
+        {mode === 'side' && (
+          <>
+            <Switch size="small" checked={zoom} onChange={setZoom} />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              自動放大到差異
+            </Text>
+          </>
+        )}
       </div>
+      {mode === 'overlay' ? (
+        <OverlayView ed={ed} axis={axis} at={at(axis)} />
+      ) : (
       <div className="compare-grid">
         {cards.map((card) => {
-          const diff = card.id === BASE_ID ? null : (diffs.get(card.id) ?? null);
+          const diff = diffOf(card);
           const comp = focus ? card.L.comps.find((c) => c.key === focus.key) : undefined;
           const was = focus ? ed.origByKey.get(focus.key) : undefined;
           const now = comp ? bboxDims(comp.bbox) : null;
@@ -86,7 +129,7 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
                 )}
                 <span className="grow" />
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {card.id === BASE_ID ? '基準' : diff ? `${diff.count.toLocaleString()} voxels 不同` : '比對中…'}
+                  {card.id === baseId ? '基準' : diff ? `${diff.count.toLocaleString()} voxels 不同` : card.id === BASE_ID ? '原始' : '比對中…'}
                 </Text>
               </div>
               <div className="slice-body">
@@ -100,6 +143,7 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
                   cursor={ed.cursor}
                   scope={null}
                   diff={diff ? diff.mask : null}
+                  box={zoomBox}
                   onPick={(p) => ed.setCursor(p)}
                   onStep={(d) => ed.stepCursor(axis, d)}
                 />
@@ -136,7 +180,21 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
                     }
                   />
                 )}
-                {card.ops.length > 0 && (
+                {card.levels && factors.some((f) => card.levels![f.id] !== undefined) ? (
+                  <div className="cmp-ops">
+                    {factors
+                      .filter((f) => card.levels![f.id] !== undefined)
+                      .map((f) => {
+                        const c = levelCell(f, card.levels![f.id], nm)!;
+                        return (
+                          <div key={f.id}>
+                            {f.name || f.id} = {c.main}
+                            {c.nominal ? '（標稱）' : `（${c.sub}）`}
+                          </div>
+                        );
+                      })}
+                  </div>
+                ) : card.ops.length > 0 && (
                   <div className="cmp-ops">
                     {card.ops.map((op, i) => (
                       <div key={i}>
@@ -150,6 +208,7 @@ export function CompareView({ ed, axis, setAxis }: { ed: Editor; axis: Axis; set
           );
         })}
       </div>
+      )}
     </div>
   );
 }

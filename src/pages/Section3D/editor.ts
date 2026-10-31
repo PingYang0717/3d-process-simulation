@@ -20,6 +20,7 @@ import {
 } from '../../volume/volume';
 import { type EditState, type Local, type Op, type SweepKind, matNameOf, opText, sweepOps } from '../../volume/ops';
 import type { BrushShape } from '../../volume/volume';
+import type { FractionArray } from '../../volume/vti';
 import { type Scope, axisIndex, axisLen, boxRange, clampScope, fullScope, isFullScope, scopeBox } from '../../volume/scope';
 
 /** 範圍：整個結構（預設）、只有目前這一片、自訂一段；軸＝目前主切面的法線軸。 */
@@ -132,6 +133,14 @@ export interface Meta {
   arrayName?: string;
   arrays?: string[];
   unit?: 'nm' | 'um';
+  /** .vti 原檔位元組：照原格式匯出時重新解碼比例陣列（plan v11 §4.0、§9 D18）。 */
+  raw?: ArrayBuffer;
+  /** PointData 比例陣列（陣列名 → 材質編號）；有它才能照原格式匯出。 */
+  fractions?: FractionArray[];
+  /** 材質名稱與顏色從哪來：FieldData 或自動（「材質 n」）。 */
+  materialSource?: 'FieldData' | 'auto';
+  /** manifest 的 input：下游知道原檔是哪種格式。 */
+  input?: { source: 'PointData' | 'CellData'; fractionArrays?: string[]; fieldData: boolean; dtype: string; compressed: boolean };
 }
 
 export interface Diff {

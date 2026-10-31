@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { type Op, defectBox } from './ops';
 import { VOID, inDefect } from './volume';
-import { base, checkAll, comp, vol, expectSame } from './ops11.fixture';
+import { base, checkAll, comp, vol } from './ops11.fixture';
 
 const poly3 = comp('Poly-Si 3');
 const op = (shape: 'slab' | 'sphere' | 'box', size: [number, number, number], center: [number, number, number] = [0.5, 0.5, 0.5]): Op => ({

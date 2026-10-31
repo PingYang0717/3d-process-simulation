@@ -347,3 +347,7 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .edit-toolbar .ant-btn { font-size: 12px; }
 .float-card { z-index: 1050; width: 400px; padding: 10px 12px; background: #fff; border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); box-shadow: 0 8px 28px rgba(0, 0, 0, .16); max-height: calc(100vh - 16px); overflow: auto; }
 .float-card .grow { flex: 1; }
+
+/* plan v11 §4.0：上傳面板的偵測結果確認 */
+.load-confirm { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--c-border, #e5e5e5); border-radius: 8px; }
+.load-confirm .row-warn td { background: #fff7e6; }

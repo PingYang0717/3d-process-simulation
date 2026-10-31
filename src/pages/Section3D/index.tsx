@@ -25,7 +25,7 @@ import {
   UploadOutlined,
 } from '@ant-design/icons';
 import { type Axis, type Vec3, type Volume, directionName, encodeNpy, hexToRgb, unionBBox } from '../../volume/volume';
-import { encodeVti } from '../../volume/vti';
+import { encodeVti, encodeVtiLike } from '../../volume/vti';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel } from '../../ui/Swatch';
@@ -575,22 +575,30 @@ export default function Section3DPage() {
 
   // ---- 匯出：.vti（同 Extent／Spacing／Origin）或 .npy ----
 
-  type Fmt = 'vti' | 'npy';
+  /** vti＝和輸入同格式（輸入是比例陣列時照原檔寫回，plan v11 §4.0）；vti1＝單一 UInt8 編號；npy。 */
+  type Fmt = 'vti' | 'vti1' | 'npy';
+  const ext = (fmt: Fmt) => (fmt === 'npy' ? 'npy' : 'vti');
   const stem = (ed.meta.name ?? 'tcad').replace(/\.(npy|vti)$/i, '');
   const spacing = ed.meta.spacing ?? [ed.nmPerVoxel, ed.nmPerVoxel, ed.nmPerVoxel];
   const origin = ed.meta.origin ?? [0, 0, 0];
-  const encode = (v: Volume, fmt: Fmt) => (fmt === 'vti' ? encodeVti(v, spacing, origin, ed.meta.arrayName || 'material') : encodeNpy(v));
+  const like = !!(ed.meta.raw && ed.meta.fractions);
+  const encode = async (v: Volume, fmt: Fmt): Promise<Uint8Array> => {
+    if (fmt === 'npy') return encodeNpy(v);
+    if (fmt === 'vti' && like) return encodeVtiLike(ed.meta.raw!, ed.meta.fractions!, v.data, ed.orig.vol.data, ed.materials);
+    return encodeVti(v, spacing, origin, ed.meta.arrayName && !like ? ed.meta.arrayName : 'material');
+  };
   const exportOne = (fmt: Fmt = 'vti') => {
-    const name = ed.isBase || !ed.active ? `${stem}.${fmt}` : `${stem}__${safeName(ed.active.name)}.${fmt}`;
-    download(encode(ed.vol, fmt), name)
+    const name = ed.isBase || !ed.active ? `${stem}.${ext(fmt)}` : `${stem}__${safeName(ed.active.name)}.${ext(fmt)}`;
+    encode(ed.vol, fmt)
+      .then((data) => download(data, name))
       .then((saved) => message.success(`已匯出 ${saved}`))
       .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
   };
   /** 全部匯出前先列出會打包哪些 split（名稱、步數、檔名），確認了才寫檔。 */
   const confirmExportAll = (fmt: Fmt = 'vti') => {
-    const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
+    const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
     modal.confirm({
-      title: `打包 ${ed.splits.length} 個 split 成 zip（.${fmt}）`,
+      title: `打包 ${ed.splits.length} 個 split 成 zip（.${ext(fmt)}${fmt === 'vti1' ? '，單一編號' : ''}）`,
       icon: <DownloadOutlined style={{ color: 'var(--c-primary)' }} />,
       width: 520,
       okText: '匯出 zip',
@@ -619,12 +627,19 @@ export default function Section3DPage() {
     });
   };
   const exportAll = async (fmt: Fmt = 'vti') => {
-    const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
-    const files = ed.splits.map((s) => ({ name: fileOf(s), data: encode(s.cur.vol, fmt) }));
+    const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
+    const files: { name: string; data: Uint8Array }[] = [];
+    try {
+      for (const s of ed.splits) files.push({ name: fileOf(s), data: await encode(s.cur.vol, fmt) });
+    } catch (e) {
+      message.error(`匯出失敗：${(e as Error)?.message ?? e}`);
+      return;
+    }
     const manifest = {
       source: ed.meta.name ?? 'demo',
-      format: fmt,
-      materials: ed.materials.map(({ id, name, color }) => ({ id, name, color })),
+      format: ext(fmt),
+      ...(ed.meta.input ? { input: { ...ed.meta.input, output: fmt === 'vti' && like ? 'same-as-input' : fmt === 'npy' ? 'npy-uint8' : 'CellData-uint8' } } : {}),
+      materials: ed.materials.map(({ id, name, color }) => ({ id, name, color, source: ed.meta.materialSource ?? 'auto' })),
       shape: [ed.vol.Z, ed.vol.Y, ed.vol.X],
       dtype: 'uint8',
       spacing,
@@ -1350,7 +1365,8 @@ export default function Section3DPage() {
           trigger={['click']}
           menu={{
             items: [
-              { key: 'one', label: `匯出目前（${ed.isBase ? '原始' : ed.active?.name}）.vti`, onClick: () => exportOne('vti') },
+              { key: 'one', label: `匯出目前（${ed.isBase ? '原始' : ed.active?.name}）.vti${like ? '（和輸入同格式）' : ''}`, onClick: () => exportOne('vti') },
+              ...(like ? [{ key: 'one-vti1', label: '匯出目前 .vti（單一 UInt8 編號）', onClick: () => exportOne('vti1') }] : []),
               { key: 'one-npy', label: '匯出目前 .npy', onClick: () => exportOne('npy') },
               { type: 'divider' },
               {
@@ -1359,6 +1375,7 @@ export default function Section3DPage() {
                 disabled: !ed.splits.length,
                 onClick: () => confirmExportAll('vti'),
               },
+              ...(like ? [{ key: 'all-vti1', label: '打包 zip（單一編號 .vti ＋ manifest）', disabled: !ed.splits.length, onClick: () => confirmExportAll('vti1') }] : []),
               { key: 'all-npy', label: '打包 zip（.npy ＋ manifest.json）', disabled: !ed.splits.length, onClick: () => confirmExportAll('npy') },
             ],
           }}

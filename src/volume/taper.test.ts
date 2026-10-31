@@ -1,10 +1,11 @@
 // plan v11 §4.8：taper（側壁斜度）展開成每一段的 push。
 import { describe, expect, it } from 'vitest';
+import type { Scope } from './scope';
 import { type Op, type TaperOp, applyOp, replay, taperDelta, taperSteps } from './ops';
 import { base, checkAll, comp, ctx, full, expectSame } from './ops11.fixture';
 
 const poly2 = comp('Poly-Si 2');
-const taper = (top: number, bottom: number, both = false, scope = full): TaperOp => ({ kind: 'taper', keys: [poly2.key], scope, face: [0, 0, 1], along: 1, top, bottom, both, follow: true, backfill: 'orig' });
+const taper = (top: number, bottom: number, both = false, scope: Scope = full): TaperOp => ({ kind: 'taper', keys: [poly2.key], scope, face: [0, 0, 1], along: 1, top, bottom, both, follow: true, backfill: 'orig' });
 
 describe('taper', () => {
   it('頂 −1 底 +2：每片 delta 等於 lerp 取整、相鄰同值合成一段', () => {

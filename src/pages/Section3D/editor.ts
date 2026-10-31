@@ -27,14 +27,18 @@ export type ScopeMode = 'whole' | 'slice' | 'custom';
 const isAxis = (v: unknown): v is Axis => v === 'x' || v === 'y' || v === 'z';
 const isScopeMode = (v: unknown): v is ScopeMode => v === 'whole' || v === 'slice' || v === 'custom';
 
-/** 選取 ∩ scope：所見即會被改。scope 是整段時直接回傳原 mask。 */
-export function maskInScope(mask: Uint8Array, vol: Volume, scope: Scope): Uint8Array {
+/**
+ * 選取 ∩ scope：所見即會被改。scope 是整段時直接回傳原 mask。
+ * bbox＝選取的外框（mask 只在裡面有值）：只複製 scope ∩ 外框（plan v9 P10）。
+ */
+export function maskInScope(mask: Uint8Array, vol: Volume, scope: Scope, bbox?: BBox | null): Uint8Array {
   if (isFullScope(scope, vol)) return mask;
   const out = new Uint8Array(mask.length);
-  const b = scopeBox(vol, scope);
+  const s = scopeBox(vol, scope);
+  const b = s && bbox ? clipScopeBox(bbox, scope) : s;
   if (!b) return out;
   const { X, Y } = vol;
-  if (scope.axis === 'z') {
+  if (scope.axis === 'z' && !bbox) {
     const plane = X * Y;
     out.set(mask.subarray(b.z0 * plane, (b.z1 + 1) * plane), b.z0 * plane);
     return out;
@@ -47,14 +51,15 @@ export function maskInScope(mask: Uint8Array, vol: Volume, scope: Scope): Uint8A
   return out;
 }
 
-/** mask 沿 axis 每一片有沒有體素（找「最近有這個結構的一片」用）。 */
-export function slicesWith(mask: Uint8Array, vol: Volume, axis: Axis): Uint8Array {
+/** mask 沿 axis 每一片有沒有體素（找「最近有這個結構的一片」用）；bbox＝mask 的外框，只掃裡面（plan v9 P10）。 */
+export function slicesWith(mask: Uint8Array, vol: Volume, axis: Axis, bbox?: BBox | null): Uint8Array {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(axisLen(vol, axis));
-  for (let z = 0; z < Z; z++)
-    for (let y = 0; y < Y; y++) {
+  const b = bbox ?? { x0: 0, x1: X - 1, y0: 0, y1: Y - 1, z0: 0, z1: Z - 1 };
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++) {
       const row = (z * Y + y) * X;
-      for (let x = 0; x < X; x++) if (mask[row + x]) out[axis === 'x' ? x : axis === 'y' ? y : z] = 1;
+      for (let x = b.x0; x <= b.x1; x++) if (mask[row + x]) out[axis === 'x' ? x : axis === 'y' ? y : z] = 1;
     }
   return out;
 }
@@ -262,7 +267,7 @@ export function useEditor() {
   const selComps = useMemo(() => L.comps.filter((c) => sel.has(c.key)), [L, sel]);
   /** 選取結構在 L.comps 裡的 index（給 Worker 畫選取層）。 */
   const selIdx = useMemo(() => L.comps.flatMap((c, i) => (sel.has(c.key) ? [i] : [])), [L, sel]);
-  const selMask = useMemo(() => maskOf(L, sel), [L, sel]);
+  const selMask = useMemo(() => maskOf(L, sel, vol), [L, sel, vol]);
   const selBox: BBox | null = useMemo(() => unionBBox(selComps), [selComps]);
   /** 選取結構沿 editAxis 的起止（「整個結構（z 0～127）」的數字）。 */
   const selRange = useMemo<[number, number] | null>(() => (selBox ? boxRange(selBox, editAxis) : null), [selBox, editAxis]);
@@ -300,7 +305,7 @@ export function useEditor() {
     // 只在選取或軸改變時夾；長高之後外框變了不必重夾
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selKey, editAxis]);
-  const affMask = useMemo(() => (selMask ? maskInScope(selMask, vol, scope) : null), [selMask, scope, vol]);
+  const affMask = useMemo(() => (selMask ? maskInScope(selMask, vol, scope, selBox) : null), [selMask, scope, vol, selBox]);
   const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
 
   /** 目前 split 的 diff 與體積帳：讀帳簿（cur 每一步換新，所以這裡每一步重算）。 */

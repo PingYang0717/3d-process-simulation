@@ -52,13 +52,14 @@ import type { EditState, Local, Op } from '../../volume/ops';
 import type { Preview } from '../../volume/preview';
 import { HOLE_EPS, previewMesh } from '../../volume/previewMesh';
 import { hiddenTable, palette } from './tables';
+import { SEL_RGB, drawSlice } from './drawSlice';
+import { SlicePreviewLayer } from './SlicePreviewLayer';
 import type { CellCloud } from './cellCloud';
 import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
 
 export type { Sculpt } from './editor';
 import { type Scope, axisLen } from '../../volume/scope';
 
-const SEL_RGB: Vec3 = [22, 119, 255];
 /** 選取層沿法線外推的量：固定值，相機再遠也不會和主網格共面閃爍。 */
 const INFLATE = 0.03;
 /** 筆刷圈、法線箭頭、拖拉預覽共用的顏色（和十字的淡橘區分）。 */
@@ -326,78 +327,7 @@ const hidePreview = (c: Ctx) => {
   c.hole.max.value.set(0, 0, 0);
 };
 
-/** 預覽裡的體素值：在裁切範圍內取預覽結果，否則取原本的陣列。 */
-const patched = (vol: Volume, p: Preview | null | undefined, x: number, y: number, z: number) => {
-  if (p) {
-    const b = p.box;
-    if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1 && z >= b.z0 && z <= b.z1)
-      return p.data[((z - b.z0) * (b.y1 - b.y0 + 1) + (y - b.y0)) * (b.x1 - b.x0 + 1) + (x - b.x0)];
-  }
-  return vol.data[idx(vol, x, y, z)];
-};
-
-/**
- * 把一個切面畫到 canvas：材質顏色、隱藏材質淡灰、選取混藍、差異描紅邊；patch = 即時預覽蓋上去。
- * 下方切面與 3D 剖面貼圖共用，所以兩邊逐像素相同。
- */
-export function drawSlice(
-  cv: HTMLCanvasElement,
-  vol: Volume,
-  axis: Axis,
-  at: number,
-  rgb: Map<number, Vec3>,
-  hidden: Set<number>,
-  selMask: Uint8Array | null,
-  diff: Uint8Array | null,
-  patch?: Preview | null,
-) {
-  const [W, H] = axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
-  cv.width = W;
-  cv.height = H;
-  const toVoxel = (u: number, v: number): Vec3 => (axis === 'z' ? [u, v, at] : axis === 'y' ? [u, at, v] : [at, v, u]);
-  const img = new ImageData(W, H);
-  for (let v = 0; v < H; v++)
-    for (let u = 0; u < W; u++) {
-      const [x, y, z] = toVoxel(u, v);
-      const i = idx(vol, x, y, z);
-      const m = patched(vol, patch, x, y, z);
-      const c = hidden.has(m) ? [245, 245, 245] : (rgb.get(m) ?? [255, 0, 255]);
-      const o = (v * W + u) * 4;
-      img.data[o] = c[0];
-      img.data[o + 1] = c[1];
-      img.data[o + 2] = c[2];
-      img.data[o + 3] = 255;
-      if (selMask?.[i]) {
-        img.data[o] = (img.data[o] + SEL_RGB[0]) >> 1;
-        img.data[o + 1] = (img.data[o + 1] + SEL_RGB[1]) >> 1;
-        img.data[o + 2] = (img.data[o + 2] + SEL_RGB[2]) >> 1;
-      }
-    }
-  const g = cv.getContext('2d')!;
-  g.putImageData(img, 0, 0);
-  if (diff) {
-    g.fillStyle = '#ff4d4f';
-    const on = (u: number, v: number) => {
-      const [x, y, z] = toVoxel(u, v);
-      return diff[idx(vol, x, y, z)];
-    };
-    for (let v = 0; v < H; v++)
-      for (let u = 0; u < W; u++) {
-        if (!on(u, v)) continue;
-        const edge = [
-          [1, 0],
-          [-1, 0],
-          [0, 1],
-          [0, -1],
-        ].some(([du, dv]) => {
-          const nu = u + du;
-          const nv = v + dv;
-          return nu < 0 || nv < 0 || nu >= W || nv >= H || !on(nu, nv);
-        });
-        if (edge) g.fillRect(u, v, 1, 1);
-      }
-  }
-}
+export { drawSlice } from './drawSlice';
 
 /**
  * 3D：Worker 做 greedy mesh（同材質同朝向的面合併成大矩形），改過的體素混紅；
@@ -509,8 +439,9 @@ export function View3D({
   const kick = () => {
     dirty.current = Math.max(dirty.current, 2);
   };
-  // 每次 React 更新（換狀態、選取、剖面、預覽…）都可能改了場景
-  useEffect(kick);
+  // 會改場景的 props 變了才多畫兩格（plan v9 P7：滑鼠在別處移動、父元件重 render 不必重畫 3D）
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(kick, [state, materials, hidden, selMask, selComps, scope, selBBox, cursor, clip, showDiff, diffMask, mode, brush, preview, cells, xray, translucent, busy, meshing]);
   const meshingRef = useRef(false);
   meshingRef.current = meshing;
   const busyRef = useRef(busy);
@@ -847,6 +778,7 @@ export function View3D({
         }
       });
       cap.material.map?.dispose();
+      capRef.current = null;
       // 快取裡、不在場景上的 chunk
       for (const m of partsCache.values()) for (const p of m.values()) p.geometry.dispose();
       for (const l of [selFill, voidMesh, voidEdges]) l.material.dispose();
@@ -1069,7 +1001,9 @@ export function View3D({
     return side > 0 ? new Plane(new Vector3(0, 1, 0), -(vol.Y - at - 1)) : new Plane(new Vector3(0, -1, 0), vol.Y - at);
   };
 
-  // 剖面：剪掉一半、剖口貼切面圖
+  // 剖面：剪掉一半、剖口貼切面圖（plan v9 P9）。
+  // 幾何、位置只在剖面軸、位置、陣列大小變時重建；貼圖用同一張 canvas＋同一個 CanvasTexture，內容變了才重畫並 needsUpdate。
+  const capRef = useRef<{ cv: HTMLCanvasElement; tex: CanvasTexture | null; last: unknown[] | null } | null>(null);
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
@@ -1081,19 +1015,14 @@ export function View3D({
       c.cap.visible = c.capEdges.visible = false;
       return;
     }
-    const cv = document.createElement('canvas');
-    const patch = preview && preview.base === sidOf(state) && mode === 'now' ? preview : null;
-    drawSlice(cv, vol, clip.axis, clip.at, rgb, hidden, mode === 'orig' ? null : selMask, mode === 'orig' ? null : diffMask, patch);
-    const tex = new CanvasTexture(cv);
-    tex.magFilter = NearestFilter;
-    tex.minFilter = NearestFilter;
-    tex.generateMipmaps = false;
-    c.cap.material.map?.dispose();
-    c.cap.material.map = tex;
-    c.cap.material.needsUpdate = true;
     const [W, H] = clip.axis === 'z' ? [vol.X, vol.Y] : clip.axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
-    c.cap.geometry.dispose();
-    c.cap.geometry = new PlaneGeometry(W, H);
+    const g = c.cap.geometry as PlaneGeometry;
+    if (g.parameters?.width !== W || g.parameters?.height !== H) {
+      c.cap.geometry.dispose();
+      c.cap.geometry = new PlaneGeometry(W, H);
+      c.capEdges.geometry.dispose();
+      c.capEdges.geometry = new EdgesGeometry(c.cap.geometry);
+    }
     c.cap.rotation.set(0, 0, 0);
     // 留下的那一半的邊界平面座標，往外偏 0.01 蓋住剛好落在平面上的面
     const coord = clip.side > 0 ? clip.at + 1 + 0.01 : clip.at - 0.01;
@@ -1105,12 +1034,42 @@ export function View3D({
       c.cap.rotation.y = -Math.PI / 2;
       c.cap.position.set(coord, vol.Y / 2, vol.Z / 2);
     }
-    c.capEdges.geometry.dispose();
-    c.capEdges.geometry = new EdgesGeometry(c.cap.geometry);
     c.capEdges.position.copy(c.cap.position);
     c.capEdges.rotation.copy(c.cap.rotation);
     c.cap.visible = c.capEdges.visible = true;
-  }, [clip, vol, rgb, hidden, selMask, diffMask, mode, preview]);
+  }, [clip, vol.X, vol.Y, vol.Z]);
+  useEffect(() => {
+    const c = ctxRef.current;
+    if (!c || !clip) return;
+    const cap = (capRef.current ??= { cv: document.createElement('canvas'), tex: null, last: null });
+    const p = preview && preview.base === sidOf(state) && mode === 'now' ? preview : null;
+    // 預覽盒沒碰到這一片：當作沒有預覽（拖拉中預覽換了也不必重畫剖口）
+    const lo = p ? (clip.axis === 'x' ? p.box.x0 : clip.axis === 'y' ? p.box.y0 : p.box.z0) : 0;
+    const hi = p ? (clip.axis === 'x' ? p.box.x1 : clip.axis === 'y' ? p.box.y1 : p.box.z1) : -1;
+    const patch = p && clip.at >= lo && clip.at <= hi ? p : null;
+    const sel = mode === 'orig' ? null : selMask;
+    const dm = mode === 'orig' ? null : diffMask;
+    const args = [vol, clip.axis, clip.at, rgb, hidden, sel, dm, patch];
+    if (cap.last && args.every((a, k) => a === cap.last![k])) return;
+    cap.last = args;
+    const [W, H] = clip.axis === 'z' ? [vol.X, vol.Y] : clip.axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
+    const resized = cap.cv.width !== W || cap.cv.height !== H;
+    drawSlice(cap.cv, vol, clip.axis, clip.at, rgb, hidden, sel, dm, patch);
+    if (import.meta.env.DEV) (window as unknown as { __capDraw?: number }).__capDraw = ((window as unknown as { __capDraw?: number }).__capDraw ?? 0) + 1;
+    if (!cap.tex || resized) {
+      // 大小變了要換一個貼圖（WebGL 的貼圖大小建立後不變）
+      cap.tex?.dispose();
+      cap.tex = new CanvasTexture(cap.cv);
+      // 開發模式計數（perf.cjs：剖面開著拖拉，每幀不重建貼圖物件）
+      if (import.meta.env.DEV) (window as unknown as { __capTex?: number }).__capTex = ((window as unknown as { __capTex?: number }).__capTex ?? 0) + 1;
+      cap.tex.magFilter = NearestFilter;
+      cap.tex.minFilter = NearestFilter;
+      cap.tex.generateMipmaps = false;
+      c.cap.material.map = cap.tex;
+      c.cap.material.needsUpdate = true;
+    } else cap.tex.needsUpdate = true;
+    kick();
+  }, [clip, vol, rgb, hidden, selMask, diffMask, mode, preview, state]);
 
   // 十字
   useEffect(() => {
@@ -1743,9 +1702,10 @@ export function SliceView({
   }, [materials]);
   const toVoxel = (u: number, v: number): Vec3 => (axis === 'z' ? [u, v, at] : axis === 'y' ? [u, at, v] : [at, v, u]);
 
+  // 底圖不看預覽（plan v9 P9）：拖拉中只重畫預覽層那一塊
   useEffect(() => {
-    drawSlice(canvasRef.current!, vol, axis, at, rgb, hidden, selMask, diff, preview);
-  }, [vol, axis, at, rgb, hidden, selMask, diff, preview, W, H]);
+    drawSlice(canvasRef.current!, vol, axis, at, rgb, hidden, selMask, diff, null);
+  }, [vol, axis, at, rgb, hidden, selMask, diff, W, H]);
 
   const [cu, cv] = axis === 'z' ? [cursor[0], cursor[1]] : axis === 'y' ? [cursor[0], cursor[2]] : [cursor[2], cursor[1]];
   const imgRef = useRef<HTMLDivElement>(null);
@@ -1800,6 +1760,7 @@ export function SliceView({
         onPointerLeave={() => onHover?.(null)}
       >
         <canvas ref={canvasRef} style={{ width: '100%', height: '100%', imageRendering: 'pixelated', display: 'block' }} />
+        <SlicePreviewLayer vol={vol} axis={axis} at={at} W={W} H={H} preview={preview} selMask={selMask} rgb={rgb} hidden={hidden} />
         <svg
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"

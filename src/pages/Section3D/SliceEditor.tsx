@@ -92,6 +92,10 @@ const boxInPlane = (axis: Axis, b: BBox) => {
   return { u0, v0, u1, v1 };
 };
 
+/** 同一個把手（滑過時只在換了把手才更新 state）。 */
+const sameHandle = (a: Handle | null, b: Handle | null) =>
+  a === b || (!!a && !!b && a.kind === b.kind && a.key === b.key && a.ring === b.ring && a.index === b.index);
+
 /**
  * 主切面（2D 編輯狀態）：滾輪朝游標縮放、右鍵／中鍵／空白鍵＋左鍵／Alt＋左鍵拖＝平移、雙擊空白＝適合視窗、
  * Ctrl＋滾輪換片。左鍵點一下＝選取（Shift 加選、Ctrl 切換）。底圖和下方小切面同一個 drawSlice。
@@ -272,7 +276,18 @@ export function SliceEditor({
   const [xf, setXf] = useState<ViewXf | null>(null);
   const xfRef = useRef(xf);
   xfRef.current = xf;
-  const [hoverUV, setHoverUV] = useState<[number, number] | null>(null);
+  /** 滑鼠所在格子的白框：直接改 SVG 屬性（plan v9 P7，不經 React state）。 */
+  const hoverRectRef = useRef<SVGRectElement>(null);
+  const showHoverUV = (uv: [number, number] | null) => {
+    const r = hoverRectRef.current;
+    if (!r) return;
+    if (!uv || (xfRef.current?.zoom ?? 0) < 4) r.setAttribute('display', 'none');
+    else {
+      r.setAttribute('x', String(uv[0]));
+      r.setAttribute('y', String(uv[1]));
+      r.removeAttribute('display');
+    }
+  };
   const space = useRef(false);
   const rgb = useMemo(() => {
     const m = new Map<number, Vec3>();
@@ -625,6 +640,52 @@ export function SliceEditor({
     return out;
   }, [blocked, axis, at, vol]);
 
+  /** 被擋住的格子合成一條 path（plan v9 P8：拖拉中每幀不再 reconcile 幾千個 rect）。 */
+  const cellsPath = (cells: XY[]) => (cells.length ? cells.map(([u, v]) => `M${u},${v}h1v1h-1z`).join('') : '');
+  const blockedLivePath = useMemo(() => cellsPath(blockedLive), [blockedLive]);
+  const blockedHerePath = useMemo(() => cellsPath(blockedHere), [blockedHere]);
+  // 輪廓、階梯的 path 字串只在環變了才重算（plan v9 P7）
+  const stairsPath = useMemo(() => stairs.map((l) => pathOf(l)).join(''), [stairs]);
+  const ringPaths = useMemo(
+    () =>
+      [...rings].flatMap(([key, rs]) =>
+        rs.map((r, ri) => ({ k: `o${key}${ri}`, d: pathOf(geo?.outline === 'stairs' || !geo ? r.raw.flatMap((seg) => seg.slice(0, -1)) : r.pts) })),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rings, model?.rev, geo?.outline, !geo],
+  );
+  const zoom = xf?.zoom ?? 0;
+  const nodes = useMemo(
+    () => (
+      xf &&
+              [...rings].map(([key, rs]) =>
+                rs.map((r, ri) =>
+                  (showAll ? r.pts.map((_, i) => i) : [...r.nodes]).map((i) => {
+                    const [u, v] = r.pts[i];
+                    // 節點 7 px；按住 V 時其他頂點小一點
+                    const sz = (r.nodes.has(i) ? 7 : 4) / zoom;
+                    const on = (hover?.kind === 'node' && hover.key === key && hover.ring === ri && hover.index === i) || (handle?.kind === 'node' && handle.key === key && handle.ring === ri && handle.index === i && handle.at === at && handle.axis === axis);
+                    return (
+                      <rect
+                        key={`n${key}${ri}-${i}`}
+                        x={u - sz / 2}
+                        y={v - sz / 2}
+                        width={sz}
+                        height={sz}
+                        fill={on ? '#fa541c' : '#fff'}
+                        stroke={on ? '#fa541c' : 'var(--c-primary)'}
+                        strokeWidth={1.5}
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    );
+                  }),
+                ),
+              )
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rings, model?.rev, showAll, zoom, !!xf, hover, handle, at, axis],
+  );
+
   return (
     <div
       className="sedit"
@@ -659,11 +720,12 @@ export function SliceEditor({
         }
         if (!pr) {
           const h = hitAt(e.clientX, e.clientY);
-          setHover(h);
+          // 把手沒變就不 set（同一個節點／邊上移動不重 render）
+          setHover((p) => (sameHandle(p, h) ? p : h));
           e.currentTarget.style.cursor = space.current ? 'grab' : cursorFor(h);
         }
         const uv = uvAt(e.clientX, e.clientY);
-        setHoverUV(uv);
+        showHoverUV(uv);
         onHover?.(uv ? toVoxel(uv[0], uv[1]) : null);
       }}
       onPointerUp={(e) => {
@@ -714,7 +776,7 @@ export function SliceEditor({
         if (uv) onPick(toVoxel(uv[0], uv[1]), selectModeOf(e));
       }}
       onPointerLeave={() => {
-        setHoverUV(null);
+        showHoverUV(null);
         setHover(null);
         onHover?.(null);
       }}
@@ -777,61 +839,30 @@ export function SliceEditor({
             )}
             <line x1={cu + 0.5} y1={0} x2={cu + 0.5} y2={H} stroke="#d46b08" strokeWidth={1} vectorEffect="non-scaling-stroke" />
             <line x1={0} y1={cv + 0.5} x2={W} y2={cv + 0.5} stroke="#d46b08" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-            {hoverUV && xf && xf.zoom >= 4 && (
-              <rect x={hoverUV[0]} y={hoverUV[1]} width={1} height={1} fill="none" stroke="#fff" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-            )}
-            {blockedHere.map(([u, v]) => (
-              <rect key={`b${u},${v}`} x={u} y={v} width={1} height={1} fill="#ff4d4f" fillOpacity={0.55} stroke="#cf1322" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-            ))}
+            <rect ref={hoverRectRef} display="none" width={1} height={1} fill="none" stroke="#fff" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+            {blockedHerePath && <path d={blockedHerePath} fill="#ff4d4f" fillOpacity={0.55} stroke="#cf1322" strokeWidth={1} vectorEffect="non-scaling-stroke" />}
             {geo?.outline !== 'stairs' && xf && xf.zoom >= 8 && (
               // voxel 真正的邊界（淡淡的階梯）：隨時看得到真相
-              <path d={stairs.map((l) => pathOf(l)).join('')} fill="none" stroke={outOfScope ? '#8c8c8c' : 'var(--c-primary)'} strokeOpacity={0.4} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+              <path d={stairsPath} fill="none" stroke={outOfScope ? '#8c8c8c' : 'var(--c-primary)'} strokeOpacity={0.4} strokeWidth={1} vectorEffect="non-scaling-stroke" />
             )}
-            {[...rings].map(([key, rs]) =>
-              rs.map((r, ri) => (
-                <path
-                  key={`o${key}${ri}`}
-                  d={pathOf(geo?.outline === 'stairs' || !geo ? r.raw.flatMap((seg) => seg.slice(0, -1)) : r.pts)}
-                  fill="none"
-                  stroke={outOfScope ? '#8c8c8c' : 'var(--c-primary)'}
-                  strokeWidth={1.5}
-                  strokeDasharray={outOfScope ? '4 3' : undefined}
-                  vectorEffect="non-scaling-stroke"
-                />
-              )),
-            )}
+            {ringPaths.map(({ k, d }) => (
+              <path
+                key={k}
+                d={d}
+                fill="none"
+                stroke={outOfScope ? '#8c8c8c' : 'var(--c-primary)'}
+                strokeWidth={1.5}
+                strokeDasharray={outOfScope ? '4 3' : undefined}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
             {hoverGroup && !drag && <path d={pathOf(hoverGroup, false)} fill="none" stroke="#fa8c16" strokeWidth={3} vectorEffect="non-scaling-stroke" />}
             {handleGroup && <path d={pathOf(handleGroup, false)} fill="none" stroke="#fa541c" strokeWidth={3} vectorEffect="non-scaling-stroke" />}
             {/* 第二層之一：會被擋住的格子（斜線） */}
-            {blockedLive.map(([u, v]) => (
-              <rect key={`bl${u},${v}`} x={u} y={v} width={1} height={1} fill="url(#sedit-hatch)" stroke="#cf1322" strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
-            ))}
+            {blockedLivePath && <path d={blockedLivePath} fill="url(#sedit-hatch)" stroke="#cf1322" strokeWidth={0.5} vectorEffect="non-scaling-stroke" />}
             {/* 第一層：浮點 ghost（tick 直接寫 d，不經 React） */}
             <path ref={ghostRef} d="" display={drag ? undefined : 'none'} fill="rgba(250,84,28,0.08)" fillRule="evenodd" stroke="#fa541c" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
-            {xf &&
-              [...rings].map(([key, rs]) =>
-                rs.map((r, ri) =>
-                  (showAll ? r.pts.map((_, i) => i) : [...r.nodes]).map((i) => {
-                    const [u, v] = r.pts[i];
-                    // 節點 7 px；按住 V 時其他頂點小一點
-                    const sz = (r.nodes.has(i) ? 7 : 4) / xf.zoom;
-                    const on = (hover?.kind === 'node' && hover.key === key && hover.ring === ri && hover.index === i) || (handle?.kind === 'node' && handle.key === key && handle.ring === ri && handle.index === i && handle.at === at && handle.axis === axis);
-                    return (
-                      <rect
-                        key={`n${key}${ri}-${i}`}
-                        x={u - sz / 2}
-                        y={v - sz / 2}
-                        width={sz}
-                        height={sz}
-                        fill={on ? '#fa541c' : '#fff'}
-                        stroke={on ? '#fa541c' : 'var(--c-primary)'}
-                        strokeWidth={1.5}
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    );
-                  }),
-                ),
-              )}
+            {nodes}
           </svg>
       </div>
       <div className="sedit-zoombar" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>

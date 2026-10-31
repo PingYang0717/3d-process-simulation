@@ -1273,14 +1273,29 @@ export function moveLabel(labels: Int32Array, d: { X: number; Y: number }, b: BB
     }
 }
 
-/** 一組結構 key 的體素 mask；沒選取回傳 null。 */
-export function maskOf(L: Labeled, keys: Set<string>): Uint8Array | null {
+/**
+ * 一組結構 key 的體素 mask；沒選取回傳 null。
+ * dims 有給就只掃這些結構的聯集外框（plan v9 P10：結果仍是整個陣列大小，掃描 O(外框)）。
+ */
+export function maskOf(L: Labeled, keys: Set<string>, dims?: { X: number; Y: number; Z: number }): Uint8Array | null {
   if (!keys.size) return null;
   const on = new Uint8Array(L.comps.length);
   L.comps.forEach((c, i) => {
     if (keys.has(c.key)) on[i] = 1;
   });
   const mask = new Uint8Array(L.labels.length);
+  const b = dims ? unionBBox(L.comps.filter((c) => keys.has(c.key))) : null;
+  if (dims && !b) return mask;
+  if (b && dims) {
+    const { X, Y } = dims;
+    for (let z = b.z0; z <= b.z1; z++)
+      for (let y = b.y0; y <= b.y1; y++)
+        for (let i = (z * Y + y) * X + b.x0, e = i + b.x1 - b.x0; i <= e; i++) {
+          const l = L.labels[i];
+          if (l >= 0 && on[l]) mask[i] = 1;
+        }
+    return mask;
+  }
   for (let i = 0; i < mask.length; i++) {
     const l = L.labels[i];
     if (l >= 0 && on[l]) mask[i] = 1;

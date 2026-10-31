@@ -104,6 +104,9 @@ const shots = process.argv[4] || null;
   // 拖拉中 3D 小窗有沒有即時變化（截圖比對）
   await page.locator('.item-name', { hasText: /^Si fin 1$/ }).click();
   await page.waitForTimeout(500);
+  // 剖面打開（沿 z、在十字那一片）：拖拉中每幀不重建貼圖物件，只在預覽碰到剖口那一片時重畫（plan v9 P9）
+  await page.getByRole('button', { name: '剖面' }).click();
+  await page.waitForTimeout(500);
   await page.keyboard.press('e');
   await page.locator('.main-slice').waitFor();
   await page.waitForTimeout(1500);
@@ -119,11 +122,22 @@ const shots = process.argv[4] || null;
     }
     return [best.u, best.v];
   });
+  // 主切面上滑鼠移動 60 次（不按）：整頁 render 次數（plan v9 P7：目標 0）
+  {
+    const sb = await page.locator('.sedit-img').boundingBox();
+    const r0 = await page.evaluate(() => window.__renders);
+    for (let k = 0; k < 60; k++) {
+      await page.mouse.move(sb.x + 10 + ((k * 7) % Math.max(20, sb.width - 20)), sb.y + 10 + ((k * 5) % Math.max(20, sb.height - 20)));
+      await page.waitForTimeout(8);
+    }
+    console.log(`主切面上滑鼠移動 60 次：整頁 render ${(await page.evaluate(() => window.__renders)) - r0} 次`);
+  }
   const b = await page.locator('.sedit-img').boundingBox();
   const W = await page.evaluate(() => window.__ed.vol.X);
   const z = b.width / W;
   const from = [b.x + node[0] * z, b.y + node[1] * z];
   await page.evaluate(() => ((window.__long = 0), (window.__longMax = 0)));
+  const cap0 = await page.evaluate(() => [window.__capTex || 0, window.__capDraw || 0]);
   const pane = page.locator('.pane-3d').first();
   const shot0 = await pane.screenshot();
   await page.mouse.move(from[0], from[1]);
@@ -141,6 +155,8 @@ const shots = process.argv[4] || null;
   await page.mouse.up();
   await page.waitForFunction(() => !window.__ed.busy && window.__ed.queued === 0, null, { timeout: 120000 });
   const kind = await page.evaluate(() => window.__ed.active?.ops.at(-1)?.kind);
+  const cap1 = await page.evaluate(() => [window.__capTex || 0, window.__capDraw || 0]);
+  console.log(`剖面開著拖拉 60 步：新建貼圖 ${cap1[0] - cap0[0]} 次、重畫剖口 ${cap1[1] - cap0[1]} 次`);
   console.log(`2D 拖拉節點 60 步（${kind}）：${dragMs} ms、long task ${longs} 個（最長 ${longMax} ms）；拖拉中 3D 小窗${shot0.equals(shot1) ? '沒有變化' : '有即時變化'}`);
   if (errors.length) console.log('頁面錯誤：\n' + errors.join('\n'));
   await browser.close();

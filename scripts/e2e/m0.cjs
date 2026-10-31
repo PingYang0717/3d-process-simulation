@@ -59,8 +59,9 @@ const ok = (cond, msg) => {
   await page.mouse.down({ button: 'right' });
   await page.mouse.move(box.x + 260, box.y + 230, { steps: 4 });
   await page.mouse.up({ button: 'right' });
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
   const after = await img.boundingBox();
-  ok(Math.abs(after.x - before.x - 60) < 2 && Math.abs(after.y - before.y - 30) < 2, '右鍵拖平移');
+  ok(Math.abs(after.x - before.x - 60) < 2 && Math.abs(after.y - before.y - 30) < 2, `右鍵拖平移（${(after.x - before.x).toFixed(1)}, ${(after.y - before.y).toFixed(1)}）`);
 
   // 範圍：此片
   await page.locator('.position-bar .ant-segmented-item', { hasText: '此片' }).click();

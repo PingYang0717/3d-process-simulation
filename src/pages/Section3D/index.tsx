@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, InputNumber, Menu, Modal, Popover, Segmented, Slider, Space, Tabs, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
@@ -39,6 +39,33 @@ import { newReport } from '../../volume/kernel';
 import { type CellCloud, cellCloud, globalIndex } from './cellCloud';
 import { previewIn, sidOf } from '../../volume/client';
 import { hiddenTable, palette } from './tables';
+import { type LiveValue, useLive, useLiveValue } from '../../ui/liveValue';
+
+const sameVec = (a: Vec3 | null, b: Vec3 | null) => a === b || (!!a && !!b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
+
+/** 主切面標題列：滑鼠所在的體素與材質（自己訂閱，整頁不 render）。 */
+function HoverReadout({ live, data, vol, matName }: { live: LiveValue<Vec3 | null>; data: Uint8Array; vol: { X: number; Y: number }; matName: (id: number) => string }) {
+  const hov = useLive(live);
+  if (!hov) return null;
+  return (
+    <Text type="secondary" style={{ fontSize: 11 }}>
+      ({hov[0]}, {hov[1]}, {hov[2]}) {matName(data[(hov[2] * vol.Y + hov[1]) * vol.X + hov[0]])}
+    </Text>
+  );
+}
+/**
+ * 拖拉中的第 2 級預覽（Worker 每幀回一次）不進整頁的 state：放在 live value，只有 3D 與小切面重 render（plan v9 P7）。
+ * 沒有拖拉預覽時用整頁的 pv（放開／按鈕的預覽）。
+ */
+function WithLivePv<P>({ live, pv, children }: { live: LiveValue<P | null>; pv: P | null; children: (p: P | null) => ReactNode }) {
+  const l = useLive(live);
+  return <>{children(l ?? pv)}</>;
+}
+/** 頁尾：剛套用的訊息（fallback）優先，其次 3D 上滑過的說明，再其次一般提示。 */
+function HoverText({ live, fallback, idle }: { live: LiveValue<string | null>; fallback: string | null; idle: string }) {
+  const h = useLive(live);
+  return <>{fallback ?? (h || idle)}</>;
+}
 import type { MeshData } from '../../volume/volume';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceEditor, SliceView, View3D } from './views.lazy';
@@ -139,8 +166,12 @@ export default function Section3DPage() {
   const ed = useEditor();
   // 開發模式：e2e（scripts/e2e/m9.cjs、perf.cjs）讀編輯器狀態
   if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
+  // 開發模式：整頁 render 次數（perf.cjs 量主切面上滑鼠移動時整頁 render 幾次，plan v9 P7）
+  if (import.meta.env.DEV) (window as unknown as { __renders?: number }).__renders = ((window as unknown as { __renders?: number }).__renders ?? 0) + 1;
   // 開發模式：e2e 腳本從 window.__ed 讀狀態（正式打包不會有）
   if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
+  // 開發模式：整頁 render 次數（perf.cjs 量主切面上滑鼠移動時整頁 render 幾次，plan v9 P7）
+  if (import.meta.env.DEV) (window as unknown as { __renders?: number }).__renders = ((window as unknown as { __renders?: number }).__renders ?? 0) + 1;
   const { message, modal } = App.useApp();
   const [leftW, setLeftW] = usePersisted('leftW', 240);
   const [rightW, setRightW] = usePersisted('rightW', 350);
@@ -150,7 +181,8 @@ export default function Section3DPage() {
   const [rightOpen, setRightOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
-  const [hover, setHover] = useState<string | null>(null);
+  /** 3D 上滑過的說明（plan v9 P7：放在 live value，只有頁尾那一小段文字重 render）。 */
+  const hover = useLiveValue<string | null>(null);
   const [tab, setTab] = useState('props');
   /** 剖面：軸、留哪一半、每軸各自的位置（和十字分開，點選結構不會讓剖面跳走）。 */
   const [clipOn, setClipOn] = useState(false);
@@ -168,7 +200,8 @@ export default function Section3DPage() {
   /** 這個 session 裡使用者自己挑過切面方向：之後進入 2D 編輯沿用，不再自動選。 */
   const axisPicked = useRef(false);
   const focus: Axis | null = editing ? ed.editAxis : null;
-  const [sliceHover, setSliceHover] = useState<Vec3 | null>(null);
+  /** 主切面上滑鼠所在的體素（plan v9 P7：同上，只有標題列的座標重 render）。 */
+  const sliceHover = useLiveValue<Vec3 | null>(null, sameVec);
   const [xray, setXray] = useState(false);
   const [translucent, setTranslucent] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -185,6 +218,7 @@ export default function Section3DPage() {
    * 第 2 級預覽（plan v9 §4.5）搬到 Worker：同時最多一個拖拉預覽在飛、永遠送最新的 op、拖拉結束後晚到的丟掉；
    * 放開／按鈕的預覽（committed）在 apply 之前送出（Worker 依序處理，先回預覽再算正式結果）。
    */
+  const livePv = useLiveValue<PV | null>(null);
   const live2 = useRef({ inflight: false, pending: null as Op | null, sent: null as Op | null, seq: 0, dragging: false });
   const look = useRef({ ed, showDiff });
   look.current = { ed, showDiff };
@@ -208,11 +242,15 @@ export default function Section3DPage() {
         const fresh = r.seq === L.seq && sidOf(look.current.ed.cur) === base && (committed || L.dragging);
         if (fresh) {
           if ('none' in r) {
+            livePv.set(null);
             setPv((p) => (committed || (p && !p.committed) ? null : p));
             if (!committed) setLiveCells(cellCloud(op, look.current.ed.vol));
-          } else {
+          } else if (committed) {
+            livePv.set(null);
             setPv({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
-            if (!committed) setLiveCells(null);
+          } else {
+            livePv.set({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
+            setLiveCells((c) => (c ? null : c));
           }
         }
         done();
@@ -249,6 +287,7 @@ export default function Section3DPage() {
   const endLive = () => {
     live2.current.dragging = false;
     live2.current.pending = null;
+    livePv.set(null);
     setPv((p) => (p && !p.committed ? null : p));
   };
   // 每一步送 Worker 前先預覽（按鈕、方向鍵、筆刷放開都走 commit）
@@ -259,7 +298,10 @@ export default function Section3DPage() {
   useEffect(() => {
     if (!ed.busy && pv?.committed && pv.base === sidOf(ed.cur)) setPv(null);
   }, [ed.busy, ed.cur, pv]);
-  useEffect(() => setPv(null), [ed.orig, mode]);
+  useEffect(() => {
+    setPv(null);
+    livePv.set(null);
+  }, [ed.orig, mode, livePv]);
   /** 切面要畫的預覽：只有根據的陣列還是現在這份才有效（正式結果到了切面本來就會重畫）。 */
   const slicePv = pv && pv.base === sidOf(ed.cur) && mode === 'now' ? pv : null;
 
@@ -330,7 +372,9 @@ export default function Section3DPage() {
   const draggedSinceE = useRef(false);
 
   /** 拖動中：主切面只算這一片（第 1 級）；範圍小的話 3D 與小切面也即時（第 2 級）。 */
-  const [dragPv, setDragPv] = useState<PV | null>(null);
+  // 第 1 級（主切面這一片）每一幀都換：同樣不進整頁的 state，只有主切面重 render（plan v9 P7）
+  const dragPv = useLiveValue<PV | null>(null);
+  const setDragPv = dragPv.set;
   const onLive = (op: Op | null) => {
     if (!op) {
       setDragPv(null);
@@ -377,7 +421,7 @@ export default function Section3DPage() {
     } else if (!axisPicked.current) axis = longestAxis(ed) ?? axis;
     ed.setEditAxis(axis);
     if (ed.selMask) {
-      const t = nearestSlice(slicesWith(ed.selMask, ed.vol, axis), ed.cursor[axisIndex(axis)]);
+      const t = nearestSlice(slicesWith(ed.selMask, ed.vol, axis, ed.selBox), ed.cursor[axisIndex(axis)]);
       if (t !== null && t !== ed.cursor[axisIndex(axis)]) setCursorAxis(axis, t);
     }
     setEditing(true);
@@ -388,7 +432,7 @@ export default function Section3DPage() {
     axisPicked.current = true;
     ed.setEditAxis(a);
     if (ed.selMask) {
-      const t = nearestSlice(slicesWith(ed.selMask, ed.vol, a), ed.cursor[axisIndex(a)]);
+      const t = nearestSlice(slicesWith(ed.selMask, ed.vol, a, ed.selBox), ed.cursor[axisIndex(a)]);
       if (t !== null && t !== ed.cursor[axisIndex(a)]) setCursorAxis(a, t);
     }
   };
@@ -399,7 +443,7 @@ export default function Section3DPage() {
   }, [ed.orig]);
   /** 選取沿主切面法線每一片有沒有（位置列「這一片沒有…跳到最近的一片」）。 */
   const selSlices = useMemo(
-    () => (editing && ed.selMask ? slicesWith(ed.selMask, ed.vol, ed.editAxis) : null),
+    () => (editing && ed.selMask ? slicesWith(ed.selMask, ed.vol, ed.editAxis, ed.selBox) : null),
     [editing, ed.selMask, ed.vol, ed.editAxis],
   );
 
@@ -617,8 +661,6 @@ export default function Section3DPage() {
   /** 編輯狀態的主切面：頁籤、位置列、可縮放的切面編輯器。 */
   const mainSlice = (axis: Axis) => {
     const at = cursorAt(axis);
-    const hov = sliceHover;
-    const hovMat = hov ? ed.matName(shown.data[(hov[2] * ed.vol.Y + hov[1]) * ed.vol.X + hov[0]]) : null;
     return (
       <div className="pane slice-pane big main-slice" key={axis} data-axis={axis}>
         <div className="pane-head">
@@ -634,53 +676,52 @@ export default function Section3DPage() {
             options={(['z', 'y', 'x'] as Axis[]).map((a) => ({ label: <Tooltip title={tabHint(a)}>{AXIS_TAB[a]}</Tooltip>, value: a }))}
           />
           <span className="grow" />
-          {hov && (
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              ({hov[0]}, {hov[1]}, {hov[2]}) {hovMat}
-            </Text>
-          )}
+          <HoverReadout live={sliceHover} data={shown.data} vol={ed.vol} matName={ed.matName} />
         </div>
         <PositionBar ed={ed} axis={axis} has={selSlices} onJumpBlocked={jumpBlocked} />
         <div className="slice-body">
-          <SliceEditor
-            key={axis}
-            vol={shown}
-            axis={axis}
-            at={at}
-            materials={ed.materials}
-            hidden={ed.hidden}
-            selMask={peek ? null : ed.affMask}
-            cursor={ed.cursor}
-            scope={ed.sel.size ? ed.scope : null}
-            diff={diffShown}
-            preview={dragPv ?? slicePv}
-            selBox={peek ? null : (unionBBox(ed.selComps) ?? null)}
-            focusKey={selKey}
-            autoZoom={ed.autoZoom}
-            onPick={pickInSlice}
-            onStep={(d) => ed.stepCursor(axis, d)}
-            onHover={setSliceHover}
-            L={peek ? undefined : ed.L}
-            selKeys={peek ? [] : [...ed.sel]}
-            gesture={{ scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }}
-            onCommit={ed.commit}
-            onLive={onLive}
-            blocked={ed.report?.cells ?? null}
-            handle={ed.handle}
-            setHandle={ed.setHandle}
-            onDragState={(d) => {
-              if (d) draggedSinceE.current = true;
-            }}
-            mirror={ed.mirror && ed.sel.size > 1}
-            onNote={(t) => message.warning({ key: 'mirror', content: t })}
-            overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} onMaterial={changeMaterial} /> : undefined}
-            geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, outline: ed.outlineStyle, snap: ed.snapMode }}
-            onMenu={(p, x, y) => {
-              const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
-              setMenuAt({ x, y });
-              ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
-            }}
-          />
+          <WithLivePv key={axis} live={dragPv} pv={null}>
+            {(dp) => (
+              <SliceEditor
+                vol={shown}
+                axis={axis}
+                at={at}
+                materials={ed.materials}
+                hidden={ed.hidden}
+                selMask={peek ? null : ed.affMask}
+                cursor={ed.cursor}
+                scope={ed.sel.size ? ed.scope : null}
+                diff={diffShown}
+                preview={dp ?? slicePv}
+                selBox={peek ? null : (unionBBox(ed.selComps) ?? null)}
+                focusKey={selKey}
+                autoZoom={ed.autoZoom}
+                onPick={pickInSlice}
+                onStep={(d) => ed.stepCursor(axis, d)}
+                onHover={sliceHover.set}
+                L={peek ? undefined : ed.L}
+                selKeys={peek ? [] : [...ed.sel]}
+                gesture={{ scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }}
+                onCommit={ed.commit}
+                onLive={onLive}
+                blocked={ed.report?.cells ?? null}
+                handle={ed.handle}
+                setHandle={ed.setHandle}
+                onDragState={(d) => {
+                  if (d) draggedSinceE.current = true;
+                }}
+                mirror={ed.mirror && ed.sel.size > 1}
+                onNote={(t) => message.warning({ key: 'mirror', content: t })}
+                overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} onMaterial={changeMaterial} /> : undefined}
+                geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, outline: ed.outlineStyle, snap: ed.snapMode }}
+                onMenu={(p, x, y) => {
+                  const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
+                  setMenuAt({ x, y });
+                  ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null });
+                }}
+              />
+            )}
+          </WithLivePv>
         </div>
       </div>
     );
@@ -724,20 +765,24 @@ export default function Section3DPage() {
           </Tooltip>
         </div>
         <div className="slice-body">
-          <SliceView
-            vol={shown}
-            axis={axis}
-            at={at}
-            materials={ed.materials}
-            hidden={ed.hidden}
-            selMask={peek ? null : ed.affMask}
-            cursor={ed.cursor}
-            scope={ed.sel.size ? ed.scope : null}
-            diff={diffShown}
-            preview={slicePv}
-            onPick={pickInSlice}
-            onStep={(d) => ed.stepCursor(axis, d)}
-          />
+          <WithLivePv live={livePv} pv={pv}>
+            {(p) => (
+              <SliceView
+                vol={shown}
+                axis={axis}
+                at={at}
+                materials={ed.materials}
+                hidden={ed.hidden}
+                selMask={peek ? null : ed.affMask}
+                cursor={ed.cursor}
+                scope={ed.sel.size ? ed.scope : null}
+                diff={diffShown}
+                preview={p && p.base === sidOf(ed.cur) && mode === 'now' ? p : null}
+                onPick={pickInSlice}
+                onStep={(d) => ed.stepCursor(axis, d)}
+              />
+            )}
+          </WithLivePv>
         </div>
       </div>
     );
@@ -915,52 +960,56 @@ export default function Section3DPage() {
         </Space.Compact>
       </div>
       <div className="canvas-wrap" ref={wrapRef}>
-        <View3D
-          state={peek ? ed.orig : ed.cur}
-          materials={ed.materials}
-          hidden={ed.hidden}
-          selMask={peek ? null : ed.affMask}
-          selComps={peek ? null : ed.selIdx}
-          selBBox={peek ? null : selBBox}
-          scope={ed.scope}
-          cursor={ed.cursor}
-          clip={clip}
-          showDiff={showDiff && !peek}
-          diffMask={diffShown}
-          mode={mode}
-          brush={sculptOn ? ed.brush : OFF_BRUSH}
-          nmPerVoxel={ed.nmPerVoxel}
-          orig={ed.orig.vol}
-          preview={pv}
-          cells={liveCells}
-          onPreview={(op) => {
-            if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
-            endLive();
-            return false;
-          }}
-          toOp={ed.opFor}
-          onPick={(v, m) => {
-            if (v === null) {
-              if (m === 'set') ed.clearSel();
-              return;
-            }
-            ed.pickVoxel(v, m);
-            ed.setCursor(ed.voxelCoord(v));
-          }}
-          onMenu={(h, x, y) => {
-            const r = wrapRef.current?.getBoundingClientRect();
-            setMenuAt({ x: (r?.left ?? 0) + x, y: (r?.top ?? 0) + y });
-            const l = h.voxel !== null ? ed.L.labels[h.voxel] : -1;
-            ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, along: h.along });
-          }}
-          onSculpt={ed.sculpt}
-          onHover={setHover}
-          floatRef={tagRef}
-          handle={view}
-          xray={xray}
-          translucent={translucent}
-          busy={!!ed.busy}
-        />
+        <WithLivePv live={livePv} pv={pv}>
+          {(p) => (
+            <View3D
+              state={peek ? ed.orig : ed.cur}
+              materials={ed.materials}
+              hidden={ed.hidden}
+              selMask={peek ? null : ed.affMask}
+              selComps={peek ? null : ed.selIdx}
+              selBBox={peek ? null : selBBox}
+              scope={ed.scope}
+              cursor={ed.cursor}
+              clip={clip}
+              showDiff={showDiff && !peek}
+              diffMask={diffShown}
+              mode={mode}
+              brush={sculptOn ? ed.brush : OFF_BRUSH}
+              nmPerVoxel={ed.nmPerVoxel}
+              orig={ed.orig.vol}
+              preview={p}
+              cells={liveCells}
+              onPreview={(op) => {
+                if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
+                endLive();
+                return false;
+              }}
+              toOp={ed.opFor}
+              onPick={(v, m) => {
+                if (v === null) {
+                  if (m === 'set') ed.clearSel();
+                  return;
+                }
+                ed.pickVoxel(v, m);
+                ed.setCursor(ed.voxelCoord(v));
+              }}
+              onMenu={(h, x, y) => {
+                const r = wrapRef.current?.getBoundingClientRect();
+                setMenuAt({ x: (r?.left ?? 0) + x, y: (r?.top ?? 0) + y });
+                const l = h.voxel !== null ? ed.L.labels[h.voxel] : -1;
+                ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, along: h.along });
+              }}
+              onSculpt={ed.sculpt}
+              onHover={hover.set}
+              floatRef={tagRef}
+              handle={view}
+              xray={xray}
+              translucent={translucent}
+              busy={!!ed.busy}
+            />
+          )}
+        </WithLivePv>
         <div className="viewbar">
           {(
             [
@@ -1039,16 +1088,23 @@ export default function Section3DPage() {
       </div>
       <div className={'pane-foot' + (hot ? ' hot' : '')}>
         <span>
-          {hot
-            ? ed.last!.text
-            : hover ||
+          <HoverText
+            live={hover}
+            fallback={
+              hot
+                ? ed.last!.text
+                : null
+            }
+            idle={
               (ed.sel.size
                 ? `${selName} · ${ed.selCount.toLocaleString()} voxels${whole ? '' : ` · 只改 ${ed.scope.axis} ${ed.scope.lo}～${ed.scope.hi}`}${
                     !sculptOn || br.mode === 'off'
                       ? ' · 按 E（2D 編輯）在切面上改；3D 上拖拉只轉視角'
                       : ' · 按住它的面拖＝筆刷雕刻；轉視角用中鍵或 Alt＋左鍵拖'
                   }；整面長縮、移動在右欄`
-                : '點一塊結構開始；Shift 多選；雙擊模型＝繞著那點轉；F 對準、H 全貌')}
+                : '點一塊結構開始；Shift 多選；雙擊模型＝繞著那點轉；F 對準、H 全貌')
+            }
+          />
         </span>
         <span className="grow" />
         <span>

@@ -187,6 +187,7 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .sedit-img { position: absolute; box-shadow: 0 0 0 1px rgba(0, 0, 0, .12); }
 .sedit-img canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
 .sedit-img canvas.sedit-pv { position: absolute; inset: 0; pointer-events: none; }
+.slice-img canvas.sedit-pv { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
 .sedit-img svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .sedit-zoombar { position: absolute; right: 12px; bottom: 12px; z-index: 3; display: flex; align-items: center; gap: 2px; padding: 3px; background: rgba(255, 255, 255, .94); border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); cursor: default; }
 .sedit-zoombar .ant-btn { padding-inline: 8px; font-size: 12px; color: var(--c-text-soft); }

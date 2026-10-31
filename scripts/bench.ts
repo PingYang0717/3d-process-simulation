@@ -171,7 +171,89 @@ function benchDrag(scale: number) {
   );
 }
 
-if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);
+/** drawSlice（plan v9 P11）：LUT 版 vs 舊版（每像素 toVoxel／Map／Set、描邊每像素配陣列），三個軸各 20 次。 */
+async function benchDraw(scale: number) {
+  const { sliceRGBA, SEL_RGB } = await import('../src/pages/Section3D/drawSlice');
+  const { hexToRgb, idx, maskOf } = await import('../src/volume/volume');
+  const vol = demoVolume(scale);
+  const L = initialLabeled(vol, matName);
+  const rgb = new Map(MATERIALS.map((m) => [m.id, hexToRgb(m.color)] as const));
+  const sel = maskOf(L, new Set(L.comps.filter((c) => c.mat === 6).map((c) => c.key)))!;
+  const diff = new Uint8Array(vol.data.length);
+  for (let i = 0; i < diff.length; i += 3) diff[i] = 1;
+  const hidden = new Set<number>([4]);
+  const old = (axis: 'x' | 'y' | 'z', at: number) => {
+    const [W, H] = axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
+    const toVoxel = (u: number, v: number): [number, number, number] => (axis === 'z' ? [u, v, at] : axis === 'y' ? [u, at, v] : [at, v, u]);
+    const data = new Uint8ClampedArray(W * H * 4);
+    for (let v = 0; v < H; v++)
+      for (let u = 0; u < W; u++) {
+        const [x, y, z] = toVoxel(u, v);
+        const i = idx(vol, x, y, z);
+        const m = vol.data[i];
+        const c = hidden.has(m) ? [245, 245, 245] : (rgb.get(m) ?? [255, 0, 255]);
+        const o = (v * W + u) * 4;
+        data[o] = c[0];
+        data[o + 1] = c[1];
+        data[o + 2] = c[2];
+        data[o + 3] = 255;
+        if (sel[i]) for (let k = 0; k < 3; k++) data[o + k] = (data[o + k] + SEL_RGB[k]) >> 1;
+      }
+    const on = (u: number, v: number) => {
+      const [x, y, z] = toVoxel(u, v);
+      return diff[idx(vol, x, y, z)];
+    };
+    for (let v = 0; v < H; v++)
+      for (let u = 0; u < W; u++)
+        if (on(u, v) && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([du, dv]) => u + du < 0 || v + dv < 0 || u + du >= W || v + dv >= H || !on(u + du, v + dv))) data.set([255, 77, 79, 255], (v * W + u) * 4);
+    return data;
+  };
+  console.log(`\n範例 ×${scale}：`);
+  // 點選一次的主執行緒掃描（plan v9 P10）：maskOf＋maskInScope（此片）＋slicesWith，整個陣列 vs 只掃選取外框
+  {
+    const { maskInScope, slicesWith } = await import('../src/pages/Section3D/editor');
+    const { unionBBox } = await import('../src/volume/volume');
+    for (const [name, comps] of [
+      ['poly', L.comps.filter((c) => c.mat === 6).slice(0, 1)],
+      ['基板', [L.comps.reduce((a, c) => (c.count > a.count ? c : a))]],
+    ] as const) {
+      const keys = new Set(comps.map((c) => c.key));
+      const box = unionBBox([...comps]);
+      const scope = { axis: 'z' as const, lo: vol.Z >> 1, hi: vol.Z >> 1 };
+      let t = performance.now();
+      const m0 = maskOf(L, keys)!;
+      maskInScope(m0, vol, scope);
+      slicesWith(m0, vol, 'z');
+      const tFull = performance.now() - t;
+      t = performance.now();
+      const m1 = maskOf(L, keys, vol)!;
+      maskInScope(m1, vol, scope, box);
+      slicesWith(m1, vol, 'z', box);
+      console.log(`  點選 ${name}：整個陣列掃 ${tFull.toFixed(0)} ms｜只掃外框 ${(performance.now() - t).toFixed(0)} ms`);
+    }
+  }
+  for (const axis of ['z', 'y', 'x'] as const) {
+    const at = axis === 'z' ? vol.Z >> 1 : axis === 'y' ? vol.Y >> 1 : vol.X >> 1;
+    // 先跑幾次（JIT 暖機），再量；差異只在選取附近（實際情況），另量一次整片三分之一是差異的極端情況
+    const sparse = new Uint8Array(vol.data.length);
+    for (let i = 0; i < sel.length; i++) if (sel[i] && i % 5 === 0) sparse[i] = 1;
+    for (let k = 0; k < 5; k++) (old(axis, at), sliceRGBA(vol, axis, at, rgb, hidden, sel, sparse, null));
+    let t = performance.now();
+    for (let k = 0; k < 20; k++) old(axis, at);
+    const tOld = (performance.now() - t) / 20;
+    t = performance.now();
+    let n = 0;
+    for (let k = 0; k < 20; k++) n = sliceRGBA(vol, axis, at, rgb, hidden, sel, sparse, null).data.length / 4;
+    const tNew = (performance.now() - t) / 20;
+    t = performance.now();
+    for (let k = 0; k < 20; k++) sliceRGBA(vol, axis, at, rgb, hidden, sel, diff, null);
+    const tDense = (performance.now() - t) / 20;
+    console.log(`  ${axis} 切面（${n.toLocaleString()} 像素，選取＋差異描邊）：舊 ${tOld.toFixed(2)} ms｜LUT ${tNew.toFixed(2)} ms（三分之一是差異的極端情況 ${tDense.toFixed(2)} ms）`);
+  }
+}
+
+if (mode === 'draw') for (const scale of scales) await benchDraw(scale);
+else if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);
 else if (dragMode) for (const scale of scales) benchDrag(scale);
 else for (const scale of scales) {
   const vol = demoVolume(scale);

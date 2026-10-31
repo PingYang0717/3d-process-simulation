@@ -1,4 +1,6 @@
 // plan v8 驗收（§11 M6／M7 驗收腳本，範例 ×1）：持久幾何層、浮點 ghost、放開才吸附。
+// plan v10：進 2D 剖面＝按兩下 E（瀏覽 → 3D 把手 → 2D 剖面）；Esc 離開聚焦回瀏覽；
+// 「選到的節點」卡片改成預覽 → 套用（Enter）。
 // 先 `npm run dev`，再 `node scripts/e2e/m5.cjs [url] [截圖資料夾]`
 const { chromium } = require('playwright');
 
@@ -35,6 +37,28 @@ const ok = (cond, msg) => {
     const [W, H] = await ed(() => [window.__ed.vol.X, window.__ed.vol.Y]);
     return [b.x + (u / W) * b.width, b.y + (v / H) * b.height];
   };
+  /**
+   * 節點的抓取點：從節點本身開始，往外（右上）一點一點偏，直到游標變成角的游標（nwse／nesw-resize＝抓得到節點）。
+   * v10 的 hitTest（src/slice/gestures.ts）節點與邊比「距離／半徑」，兩個半徑都是 6 px，而相鄰兩條邊的線段都通到節點，
+   * 所以游標不是剛好落在節點上時，邊（距離 ≤ 到節點的距離）幾乎一定贏、抓到的是邊；只有在角的外側象限才抓得到節點。
+   * 回傳 [x, y]；dv＝要算終點時一起往上移幾格（偏移量相同）。
+   */
+  const nodeScreen = async (u, v) => {
+    const [x, y] = await screenOf(u, v);
+    for (const [dx, dy] of [[0, 0], [2, -2], [1, -1], [3, -3], [2, -1], [1, -2], [4, -4], [3, -1], [1, -3]]) {
+      await page.mouse.move(x + dx, y + dy);
+      await page.waitForTimeout(30);
+      const cur = await page.evaluate(([px, py]) => getComputedStyle(document.elementFromPoint(px, py)).cursor, [x + dx, y + dy]);
+      if (/nwse|nesw/.test(cur)) return { at: [x + dx, y + dy], d: [dx, dy] };
+    }
+    return { at: [x, y], d: [0, 0] };
+  };
+  /** 抓節點 (u, v) 拖到 (u + du, v + dv)：抓取點的偏移量保持不變。 */
+  const dragNode = async (u, v, du, dv, steps) => {
+    const { at, d } = await nodeScreen(u, v);
+    const [tx, ty] = await screenOf(u + du, v + dv);
+    await drag(at, [tx + d[0], ty + d[1]], steps);
+  };
   const zoom = async () => {
     const b = await page.locator('.sedit-img').boundingBox();
     return b.width / (await ed(() => window.__ed.vol.X));
@@ -48,6 +72,13 @@ const ok = (cond, msg) => {
       const m = e.models.get(e.L, e.vol, 'z', at, keys, e.version, e.stepSeq).model;
       return { at, handles: [...m.handles], vertices: m.vertices, rings: m.rings.map((r) => ({ key: r.key, loop: r.loop })) };
     });
+  /** 瀏覽 → 3D 把手 → 2D 剖面。 */
+  const to2D = async () => {
+    await page.keyboard.press('e');
+    await page.waitForFunction(() => window.__ed.focus?.view === '3d');
+    await page.keyboard.press('e');
+    await page.locator('.main-slice').waitFor();
+  };
   const drag = async (from, to, steps = 12) => {
     await page.mouse.move(from[0], from[1]);
     await page.mouse.down();
@@ -61,8 +92,7 @@ const ok = (cond, msg) => {
   // 1. Si fin 1 → 2D 編輯 → 拖右上節點往上 2 三次：每次節點還在、座標累加、節點數不變
   //   （往右上拖會把整條右邊連到底角一起斜過去、推進 fin 底部的 STI 而被擋住；那是 §4.3 的情境）
   await select('Si fin 1');
-  await page.keyboard.press('e');
-  await page.locator('.main-slice').waitFor();
+  await to2D();
   await page.waitForTimeout(400);
   // 浮動工具列在選取外框上方，fin 往上長之後會蓋到頂角：這個腳本只測拖拉，先藏起來
   await page.addStyleTag({ content: '.float-tb { display: none !important; }' });
@@ -75,7 +105,7 @@ const ok = (cond, msg) => {
   for (let k = 1; k <= 3; k++) {
     const g = await geom();
     const p = [g.vertices[corner].u, g.vertices[corner].v];
-    await drag(await screenOf(p[0], p[1]), await screenOf(p[0], p[1] - 2));
+    await dragNode(p[0], p[1], 0, -2);
     await idle();
     const g2 = await geom();
     ok(
@@ -110,7 +140,7 @@ const ok = (cond, msg) => {
   const z32 = await zoom();
   const g4 = await geom();
   const p4 = [g4.vertices[corner].u, g4.vertices[corner].v];
-  const from = await screenOf(p4[0], p4[1]);
+  const from = (await nodeScreen(p4[0], p4[1])).at;
   await page.mouse.move(from[0], from[1]);
   await page.mouse.down();
   const ds = [];
@@ -155,8 +185,8 @@ const ok = (cond, msg) => {
   await page.waitForTimeout(300);
   await ed(() => window.__ed.push([0, -1, 0], 1));
   await idle();
-  await page.keyboard.press('e');
-  await page.locator('.main-slice').waitFor();
+  ok((await ed(() => window.__ed.focus)) === null, 'Esc 離開聚焦編輯（回瀏覽）');
+  await to2D();
   await page.waitForTimeout(400);
   const g5 = await geom();
   const kept = before4.filter((id) => g5.handles.includes(id)).length;
@@ -167,12 +197,12 @@ const ok = (cond, msg) => {
   await idle();
   const g6 = await geom();
   const p6 = [g6.vertices[corner].u, g6.vertices[corner].v];
-  await drag(await screenOf(p6[0], p6[1]), await screenOf(p6[0], p6[1] - 2));
+  await dragNode(p6[0], p6[1], 0, -2);
   await idle();
   const opDrag = await ed(() => JSON.stringify(window.__ed.active.ops.at(-1)));
   await page.keyboard.press('Control+z');
   await idle();
-  const pc = await screenOf(p6[0], p6[1]);
+  const pc = (await nodeScreen(p6[0], p6[1])).at;
   await page.mouse.click(pc[0], pc[1]);
   await page.waitForTimeout(200);
   ok(await page.locator('.insp-body').getByText('選到的節點').isVisible(), '點節點 → 右欄「選到的節點」');

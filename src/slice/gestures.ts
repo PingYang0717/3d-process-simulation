@@ -75,7 +75,10 @@ export function hitTest(
           }
         }),
       );
-  if (node && edge) return nd / nodeR <= ed / edgeR ? node : edge;
+  // 節點在熱區內就是節點。不能「節點與邊比正規化距離」：相鄰的邊都有一段以節點為端點，
+  // 到邊的距離永遠 ≤ 到節點的距離，節點幾乎抓不到（游標落在整數像素、節點在小數位置）。
+  // 「想推邊常抓到角」改由縮小節點熱區（8 → 6 px）解決。
+  if (node && edge) return node;
   if (node || edge) return node ?? edge;
   if (!only || only === 'region') {
     const u = Math.floor(p[0]);

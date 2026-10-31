@@ -1,4 +1,6 @@
-// M2 驗收（plan v7 §13 M2 驗收腳本，範例 ×1）。先 `npm run dev`，再 `node scripts/e2e/m2.cjs [url] [截圖資料夾]`
+// M2 驗收（plan v7 §13 M2 驗收腳本，範例 ×1）。
+// plan v10：進 2D 剖面＝按兩下 E（瀏覽 → 3D 把手 → 2D 剖面）；「補平成方頭」→ 右欄「方頭／圓頭」切到「方頭」再按「套用方頭」。
+// 先 `npm run dev`，再 `node scripts/e2e/m2.cjs [url] [截圖資料夾]`
 const { chromium } = require('playwright');
 
 const url = process.argv[2] || 'http://localhost:5173';
@@ -39,6 +41,14 @@ const ok = (cond, msg) => {
     const [W, H] = await ed(() => [window.__ed.vol.X, window.__ed.vol.Y]);
     return [b.x + (u / W) * b.width, b.y + (v / H) * b.height];
   };
+  /** 右欄「方頭／圓頭」：切到「方頭」、按「套用方頭」（預設往上）。 */
+  const level = async () => {
+    const seg = page.locator('.inspector .ant-segmented-item', { hasText: /^方頭$/ });
+    await seg.scrollIntoViewIfNeeded();
+    await seg.click();
+    const btn = page.locator('.inspector .op-card button.ant-btn-primary', { hasText: '套用方頭' });
+    await btn.click();
+  };
   const drag = async (from, to) => {
     await page.mouse.move(from[0], from[1]);
     await page.mouse.down();
@@ -49,12 +59,14 @@ const ok = (cond, msg) => {
   // 1. Si fin 1 → 方頭（整根）
   await select('Si fin 1');
   await page.keyboard.press('e');
+  await page.waitForFunction(() => window.__ed.focus?.view === '3d');
+  await page.keyboard.press('e');
   await page.locator('.main-slice').waitFor();
   const fin = await ed(() => window.__ed.selComps[0].bbox);
-  await page.getByRole('button', { name: /補平成方頭/ }).click();
+  await level();
   await idle();
   const t1 = await lastText();
-  ok(/補平到 y = /.test(t1) && !/擋住/.test(t1), `方頭（整根）：${t1}`);
+  ok(/(補平|方頭)到 y = /.test(t1) && !/擋住/.test(t1), `方頭（整根）：${t1}`);
   const n1 = await diffCount();
   ok(n1 > 0, `改動 ${n1} 格`);
 
@@ -66,7 +78,7 @@ const ok = (cond, msg) => {
     window.__ed.setCustom(40, 52);
   });
   await page.waitForTimeout(100);
-  await page.getByRole('button', { name: /補平成方頭/ }).click();
+  await level();
   await idle();
   const zs = await ed(() => {
     const e = window.__ed;
@@ -81,7 +93,7 @@ const ok = (cond, msg) => {
   await idle();
   await ed(() => window.__ed.setScopeMode('whole'));
   // 回到整根方頭（之後的頂邊才是橫跨整根的直邊）
-  await page.getByRole('button', { name: /補平成方頭/ }).click();
+  await level();
   await idle();
   const base = await diffCount();
 
@@ -155,21 +167,25 @@ const ok = (cond, msg) => {
   const ops7 = await ed((n) => window.__ed.active.ops.slice(n).map((o) => `${o.kind}${o.dir}`), before);
   ok(ops7.length === 3 && ops7[0] === 'push0,-1,0' && ops7[1] === 'push1,0,0' && ops7[2] === 'push-1,0,0', `排隊三步依序套用：${ops7.join(' → ')}`);
 
-  // 拖節點 → profile
+  // 拖右邊往外 → profile（或 push）。
+  // plan v10 §4.2：節點熱區 8 → 6 px、節點與邊比距離；原本在 y0+2（圓頭附近）按下會抓到頂邊（ns-resize），
+  // 橫拖變成 0 格、什麼都沒做——舊的檢查只看最後一步的 kind，會把上一步誤當成這一步。改在 y0+10 抓右邊，並檢查多了一步。
   await select('Si fin 3');
   await page.waitForTimeout(300);
   const f3 = await ed(() => window.__ed.selComps[0].bbox);
-  const corner = await screenOf(f3.x1 + 1, f3.y0 + 2);
+  const len8 = await ed(() => window.__ed.active.ops.length);
+  const corner = await screenOf(f3.x1 + 1, f3.y0 + 10);
   await page.mouse.move(corner[0], corner[1]);
   await page.waitForTimeout(100);
-  const n0 = await screenOf(f3.x1 + 1, f3.y0 + 2);
+  const n0 = await screenOf(f3.x1 + 1, f3.y0 + 10);
   const nodeHit = await ed(() => !!document.querySelector('.sedit'));
   void nodeHit;
-  const n1p = await screenOf(f3.x1 + 3, f3.y0 + 2);
+  const n1p = await screenOf(f3.x1 + 3, f3.y0 + 10);
   await drag(n0, [n1p[0] + 2, n1p[1]]);
   await idle();
   const op8 = await ed(() => window.__ed.active.ops.at(-1));
-  ok(['profile', 'push'].includes(op8.kind), `右邊往外拖 → ${op8.kind}（${await lastText()}）`);
+  const len8b = await ed(() => window.__ed.active.ops.length);
+  ok(len8b === len8 + 1 && op8.keys.length === 1 && ['profile', 'push'].includes(op8.kind), `右邊往外拖 → ${op8.kind}（${await lastText()}）`);
 
   ok(errors.length === 0, `沒有頁面錯誤${errors.length ? '：' + errors.join('\n') : ''}`);
   void base;

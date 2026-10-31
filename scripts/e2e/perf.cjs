@@ -1,4 +1,6 @@
 // 端到端速度（plan v7 §8.6、M1 驗收）：大範例上「長高 1 格」從按下到 3D 更新完（.mesh-busy 消失）的時間。
+// plan v10：標題列「長高」→ 右欄「長／縮」卡片（格數 1、預設往上）的「套用」；進 2D 剖面＝按兩下 E；
+// 節點要從角的外側抓（見下方 grabNode）。
 // 用法：先 `npm run dev`，再 `node scripts/e2e/perf.cjs [url] [scale=2] [截圖資料夾]`
 const { chromium } = require('playwright');
 
@@ -45,19 +47,30 @@ const shots = process.argv[4] || null;
   console.log(`載入＋第一次網格：${Date.now() - t0} ms`);
   await page.locator('.item-name', { hasText: /^Poly-Si 1$/ }).click();
   await page.waitForTimeout(1500);
+  const card = page.locator('.inspector .op-card').first();
+  await card.scrollIntoViewIfNeeded();
+  await card.getByLabel('格數').fill('1');
+  await page.mouse.click(5, 5); // 收掉卡片預覽，計時只算「套用」
+  await page.waitForTimeout(500);
+  const apply = card.locator('button.ant-btn-primary');
   const times = [];
   const js = [];
   let p0posts = await posts();
   for (let k = 0; k < 4; k++) {
     const t = Date.now();
     const p0 = await page.evaluate(() => performance.now());
-    await page.getByRole('button', { name: '長高' }).first().click();
+    await apply.click();
     // 換上正式網格的那一刻（JS 時間，不含 headless 軟體繪圖把畫面畫出來的時間）
     const m = await page.waitForFunction((p) => { const m = window.__meshAt; return m && m.t > p ? m : null; }, p0, { timeout: 120000, polling: 16 }).then((h) => h.jsonValue());
     js.push(`${(m.t - p0).toFixed(0)}（${m.full ? '全部' : m.n} 個 chunk）`);
     await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 120000 });
     times.push(Date.now() - t);
     await page.waitForTimeout(800);
+  }
+  const grown = await page.evaluate(() => window.__ed.active?.ops.map((o) => `${o.kind}${o.dir}:${o.n}`) ?? []);
+  if (grown.length !== 4 || !grown.every((o) => o === 'push0,-1,0:1')) {
+    console.log(`✗ 「長／縮」卡片套用 4 次應該是 4 步往上 1 格：${grown.join('、')}`);
+    process.exitCode = 1;
   }
   console.log(`長高 1 格，按下 → 換上正式網格（JS）：${js.join('、')} ms`);
   console.log(`  4 步送 Worker 的請求：${JSON.stringify(delta(p0posts, await posts()))}`);
@@ -105,8 +118,10 @@ const shots = process.argv[4] || null;
   await page.locator('.item-name', { hasText: /^Si fin 1$/ }).click();
   await page.waitForTimeout(500);
   // 剖面打開（沿 z、在十字那一片）：拖拉中每幀不重建貼圖物件，只在預覽碰到剖口那一片時重畫（plan v9 P9）
-  await page.getByRole('button', { name: '剖面' }).click();
+  await page.getByRole('button', { name: '剖面', exact: true }).click();
   await page.waitForTimeout(500);
+  await page.keyboard.press('e');
+  await page.waitForFunction(() => window.__ed.focus?.view === '3d');
   await page.keyboard.press('e');
   await page.locator('.main-slice').waitFor();
   await page.waitForTimeout(1500);
@@ -135,12 +150,28 @@ const shots = process.argv[4] || null;
   const b = await page.locator('.sedit-img').boundingBox();
   const W = await page.evaluate(() => window.__ed.vol.X);
   const z = b.width / W;
-  const from = [b.x + node[0] * z, b.y + node[1] * z];
+  /**
+   * 抓節點：v10 hitTest 節點與邊比「距離／半徑」（都是 6 px），相鄰邊的線段通到節點，游標不是剛好在節點上時幾乎都抓到邊；
+   * 從節點開始往外（上方）一點一點偏，直到游標變成角的游標（nwse／nesw-resize）。
+   */
+  const grabNode = async (x, y) => {
+    for (const [dx, dy] of [[0, 0], [0, -2], [1, -2], [2, -2], [-1, -2], [2, -1], [0, -3], [3, -3], [-2, -2]]) {
+      await page.mouse.move(x + dx, y + dy);
+      await page.waitForTimeout(30);
+      const cur = await page.evaluate(([px, py]) => getComputedStyle(document.elementFromPoint(px, py)).cursor, [x + dx, y + dy]);
+      if (/nwse|nesw/.test(cur)) return [x + dx, y + dy];
+    }
+    console.log('（找不到抓得到節點的位置，照原座標拖）');
+    return [x, y];
+  };
+  const from = await grabNode(b.x + node[0] * z, b.y + node[1] * z);
   await page.evaluate(() => ((window.__long = 0), (window.__longMax = 0)));
   const cap0 = await page.evaluate(() => [window.__capTex || 0, window.__capDraw || 0]);
   const pane = page.locator('.pane-3d').first();
   const shot0 = await pane.screenshot();
   await page.mouse.move(from[0], from[1]);
+  await page.waitForTimeout(100);
+  const grabCursor = await page.evaluate(([px, py]) => getComputedStyle(document.elementFromPoint(px, py)).cursor, from);
   await page.mouse.down();
   const t2 = Date.now();
   for (let k = 1; k <= 60; k++) {
@@ -157,6 +188,10 @@ const shots = process.argv[4] || null;
   const kind = await page.evaluate(() => window.__ed.active?.ops.at(-1)?.kind);
   const cap1 = await page.evaluate(() => [window.__capTex || 0, window.__capDraw || 0]);
   console.log(`剖面開著拖拉 60 步：新建貼圖 ${cap1[0] - cap0[0]} 次、重畫剖口 ${cap1[1] - cap0[1]} 次`);
+  if (!/nwse|nesw/.test(grabCursor)) {
+    console.log(`✗ 按下時游標是 ${grabCursor}，抓到的不是節點`);
+    process.exitCode = 1;
+  }
   console.log(`2D 拖拉節點 60 步（${kind}）：${dragMs} ms、long task ${longs} 個（最長 ${longMax} ms）；拖拉中 3D 小窗${shot0.equals(shot1) ? '沒有變化' : '有即時變化'}`);
   if (errors.length) console.log('頁面錯誤：\n' + errors.join('\n'));
   await browser.close();

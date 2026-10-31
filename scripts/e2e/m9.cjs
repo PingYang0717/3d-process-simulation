@@ -1,5 +1,7 @@
 // plan v9 M9.1 手測項目自動化：兩個 split 各改、複製 split 後各改、回到原始、復原到底再重做到底、看原始 B。
 // 每一本帳簿只有一份、原地改；這裡確認 split 之間不互相污染、改動數字（主執行緒差量更新）前後一致。
+// plan v10：標題列「長高」→ 右欄「長／縮」卡片（格數 1、預設往上）＋「套用」；
+// 「回到原始」→「改了哪些」頁籤底部「丟掉所有改動」（Popconfirm「丟掉」）；看改前／差異時順便確認分段「改後／改前／差異」跟著切。
 // 用法：先 `npm run dev`，再 `node scripts/e2e/m9.cjs [http://localhost:5173]`
 const { chromium } = require('playwright');
 
@@ -29,10 +31,17 @@ const ok = (cond, msg) => {
     const m = t.match(/已改動 ([\d,]+) 個 voxel/);
     return m ? Number(m[1].replace(/,/g, '')) : 0;
   };
+  /** 右欄「長／縮」卡片：往上 1 格、套用。 */
   const grow = async () => {
-    await page.getByRole('button', { name: '長高' }).first().click();
+    await page.getByRole('tab', { name: /選取與調整/ }).click();
+    const card = page.locator('.inspector .op-card').first();
+    await card.scrollIntoViewIfNeeded();
+    await card.getByLabel('格數').fill('1');
+    await card.locator('button.ant-btn-primary').click();
     await idle();
   };
+  /** 3D 標題列的分段（改後／改前／差異）目前選哪一個。 */
+  const viewMode = () => page.locator('.ant-segmented.tb .ant-segmented-item-selected').innerText();
   const tab = (name) => page.locator('.split-tab', { has: page.locator('.split-name', { hasText: new RegExp(`^${name}$`) }) });
 
   await page.locator('.item-name', { hasText: /^Poly-Si 1$/ }).click();
@@ -74,25 +83,32 @@ const ok = (cond, msg) => {
   ok((await changed()) === b, `複本仍是 ${b}`);
 
   // 回到原始（這個 split 的帳簿釋放）；再改一次和第一次相同
-  await page.getByRole('button', { name: '回到原始' }).click();
+  await page.getByRole('tab', { name: /改了哪些/ }).click();
+  await page.getByRole('button', { name: /丟掉所有改動/ }).click();
+  await page.locator('.ant-popconfirm').getByRole('button', { name: /丟\s*掉/ }).click();
   await idle();
-  ok((await changed()) === 0, '複本回到原始：0');
+  ok((await changed()) === 0, '複本「丟掉所有改動」：0');
   await page.locator('.item-name', { hasText: /^Poly-Si 1$/ }).click();
   await grow();
-  ok((await changed()) === a, `回到原始後再長高：${a}（和第一次相同）`);
+  ok((await changed()) === a, `丟掉所有改動後再長高：${a}（和第一次相同）`);
   await tab('Split 1').click();
   await idle();
   ok((await changed()) === a2, `Split 1 不受影響：${a2}`);
 
-  // 看原始 B、差異 D 再切回
+  // 看改前 B、差異 D 再切回
+  await page.mouse.click(5, 5);
+  ok((await viewMode()).trim() === '改後', '分段停在「改後」');
   await page.keyboard.press('b');
   await idle();
+  ok((await viewMode()).trim() === '改前', 'B → 「改前」');
   await page.keyboard.press('b');
   await page.keyboard.press('d');
   await idle();
+  ok((await viewMode()).trim() === '差異', 'D → 「差異」');
   await page.keyboard.press('d');
   await idle();
-  ok((await changed()) === a2, '看原始、差異後切回，數字不變');
+  ok((await viewMode()).trim() === '改後', '再按 D 回「改後」');
+  ok((await changed()) === a2, '看改前、差異後切回，數字不變');
   ok(errors.length === 0, `沒有頁面錯誤${errors.length ? '：' + errors.join('\n') : ''}`);
   await browser.close();
 })().catch((e) => {

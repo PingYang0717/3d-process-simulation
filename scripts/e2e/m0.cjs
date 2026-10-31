@@ -123,10 +123,11 @@ const ok = (cond, msg) => {
   await closeScope();
   ok((await card().locator('.scope-line').innerText()).includes(`x ${lo}～${hi}`), '卡片「套用到」顯示自訂範圍');
   await card().getByLabel('格數').fill('1');
-  ok(/頂面|上/.test(await card().innerText()), '長／縮卡片預設往上');
   await card().locator('button.ant-btn-primary').click();
   await page.locator('.ant-message').getByText(`已套用到 x ${lo}～${hi}`).first().waitFor({ timeout: 10000 });
   ok(true, `套用訊息帶範圍「x ${lo}～${hi}」`);
+  const op0 = await page.evaluate(() => window.__ed.active.ops.at(-1));
+  ok(op0.kind === 'push' && op0.n === 1 && op0.dir.join() === '0,-1,0', `長／縮卡片預設往上 1 格（${op0.kind} dir ${op0.dir} n ${op0.n}）`);
   await page.waitForFunction(() => /已改動/.test(document.querySelector('.insp-foot')?.textContent ?? ''), null, { timeout: 30000 });
   const changed = Number((await page.locator('.insp-foot').innerText()).replace(/[^0-9]/g, ''));
   ok(changed === 2304, `只改到範圍裡的那一段（${changed} voxels）`);

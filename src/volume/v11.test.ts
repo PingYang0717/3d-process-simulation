@@ -109,7 +109,7 @@ describe('v11 筆刷', () => {
     expect(s1.L.comps[0].key).toBe(key);
     expect(s1.L.comps[0].count).toBe(s0.L.comps[0].count + 36);
     expect(replay(s0, [op], ctx).vol.data).toEqual(s1.vol.data);
-    expect(opText(op, s0.L, vol, 0.5, matName)).toContain('補平到 y = 0');
+    expect(opText(op, s0.L, vol, 0.5, matName)).toContain('方頭到 y = 0');
     // 整面（radius null）也可以
     const whole = applyOp(s0, { ...op, local: { center: [4, 0, 2], radius: null } }, ctx);
     expect(whole.vol.data).toEqual(s1.vol.data);

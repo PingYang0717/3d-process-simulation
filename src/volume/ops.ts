@@ -120,7 +120,7 @@ export function opText(input: Op | LegacyOp, L: Labeled, dims: { X: number; Y: n
   }
   if (op.kind === 'level') {
     const axis = op.dir[0] ? 'x' : op.dir[1] ? 'y' : 'z';
-    return `${who}${part}（${brush(op.local)}）補平到 ${axis} = ${op.to}（${(op.to * nmPerVoxel).toFixed(1)} nm）`;
+    return `${who}${part}（${brush(op.local)}）方頭到 ${axis} = ${op.to}（${(op.to * nmPerVoxel).toFixed(1)} nm）`;
   }
   if (op.kind === 'translate') {
     const parts = ['x', 'y', 'z']

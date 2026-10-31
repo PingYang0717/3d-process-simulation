@@ -1,5 +1,7 @@
 // M3 驗收（plan v7 §13 M3）：第一次用的人照提示三步內「三根 fin 一起補方頭」；不用滑鼠用右欄數值做到同一件事、得到相同 Op；
-// 對應到長得一樣的結構；切面右鍵選單。先 `npm run dev`，再 `node scripts/e2e/m3.cjs [url] [截圖資料夾]`
+// 對應到長得一樣的結構；切面右鍵選單。
+// plan v10：E 按兩下進 2D 剖面；浮動工具列「方頭（整根）」→「方頭／圓頭」開卡片、切「方頭」、按「套用方頭」（卡片下方寫套用到整個結構）；
+// 「選到的邊 → 往外推」→「長／縮（負＝往內）」，改成預覽 → 套用（Enter）。先 `npm run dev`，再 `node scripts/e2e/m3.cjs [url] [截圖資料夾]`
 const { chromium } = require('playwright');
 
 const url = process.argv[2] || 'http://localhost:5173';
@@ -36,16 +38,24 @@ const ok = (cond, msg) => {
     await page.mouse.up();
   };
 
-  // 三步：點「Si fin」（三根）→ E → 浮動工具列「方頭（整根）」
+  // 點「Si fin」（三根）→ E E → 浮動工具列「方頭／圓頭」→「方頭」→「套用方頭」
   await page.locator('.group-name', { hasText: 'Si fin' }).first().click();
+  await page.keyboard.press('e');
+  await page.waitForFunction(() => window.__ed.focus?.view === '3d');
   await page.keyboard.press('e');
   await page.locator('.main-slice').waitFor();
   await page.locator('.sedit-first').waitFor({ timeout: 5000 });
   ok(await page.locator('.sedit-first').isVisible(), '第一次用：左下角顯示「靠近點可以拖 · 靠近邊可以推 · 在裡面可以搬」');
-  const btn = page.locator('.float-tb').getByText(/方頭（整根）/);
+  const btn = page.locator('.float-tb').getByRole('button', { name: /方頭／圓頭/ });
   await btn.waitFor({ timeout: 5000 });
-  ok(await btn.isVisible(), '浮動工具列貼在選取旁，按鈕寫「方頭（整根）」');
+  ok(await btn.isVisible(), '浮動工具列貼在選取旁，有「方頭／圓頭」按鈕');
   await btn.click();
+  const pop = page.locator('.ant-popover:visible').filter({ has: page.locator('.op-card') });
+  await pop.waitFor();
+  await pop.locator('.ant-segmented-item', { hasText: /^方頭$/ }).click();
+  const scopeTxt = await pop.locator('.scope-line').innerText();
+  ok(/整個結構（z 0～127）/.test(scopeTxt), `方頭卡片寫「${scopeTxt.trim()}」`);
+  await pop.locator('button.ant-btn-primary', { hasText: '套用方頭' }).click();
   await idle();
   const op1 = await ed(() => window.__ed.active.ops.at(-1));
   const t1 = await ed(() => window.__ed.last.text);
@@ -71,12 +81,16 @@ const ok = (cond, msg) => {
   ok(JSON.parse(opA)?.kind === 'profile', `拖右邊往右 2 → ${JSON.parse(opA)?.kind}（${await ed(() => window.__ed.last?.text)}）`);
   await page.keyboard.press('Control+z');
   await idle();
-  // 點一下選邊 → 右欄「往外推」2 → Enter
+  // 點一下選邊 → 右欄「長／縮（負＝往內）」2 → 只有預覽 → Enter 套用
   await page.mouse.click(p0[0], p0[1]);
   await page.waitForTimeout(200);
   ok(await page.locator('.insp-body').getByText('選到的邊').isVisible(), '點邊 → 右欄出現「選到的邊」');
-  const nIn = page.locator('.insp-body .field').filter({ hasText: /往外推/ }).locator('input');
+  const edgeCard = page.locator('.insp-body .op-card').filter({ hasText: '長／縮（負＝往內）' });
+  const nIn = edgeCard.locator('input').first();
+  const hB = await ed(() => window.__ed.hist.length);
   await nIn.fill('2');
+  await page.waitForTimeout(400);
+  ok((await ed(() => window.__ed.hist.length)) === hB, '輸入數值只預覽，不直接套用');
   await nIn.press('Enter');
   await idle();
   const opB = await ed(() => JSON.stringify(window.__ed.active.ops.at(-1)));

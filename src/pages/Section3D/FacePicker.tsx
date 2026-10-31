@@ -65,6 +65,7 @@ export function FacePicker({
   onHover,
   allowed,
   size = 96,
+  pair,
 }: {
   value: Vec3 | null;
   onChange: (d: Vec3) => void;
@@ -72,8 +73,11 @@ export function FacePicker({
   /** 只開放這些方向（2D 剖面裡只有切面上的四個）；省略＝六個。 */
   allowed?: Vec3[];
   size?: number;
+  /** 軸模式（plan v11 §4.5 cd）：value 和它的對面一起亮，點任一面選那一軸。 */
+  pair?: boolean;
 }) {
   const ok = (d: Vec3) => !allowed || allowed.some((a) => same(a, d));
+  const opposite = value ? ([-value[0], -value[1], -value[2]] as Vec3) : null;
   const hover = (d: Vec3 | null) => onHover?.(d);
   return (
     <svg
@@ -86,7 +90,7 @@ export function FacePicker({
       onPointerLeave={() => hover(null)}
     >
       {FACES.map(({ d, poly, arrow }) => {
-        const on = same(value, d);
+        const on = same(value, d) || (!!pair && same(opposite, d));
         const can = ok(d);
         return (
           <Tooltip key={d.join()} title={dirLabel(d)} mouseEnterDelay={0.3}>
@@ -110,7 +114,7 @@ export function FacePicker({
         );
       })}
       {HIDDEN.map(({ d, at, text }) => {
-        const on = same(value, d);
+        const on = same(value, d) || (!!pair && same(opposite, d));
         const can = ok(d);
         return (
           <Tooltip key={d.join()} title={`${dirLabel(d)}（看不到的那一面）`} mouseEnterDelay={0.3}>

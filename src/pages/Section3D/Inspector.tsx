@@ -6,7 +6,7 @@ import { Swatch } from '../../ui/Swatch';
 import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
-import { CardShell, MaterialCard, MoveCard, PushCard, ShapeCard, wordsOf } from './OpCard';
+import { CardShell, DefectCard, MaterialCard, MoveCard, PushCard, ShapeCard, wordsOf } from './OpCard';
 import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handleOps';
 import { type DragArg, type DragMode, groupNormal, resolveNodeDrag, smoothEdgeGroup } from '../../slice/gestures';
 import type { Op } from '../../volume/ops';
@@ -252,6 +252,11 @@ export function Inspector({ ed }: { ed: Editor }) {
       <Section title="材質">
         <MaterialCard ed={ed} />
       </Section>
+      {ed.sel.size === 1 && (
+        <Section title="缺陷">
+          <DefectCard ed={ed} />
+        </Section>
+      )}
     </>
   );
 }

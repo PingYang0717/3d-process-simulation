@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D 製程模型圖解：物理意義、材質限制、缺陷實驗設計</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --ok:#15803d; --bad:#b91c1c; --bg:#fafaf9; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif; color:var(--ink); background:var(--bg); line-height:1.65; }
+  main { max-width:1080px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  h2 { font-size:20px; margin:48px 0 8px; padding-top:16px; border-top:1px solid var(--line); }
+  h3 { font-size:16px; margin:24px 0 6px; }
+  p { margin:6px 0 12px; max-width:760px; }
+  .lead { color:var(--muted); }
+  figure { margin:12px 0 4px; background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 16px 10px; }
+  figcaption { font-size:13px; color:var(--muted); margin-top:8px; }
+  .row { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px; align-items:start; }
+  .row.two { display:flex; flex-wrap:wrap; }
+  .card { min-width:0; }
+  .card svg { width:100%; height:auto; display:block; }
+  .card .t { font-size:14px; font-weight:600; margin:6px 0 0; }
+  .card .d { font-size:13px; color:var(--muted); }
+  .ok .t::before { content:"✓ "; color:var(--ok); }
+  .bad .t::before { content:"✗ "; color:var(--bad); }
+  .legend { display:flex; flex-wrap:wrap; gap:8px 16px; font-size:13px; margin:8px 0; }
+  .legend span::before { content:""; display:inline-block; width:14px; height:14px; border:1px solid #9ca3af; margin-right:6px; vertical-align:-2px; background:var(--c); }
+  .box { background:#fff; border-left:4px solid #0f766e; padding:10px 14px; border-radius:6px; margin:10px 0; max-width:760px; }
+  .box b { color:#0f766e; }
+  code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px; }
+  table { border-collapse:collapse; font-size:14px; max-width:760px; }
+  td, th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:#f3f4f6; }
+</style>
+</head>
+<body>
+<main>
+<h1>3D 製程模型圖解</h1>
+<p class="lead">一頁看懂：模型裡每一格是什麼、前段閘極與後段 via 的形狀從哪裡來、哪些變化合理、哪些物理上做不出來、以及怎麼把它排成一組實驗。</p>
+
+<!-- ================================================================ -->
+<h2>1. 模型就是「每一格貼一張材質標籤」</h2>
+<p>把晶片切成一格一格的小方塊（每格 0.5～1 nm），每格存一個整數代表材質。沒有別的隱藏資訊：沒有時間、沒有溫度、沒有應力。形狀本身就是製程留下的歷史。</p>
+<div class="legend">
+  <span style="--c:#ffffff">0 空氣</span><span style="--c:#ddd8cb">1 Si 基板</span><span style="--c:#9fd3e8">2 SiO₂（STI）</span><span style="--c:#f3b9a1">3 Si fin</span><span style="--c:#7fc8a9">4 HfO₂</span><span style="--c:#8e9aaf">5 TiN</span><span style="--c:#e8604c">6 Poly-Si</span><span style="--c:#c9b6e8">7 SiN</span><span style="--c:#1f1f1f">254 VOID</span>
+</div>
+<figure>
+  <div class="row two">
+    <div class="card" style="flex:2 1 420px" id="fig-voxel"></div>
+    <div class="card" style="flex:1 1 240px">
+      <p style="font-size:14px;margin-top:0"><b>怎麼讀這張圖</b></p>
+      <p style="font-size:13px;color:var(--muted)">這是沿閘極方向切下去的一片（看到 fin 的截面）。左邊畫數字、右邊畫顏色，兩邊是同一份資料。</p>
+      <p style="font-size:13px;color:var(--muted)">「結構」= 同材質且相連的一團格子。中間那團 6 是一根閘極，若兩根閘極碰到一起，模型就會把它們當成同一根。</p>
+      <p style="font-size:13px;color:var(--muted)">電性發生在<b>兩種顏色相鄰的那條線</b>：fin 與 HfO₂ 的介面決定電晶體怎麼開關。</p>
+    </div>
+  </div>
+  <figcaption>圖 1：體素模型的一片切面。每格一個材質編號，比例尺 1 格 = 0.5 nm。</figcaption>
+</figure>
+
+<!-- ================================================================ -->
+<h2>2. 前段（FEOL）：FinFET 閘極是怎麼長出來的</h2>
+<p>順序是：fin 立好 → 包一層 HfO₂（ALD，均勻包覆）→ 包一層 TiN → 填 Poly 蓋過 fin → CMP 削平 → 光罩＋蝕刻切成一條一條 → 兩側長 spacer。每一步只做四件事之一：沉積、蝕刻、研磨、改質。</p>
+<figure>
+  <div class="row" id="fig-feol-steps"></div>
+  <figcaption>圖 2：閘極成形的五個階段（fin 截面視角）。注意 HfO₂ 與 TiN 永遠是等厚的薄殼，因為 ALD 是保形沉積。</figcaption>
+</figure>
+
+<h3>可以怎麼變（合理的製程變異，每一個都說得出是哪一道製程偏了）</h3>
+<figure>
+  <div class="row" id="fig-feol-ok"></div>
+  <figcaption>圖 3：綠勾的都是製程真的會發生的偏差，拿來做 split 有意義。</figcaption>
+</figure>
+
+<h3>怎麼樣不行（物理上做不出來，模擬結果也沒意義）</h3>
+<figure>
+  <div class="row" id="fig-feol-bad"></div>
+  <figcaption>圖 4：紅叉的形狀違反「矽只能減、薄膜只能加、保形層等厚」其中一條。</figcaption>
+</figure>
+
+<h3>換一個方向切：閘極長度 L<sub>g</sub>（沿 fin 方向看）</h3>
+<figure>
+  <div class="row" id="fig-lg"></div>
+  <figcaption>圖 5：沿著 fin 切開，看到閘極的寬度（L<sub>g</sub>）與 spacer。L<sub>g</sub> 是最常做的 split，底部 footing 會讓實際 L<sub>g</sub> 比上面看到的長。</figcaption>
+</figure>
+
+<!-- ================================================================ -->
+<h2>3. 後段（BEOL）：via 與金屬線是「先挖洞再填」</h2>
+<p>後段的邏輯和前段相反，叫鑲嵌（damascene）：先鋪一整層 low-k 介電 → 蝕刻挖出 via 洞與溝槽 → 鋪一層很薄的 barrier（TaN／TiN）→ 電鍍銅填滿 → CMP 磨掉多餘的銅。</p>
+<div class="legend">
+  <span style="--c:#eef2ff">low-k 介電</span><span style="--c:#d08a4a">Cu</span><span style="--c:#4b3621">barrier（TaN）</span><span style="--c:#ffffff">void</span>
+</div>
+<figure>
+  <div class="row" id="fig-beol-ok"></div>
+  <figcaption>圖 6：後段合理的缺陷與變異。對位偏移與底部 CD 縮小都是「接觸面積變小 → 電阻上升」，沒蝕穿是直接開路。</figcaption>
+</figure>
+<figure>
+  <div class="row" id="fig-beol-bad"></div>
+  <figcaption>圖 7：後段不成立的形狀。銅沒有 barrier 一定會擴散進介電層，製程上不會讓它發生；孤立金屬塊與 via 比線寬都說不出是哪一道製程造成的。</figcaption>
+</figure>
+
+<!-- ================================================================ -->
+<h2>4. 怎麼排成一組實驗</h2>
+<p>核心只有一句：<b>從標稱模型出發，一次只動一個變數，其他地方一格都不變，每個條件存成一個 split。</b></p>
+<figure>
+  <div class="row two" id="fig-doe"></div>
+  <figcaption>圖 8：單變數掃描。左：L<sub>g</sub> 切 5 個點，各自是一個 split。右：下游算出來的輸出對變數的關係，斜率大的地方就是製程要盯緊的區間，開始失效的點就是製程窗口的邊界。</figcaption>
+</figure>
+<figure>
+  <div class="row two">
+    <div class="card" style="flex:1 1 380px" id="fig-matrix"></div>
+    <div class="card" style="flex:1 1 300px">
+      <p style="font-size:14px;margin-top:0"><b>缺陷實驗和變異實驗的差別</b></p>
+      <p style="font-size:13px;color:var(--muted)">變異是連續的、全域的（整根閘極都高 1 nm）。缺陷是局部的、有或沒有（只有這根 fin 上方有一片 void）。</p>
+      <p style="font-size:13px;color:var(--muted)">所以缺陷實驗的變數換成：缺陷的<b>位置</b>、<b>大小</b>、<b>個數</b>，對照組永遠是「完全沒有缺陷」的標稱模型。</p>
+      <p style="font-size:13px;color:var(--muted)">左邊是一個 3×3 矩陣：void 在閘極中央／邊緣／fin 正上方 × 厚度 1／2／3 nm，加上對照組共 10 個 split。</p>
+    </div>
+  </div>
+  <figcaption>圖 9：兩變數缺陷矩陣。每一格就是一個要匯出的模型。</figcaption>
+</figure>
+
+<div class="box">
+  <b>畫完一個形狀後的自我檢查</b><br>
+  倒推一下：這個形狀是哪一道製程做出來的？<br>
+  說得出「蝕刻多吃了 1 nm」「CMP 少磨了」「via 對位偏了 3 nm」→ 合理的變異。<br>
+  說不出來（矽自己長高、薄膜只有一側、金屬沒有 barrier 直接貼介電）→ 通常是物理上做不出來的東西，下游結果不可信。
+</div>
+
+<table>
+  <tr><th>材質</th><th>只能怎麼變</th><th>不會發生</th></tr>
+  <tr><td>單晶矽（基板、fin）</td><td>被蝕刻變小、磊晶長大</td><td>沉積出來、自己長高</td></tr>
+  <tr><td>氧化物／氮化物薄膜</td><td>沉積變厚、蝕刻變薄；熱氧化會吃掉矽</td><td>閘極氧化層消失（那是短路）、只長一側</td></tr>
+  <tr><td>Poly／金屬閘</td><td>高矮（CMP）、寬窄（蝕刻）、側壁角度</td><td>長進 fin、穿過介電層</td></tr>
+  <tr><td>後段 Cu</td><td>填滿或填不滿（void）、CMP 凹陷</td><td>沒有 barrier 直接碰 low-k</td></tr>
+</table>
+
+<script>
+// ---------- 共用：顏色 ----------
+const C = { air:'#ffffff', si:'#ddd8cb', sti:'#9fd3e8', fin:'#f3b9a1', hfo:'#7fc8a9', tin:'#8e9aaf', poly:'#e8604c', sin:'#c9b6e8', void:'#1f1f1f',
+            lowk:'#eef2ff', cu:'#d08a4a', bar:'#4b3621', line:'#374151' };
+const esc = s => s;
+const card = (svg, title, desc, cls='') => `<div class="card ${cls}">${svg}${title?`<p class="t">${title}</p>`:''}${desc?`<p class="d">${desc}</p>`:''}</div>`;
+const mark = (ok) => ok
+  ? `<circle cx="18" cy="18" r="11" fill="#dcfce7" stroke="#15803d"/><path d="M12 18 l4 4 l8 -9" fill="none" stroke="#15803d" stroke-width="2.5"/>`
+  : `<circle cx="18" cy="18" r="11" fill="#fee2e2" stroke="#b91c1c"/><path d="M13 13 l10 10 M23 13 l-10 10" stroke="#b91c1c" stroke-width="2.5"/>`;
+
+// ---------- 圖 1：體素切面 ----------
+(function(){
+  // 16 x 12 格，fin 截面
+  const W=16,H=12, cell=24;
+  const g = Array.from({length:H},()=>Array(W).fill(0));
+  for(let y=10;y<12;y++) for(let x=0;x<W;x++) g[y][x]=1;        // 基板
+  for(let y=8;y<10;y++) for(let x=0;x<W;x++) g[y][x]=2;         // STI
+  for(let y=4;y<10;y++) for(let x=7;x<9;x++) g[y][x]=3;         // fin 2 格寬
+  // HfO2 包 fin（上方與兩側 1 格）
+  for(let y=3;y<8;y++) for(let x=6;x<10;x++) if(g[y][x]===0) g[y][x]=4;
+  // TiN 再包一格
+  for(let y=2;y<8;y++) for(let x=5;x<11;x++) if(g[y][x]===0) g[y][x]=5;
+  // Poly：x 1..14, y 1..7
+  for(let y=1;y<8;y++) for(let x=1;x<15;x++) if(g[y][x]===0) g[y][x]=6;
+  // SiN cap y 0
+  for(let x=1;x<15;x++) g[0][x]=7;
+  const col = {0:C.air,1:C.si,2:C.sti,3:C.fin,4:C.hfo,5:C.tin,6:C.poly,7:C.sin};
+  let num='', pic='';
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const v=g[y][x];
+    num += `<rect x="${x*cell}" y="${y*cell}" width="${cell}" height="${cell}" fill="#fff" stroke="#e5e7eb"/><text x="${x*cell+cell/2}" y="${y*cell+cell/2+4}" font-size="11" text-anchor="middle" fill="${v?'#374151':'#d1d5db'}">${v}</text>`;
+    pic += `<rect x="${x*cell}" y="${y*cell}" width="${cell}" height="${cell}" fill="${col[v]}" stroke="#ffffff" stroke-width="0.6"/>`;
+  }
+  const gw=W*cell, gh=H*cell, gap=40;
+  const svg = `<svg viewBox="0 0 ${gw*2+gap} ${gh+46}" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(0,20)">${num}<rect width="${gw}" height="${gh}" fill="none" stroke="#9ca3af"/></g>
+    <g transform="translate(${gw+gap},20)">${pic}<rect width="${gw}" height="${gh}" fill="none" stroke="#9ca3af"/>
+      <line x1="${7*cell}" y1="${4*cell}" x2="${7*cell}" y2="${8*cell}" stroke="#b91c1c" stroke-width="2" stroke-dasharray="3 2"/>
+      <text x="${7*cell-4}" y="${6*cell}" font-size="10" fill="#b91c1c" text-anchor="end">介面</text>
+    </g>
+    <text x="${gw/2}" y="12" font-size="12" text-anchor="middle" fill="#6b7280">資料長這樣（材質編號）</text>
+    <text x="${gw+gap+gw/2}" y="12" font-size="12" text-anchor="middle" fill="#6b7280">畫出來長這樣</text>
+    <g transform="translate(${gw+gap},${gh+30})"><line x1="0" y1="0" x2="${4*cell}" y2="0" stroke="#374151" stroke-width="2"/><line x1="0" y1="-4" x2="0" y2="4" stroke="#374151"/><line x1="${4*cell}" y1="-4" x2="${4*cell}" y2="4" stroke="#374151"/><text x="${2*cell}" y="14" font-size="11" text-anchor="middle">4 格 = 2 nm</text></g>
+  </svg>`;
+  document.getElementById('fig-voxel').innerHTML = svg;
+})();
+
+// ---------- 前段：fin 截面繪圖器 ----------
+// 畫布 220 x 200。基板 y150-200，STI y120-150，fin 頂 finTop，fin 寬 finW（中心 x=110）。
+function feol(o={}){
+  const {finW=30, finTop=60, tHfo=5, tTin=5, gateTop=20, cap=12, showHfo=true, showTin=true, polyFull=true, polyLeftOnly=false,
+         hfoOneSide=false, polyIntoFin=false, stiTop=120, finRound=0, badge=null, extra=''} = o;
+  const cx=110, fl=cx-finW/2, fr=cx+finW/2;
+  let s='';
+  s += `<rect x="0" y="150" width="220" height="50" fill="${C.si}"/>`;                       // 基板
+  s += `<rect x="0" y="${stiTop}" width="220" height="${150-stiTop}" fill="${C.sti}"/>`;     // STI
+  if(polyFull){
+    s += `<rect x="25" y="${gateTop}" width="170" height="${stiTop-gateTop}" fill="${C.poly}"/>`;
+    s += `<rect x="25" y="${gateTop-cap}" width="170" height="${cap}" fill="${C.sin}"/>`;
+  }
+  const t = (showHfo?tHfo:0)+(showTin?tTin:0);
+  if(showTin) s += `<rect x="${fl-t}" y="${finTop-t}" width="${finW+2*t}" height="${stiTop-finTop+t}" fill="${C.tin}"/>`;
+  if(showHfo){
+    const th = showHfo?tHfo:0;
+    if(hfoOneSide) s += `<rect x="${fl-th}" y="${finTop-th}" width="${finW/2+th}" height="${stiTop-finTop+th}" fill="${C.hfo}"/>`;
+    else s += `<rect x="${fl-th}" y="${finTop-th}" width="${finW+2*th}" height="${stiTop-finTop+th}" fill="${C.hfo}"/>`;
+  }
+  // fin（可圓角）
+  s += `<path d="M${fl} ${stiTop+1} V${finTop+finRound} Q${fl} ${finTop} ${fl+finRound} ${finTop} H${fr-finRound} Q${fr} ${finTop} ${fr} ${finTop+finRound} V${stiTop+1} Z" fill="${C.fin}"/>`;
+  s += `<rect x="${fl}" y="${stiTop}" width="${finW}" height="31" fill="${C.fin}"/>`;       // fin 連到基板
+  if(polyIntoFin) s += `<rect x="${fl+8}" y="${finTop}" width="${finW-16}" height="25" fill="${C.poly}"/>`;
+  s += extra;
+  s += `<rect x="0.5" y="0.5" width="219" height="199" fill="none" stroke="#d1d5db"/>`;
+  if(badge!==null) s += mark(badge);
+  return `<svg viewBox="0 0 220 200" xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+}
+const dim = (x1,y1,x2,y2,label,dx=0,dy=-4) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#111827" stroke-width="1.2" marker-start="url(#a)" marker-end="url(#a)"/><text x="${(x1+x2)/2+dx}" y="${(y1+y2)/2+dy}" font-size="11" text-anchor="middle" fill="#111827">${label}</text>`;
+
+// 圖 2：成形階段
+document.getElementById('fig-feol-steps').innerHTML = [
+  card(feol({polyFull:false, showHfo:false, showTin:false}), '① fin 立好', 'fin 是從基板蝕刻出來的，STI 填在中間再回蝕。'),
+  card(feol({polyFull:false, showTin:false}), '② ALD 長 HfO₂', '薄殼，上下左右一樣厚。'),
+  card(feol({polyFull:false}), '③ ALD 長 TiN', '又一層等厚薄殼，厚度決定 Vt。'),
+  card(feol({gateTop:5, cap:0}), '④ 填 Poly、CMP 削平', '蓋過 fin 後磨到目標高度。'),
+  card(feol({}), '⑤ 蝕刻成條、加 SiN cap', '這是標稱模型。'),
+].join('');
+
+// 圖 3：可以
+document.getElementById('fig-feol-ok').innerHTML = [
+  card(feol({badge:true}), '標稱', '對照組。', 'ok'),
+  card(feol({gateTop:8, badge:true, extra:`<line x1="200" y1="8" x2="200" y2="20" stroke="#15803d" stroke-width="2"/><text x="203" y="17" font-size="10" fill="#15803d">+</text>`}), '閘極偏高', 'CMP 少磨了。閘極電阻、寄生電容跟著變。', 'ok'),
+  card(feol({gateTop:36, badge:true}), '閘極偏矮', 'CMP 多磨或 recess 過頭。fin 露出的有效高度不變，但上方餘量變少。', 'ok'),
+  card(feol({finW:40, badge:true}), 'fin 變寬', 'fin 蝕刻偏差。通道變寬，短通道控制變差。', 'ok'),
+  card(feol({finRound:10, badge:true}), 'fin 頂角圓化', '蝕刻與清洗留下的。角落電場分布改變。', 'ok'),
+  card(feol({tTin:9, badge:true}), 'TiN 偏厚', 'ALD 循環數偏多。直接改 Vt。', 'ok'),
+].join('');
+
+// 圖 4：不行
+document.getElementById('fig-feol-bad').innerHTML = [
+  card(feol({showHfo:false, showTin:false, badge:false}), 'Poly 直接碰 fin', '沒有閘極介電層。這不是變異，是短路。', 'bad'),
+  card(feol({polyIntoFin:true, badge:false}), 'Poly 長進 fin', '沉積只蓋在表面，不會取代單晶矽。', 'bad'),
+  card(feol({hfoOneSide:true, badge:false}), 'HfO₂ 只有一側', 'ALD 是保形的，不會只長半邊。', 'bad'),
+  card(feol({finTop:40, badge:false, extra:`<text x="110" y="34" font-size="10" text-anchor="middle" fill="#b91c1c">fin 自己長高？</text>`}), 'fin 比標稱高', '矽只能被蝕刻變小，除非是磊晶，否則不會長高。', 'bad'),
+].join('');
+
+// ---------- 圖 5：沿 fin 方向切（Lg） ----------
+function lgcut(o={}){
+  const {Lg=50, foot=0, spacer=14, badge=null, label=true} = o;
+  const cx=110, gTop=50, gBot=130;
+  let s='';
+  s += `<defs><marker id="a" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto-start-reverse"><path d="M0 0 L6 3 L0 6 Z" fill="#111827"/></marker></defs>`;
+  s += `<rect x="0" y="150" width="220" height="50" fill="${C.si}"/>`;
+  s += `<rect x="0" y="130" width="220" height="20" fill="${C.fin}"/>`;             // fin（沿著切）
+  s += `<rect x="0" y="125" width="220" height="5" fill="${C.hfo}"/>`;
+  // 閘極（可 footing：底部外擴）
+  const l=cx-Lg/2, r=cx+Lg/2;
+  s += `<path d="M${l} ${gTop} H${r} V${gBot-20} L${r+foot} ${gBot} H${l-foot} V${gBot-20} Z" fill="${C.poly}"/>`;
+  s += `<rect x="${l}" y="${gTop-12}" width="${Lg}" height="12" fill="${C.sin}"/>`;
+  s += `<rect x="${l-spacer}" y="${gTop-12}" width="${spacer}" height="${gBot-gTop+12-5}" fill="${C.sin}" opacity="0.8"/>`;
+  s += `<rect x="${r}" y="${gTop-12}" width="${spacer}" height="${gBot-gTop+12-5}" fill="${C.sin}" opacity="0.8"/>`;
+  // S/D 標示
+  s += `<text x="30" y="143" font-size="11" fill="#7c2d12">源極</text><text x="172" y="143" font-size="11" fill="#7c2d12">汲極</text>`;
+  if(label) s += dim(l, 40, r, 40, `L<tspan baseline-shift="sub" font-size="8">g</tspan> ${Lg/2.5|0} nm`, 0, -5);
+  if(foot) s += dim(l-foot, 140, r+foot, 140, `實際 ${((Lg+2*foot)/2.5)|0} nm`, 0, 12);
+  s += `<rect x="0.5" y="0.5" width="219" height="199" fill="none" stroke="#d1d5db"/>`;
+  if(badge!==null) s += mark(badge);
+  return `<svg viewBox="0 0 220 200" xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+}
+document.getElementById('fig-lg').innerHTML = [
+  card(lgcut({}), '標稱 L<sub>g</sub>', '閘極兩側是 spacer，再外面是源汲極。'),
+  card(lgcut({Lg:40, badge:true}), 'L<sub>g</sub> 偏短', '曝光或蝕刻偏差。漏電上升、Vt 下降。', 'ok'),
+  card(lgcut({Lg:60, badge:true}), 'L<sub>g</sub> 偏長', '驅動電流下降。', 'ok'),
+  card(lgcut({foot:10, badge:true}), '底部 footing', '蝕刻非等向性不夠。上面看 20 nm，實際控制通道的是 28 nm。', 'ok'),
+  card(lgcut({spacer:6, badge:true}), 'spacer 偏薄', '源汲極離通道更近，寄生電容與短通道效應改變。', 'ok'),
+].join('');
+
+// ---------- 後段：via 繪圖器 ----------
+function via(o={}){
+  const {dx=0, bottomShrink=0, voidR=0, barrier=true, underEtch=0, badge=null, extraTop='', viaW=24, m2=true} = o;
+  const cx=110; let s='';
+  s += `<rect x="0" y="0" width="220" height="200" fill="${C.lowk}"/>`;
+  // M1
+  const m1 = {x:60,y:150,w:100,h:30};
+  const strokeB = barrier ? `stroke="${C.bar}" stroke-width="3"` : `stroke="#b91c1c" stroke-width="1" stroke-dasharray="3 2"`;
+  s += `<rect x="${m1.x}" y="${m1.y}" width="${m1.w}" height="${m1.h}" fill="${C.cu}" ${strokeB}/>`;
+  s += `<rect x="${m1.x}" y="${m1.y}" width="${m1.w}" height="2" fill="${C.lowk}"/>`; // 上緣不畫 barrier（CMP 面）
+  // via + M2 作為一個多邊形（dual damascene）
+  const vl=cx+dx-viaW/2, vr=cx+dx+viaW/2, vb=150-underEtch;
+  const m2l=40, m2r=180, m2t=60, m2b=90;
+  let path;
+  if(m2) path = `M${m2l} ${m2t} H${m2r} V${m2b} H${vr} L${vr-bottomShrink} ${vb} H${vl+bottomShrink} L${vl} ${m2b} H${m2l} Z`;
+  else path = `M${vl} ${m2b} H${vr} L${vr-bottomShrink} ${vb} H${vl+bottomShrink} L${vl} ${m2b} Z`;
+  s += `<path d="${path}" fill="${C.cu}" ${strokeB}/>`;
+  s += `<rect x="${m2l-2}" y="${m2t-2}" width="${m2r-m2l+4}" height="3" fill="${C.lowk}"/>`;
+  if(underEtch) s += `<rect x="${vl+bottomShrink-2}" y="${vb}" width="${viaW-2*bottomShrink+4}" height="${underEtch}" fill="${C.lowk}" stroke="#b91c1c" stroke-dasharray="2 2"/><text x="${cx+dx}" y="${vb+underEtch+12}" font-size="10" text-anchor="middle" fill="#b91c1c">留了一層介電 → 開路</text>`;
+  if(voidR) s += `<ellipse cx="${cx+dx}" cy="118" rx="${voidR*0.5}" ry="${voidR}" fill="#fff" stroke="#9ca3af"/>`;
+  if(dx) s += dim(cx, 185, cx+dx, 185, `偏移 ${Math.abs(dx)/2.5|0} nm`, 0, 12);
+  s += `<text x="8" y="172" font-size="11" fill="#1f2937">M1</text><text x="8" y="80" font-size="11" fill="#1f2937">M2</text><text x="${cx+dx+viaW/2+4}" y="122" font-size="10" fill="#1f2937">via</text>`;
+  s += extraTop;
+  s += `<rect x="0.5" y="0.5" width="219" height="199" fill="none" stroke="#d1d5db"/>`;
+  if(badge!==null) s += mark(badge);
+  return `<svg viewBox="0 0 220 200" xmlns="http://www.w3.org/2000/svg"><defs><marker id="a" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto-start-reverse"><path d="M0 0 L6 3 L0 6 Z" fill="#111827"/></marker></defs>${s}</svg>`;
+}
+document.getElementById('fig-beol-ok').innerHTML = [
+  card(via({badge:true}), '標稱', 'via 正對 M1，barrier 包住所有銅。', 'ok'),
+  card(via({dx:16, badge:true}), 'via 對位偏移', '曝光對準偏差。接觸面積變小、電阻上升；偏到 M1 外面就是開路。', 'ok'),
+  card(via({bottomShrink:7, badge:true}), '底部 CD 縮小', '蝕刻側壁太斜。同樣是接觸面積變小。', 'ok'),
+  card(via({voidR:14, badge:true}), '銅填充 void', '深寬比太高填不滿。截面積減少，電遷移壽命變差。', 'ok'),
+  card(via({underEtch:8, badge:true}), 'via 沒蝕穿', '蝕刻時間不足。這是直接開路的缺陷。', 'ok'),
+].join('');
+document.getElementById('fig-beol-bad').innerHTML = [
+  card(via({barrier:false, badge:false}), '銅沒有 barrier', '銅會擴散進 low-k。製程一定先鋪 barrier，模型少了它，可靠度結果不可信。', 'bad'),
+  card(via({viaW:140, badge:false}), 'via 比金屬線還寬', '設計規則就不允許，也沒有光罩會這樣開。', 'bad'),
+  card(via({badge:false, extraTop:`<rect x="20" y="110" width="18" height="14" fill="${C.cu}" stroke="${C.bar}" stroke-width="2"/><text x="29" y="105" font-size="10" text-anchor="middle" fill="#b91c1c">？</text>`}), '介電層裡憑空一塊金屬', '說不出是哪道製程放的。除非是刻意模擬的顆粒缺陷。', 'bad'),
+].join('');
+
+// ---------- 圖 8：DOE ----------
+(function(){
+  const pts = [40,45,50,55,60];
+  const left = `<div style="display:flex;gap:6px">${pts.map((L,i)=>`<div style="flex:1"><div style="font-size:11px;text-align:center;color:#6b7280">split ${i+1}</div>${lgcut({Lg:L,label:false}).replace('<svg','<svg style="width:100%;height:auto"')}<div style="font-size:11px;text-align:center">L<sub>g</sub> ${L/2.5|0} nm</div></div>`).join('')}</div>`;
+  // 右：Vt vs Lg 示意曲線
+  const W=320,H=200, x0=50,y0=160;
+  const xs = pts.map((L,i)=>x0+i*60);
+  const vt = [0.18,0.30,0.36,0.39,0.40].map(v=>y0-(v/0.45)*120);
+  let chart = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    <line x1="${x0}" y1="${y0}" x2="${W-10}" y2="${y0}" stroke="#374151"/><line x1="${x0}" y1="${y0}" x2="${x0}" y2="20" stroke="#374151"/>
+    <text x="${W/2+20}" y="${H-8}" font-size="11" text-anchor="middle">L<tspan baseline-shift="sub" font-size="8">g</tspan>（nm）</text>
+    <text x="14" y="90" font-size="11" transform="rotate(-90 14 90)" text-anchor="middle">V<tspan baseline-shift="sub" font-size="8">t</tspan></text>
+    <rect x="${x0}" y="20" width="${xs[1]-x0+10}" height="${y0-20}" fill="#fee2e2" opacity="0.6"/>
+    <text x="${x0+30}" y="34" font-size="10" fill="#b91c1c">失效區</text>
+    <path d="M${xs.map((x,i)=>`${x} ${vt[i]}`).join(' L')}" fill="none" stroke="#0f766e" stroke-width="2"/>
+    ${xs.map((x,i)=>`<circle cx="${x}" cy="${vt[i]}" r="4" fill="#0f766e"/><text x="${x}" y="${y0+14}" font-size="10" text-anchor="middle">${pts[i]/2.5|0}</text>`).join('')}
+    <line x1="${xs[1]+10}" y1="20" x2="${xs[1]+10}" y2="${y0}" stroke="#b91c1c" stroke-dasharray="4 3"/>
+    <text x="${xs[1]+14}" y="${y0-6}" font-size="10" fill="#b91c1c">製程窗口邊界</text>
+    <text x="${xs[3]}" y="${vt[3]-12}" font-size="10" fill="#0f766e" text-anchor="middle">這一段不敏感</text>
+  </svg>`;
+  document.getElementById('fig-doe').innerHTML = `<div class="card" style="flex:3 1 480px">${left}<p class="d">每一張都從標稱複製出來，只改 L<sub>g</sub>，其他一格不動。</p></div><div class="card" style="flex:2 1 300px">${chart}<p class="d">下游（電性模擬或模型）對每個 split 算一個輸出，畫成曲線。</p></div>`;
+})();
+
+// ---------- 圖 9：缺陷矩陣 ----------
+(function(){
+  const pos = ['閘極中央','閘極邊緣','fin 正上方'];
+  const thk = [1,2,3];
+  const cellW=110, cellH=86;
+  let s = `<svg viewBox="0 0 ${cellW*3+90} ${cellH*3+60}" xmlns="http://www.w3.org/2000/svg">`;
+  s += `<text x="${90+cellW*1.5}" y="16" font-size="12" text-anchor="middle" fill="#374151">void 厚度</text>`;
+  thk.forEach((t,j)=> s += `<text x="${90+cellW*j+cellW/2}" y="36" font-size="12" text-anchor="middle">${t} nm</text>`);
+  pos.forEach((p,i)=>{
+    s += `<text x="80" y="${50+cellH*i+cellH/2+4}" font-size="12" text-anchor="end">${p}</text>`;
+    thk.forEach((t,j)=>{
+      const x=90+cellW*j, y=50+cellH*i;
+      // 小剖面：poly 塊、fin、void
+      s += `<rect x="${x}" y="${y}" width="${cellW-6}" height="${cellH-6}" fill="#fff" stroke="#d1d5db"/>`;
+      s += `<rect x="${x+8}" y="${y+40}" width="${cellW-22}" height="24" fill="${C.sti}"/>`;
+      s += `<rect x="${x+44}" y="${y+24}" width="16" height="40" fill="${C.fin}"/>`;
+      s += `<rect x="${x+8}" y="${y+10}" width="${cellW-22}" height="30" fill="${C.poly}"/>`;
+      s += `<rect x="${x+44}" y="${y+22}" width="16" height="18" fill="${C.fin}"/>`;
+      const vx = i===0 ? x+30 : i===1 ? x+10 : x+44;
+      const vw = i===2 ? 16 : 22;
+      s += `<rect x="${vx}" y="${y+22}" width="${vw}" height="${t*2}" fill="${C.void}"/>`;
+      s += `<text x="${x+cellW-12}" y="${y+cellH-12}" font-size="9" fill="#6b7280" text-anchor="end">split ${i*3+j+1}</text>`;
+    });
+  });
+  s += `<text x="90" y="${cellH*3+56}" font-size="11" fill="#6b7280">＋ 對照組：標稱模型（沒有 void）</text>`;
+  s += `</svg>`;
+  document.getElementById('fig-matrix').innerHTML = s;
+})();
+</script>
+</main>
+</body>
+</html>

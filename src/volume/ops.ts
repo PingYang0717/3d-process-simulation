@@ -57,6 +57,8 @@ export interface EditState {
    * 主執行緒的狀態都有；純函式（applyOp／replay）不看它，結果也不帶。
    */
   version?: number;
+  /** 這份內容在哪一本帳簿（plan v9 §4.1）：'base'＝原始（省略同義），否則是 split id。 */
+  owner?: string;
 }
 
 export interface OpContext {

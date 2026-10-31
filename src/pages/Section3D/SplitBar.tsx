@@ -81,14 +81,15 @@ export function SplitBar({
                   trigger={['click']}
                   menu={{
                     items: [
-                      { key: 'rename', icon: <EditOutlined />, label: '重新命名', onClick: () => startRename(s) },
-                      { key: 'dup', icon: <CopyOutlined />, label: '複製這個 split', onClick: () => ed.duplicateSplit(s.id) },
+                      { key: 'rename', icon: <EditOutlined />, label: '重新命名', onClick: ({ domEvent }) => (domEvent.stopPropagation(), startRename(s)) },
+                      // 選單在 portal 裡，點擊仍會冒泡到頁籤的 onClick（又切回這個 split），所以要擋
+                      { key: 'dup', icon: <CopyOutlined />, label: '複製這個 split', onClick: ({ domEvent }) => (domEvent.stopPropagation(), ed.duplicateSplit(s.id)) },
                       {
                         key: 'del',
                         icon: <DeleteOutlined />,
                         label: '刪除',
                         danger: true,
-                        onClick: () => confirmRemove(s),
+                        onClick: ({ domEvent }) => (domEvent.stopPropagation(), confirmRemove(s)),
                       },
                     ],
                   }}

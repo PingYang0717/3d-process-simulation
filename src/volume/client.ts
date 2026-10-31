@@ -38,19 +38,20 @@ export function call<K extends Kind>(type: K, req: Requests[K]['req'], transfer:
   });
 }
 
-// ---- 常駐狀態：版本號（version）＝ Worker 裡的編號（sid） ----
+// ---- 常駐狀態：版本號（version）＝ Worker 裡的編號（sid）；帳簿（owner）＝一個 split 的那一份陣列 ----
 // 版本號全域單調遞增：每個新的體素狀態（載入、每一步的結果）拿一個新號碼；改名、改色不換號碼。
-// 以前用陣列身分當 key；之後補丁式更新會原地改陣列，所以改用版本號（plan v7 §8.1）。
+// plan v9 §4.2：Worker 每個 owner 只有一份陣列（原地貼補丁），heads 記主執行緒認為它現在是哪一版。
 
-const resident = new Set<number>();
-/** 已送出、結果還沒回來的編號；retain 時要一起留著。 */
-const inflight = new Set<number>();
+const heads = new Map<string, number>();
 let nextVersion = 1;
 /** 沒帶版本號的狀態（測試、舊程式碼）退回用陣列身分配號。 */
 const fallback = new WeakMap<Uint8Array, number>();
 
 /** 下一個版本號。 */
 export const newVersion = () => nextVersion++;
+
+/** 狀態在哪一本帳簿。 */
+export const ownerOf = (s: Pick<EditState, 'owner'>) => s.owner ?? 'base';
 
 /** 狀態的版本號（＝ Worker 裡的 sid）。 */
 export function sidOf(s: Pick<EditState, 'vol' | 'version'>) {
@@ -63,64 +64,84 @@ export function sidOf(s: Pick<EditState, 'vol' | 'version'>) {
   return id;
 }
 
-/** 確保 Worker 有這個狀態；沒有就補送（只有復原回來的舊步驟會走到）。 */
+/** 測試用：主執行緒認為每本帳簿現在是哪一版。 */
+export const headsOf = () => new Map(heads);
+
+/**
+ * 確保 Worker 的帳簿正好是 s（s 必須是主執行緒這本帳簿目前的內容）；對不上就補送（保險，理論上不會發生）。
+ * 只在改帳簿的路徑（apply／derive／fork／replay）之前呼叫；畫面的請求直接送 sidOf，過期的由 Worker 回錯誤、丟掉。
+ */
 export function ensure(s: EditState) {
   const id = sidOf(s);
-  if (!resident.has(id) && !inflight.has(id)) {
-    resident.add(id);
-    call('put', { sid: id, vol: s.vol, labels: s.L.labels });
+  const owner = ownerOf(s);
+  if (heads.get(owner) !== id) {
+    heads.set(owner, id);
+    call('put', { owner, sid: id, vol: s.vol, labels: s.L.labels });
   }
   return id;
 }
 
-/** 載入新的原始陣列：Worker 標記結構，之前的狀態全部丟掉。回傳的 version 是原始的版本號。 */
+/** 載入新的原始陣列：Worker 標記結構，之前的帳簿全部丟掉。回傳的 version 是原始的版本號。 */
 export async function loadOrig(vol: EditState['vol']) {
   const sid = newVersion();
-  resident.clear();
-  inflight.clear();
-  resident.add(sid);
+  heads.clear();
+  heads.set('base', sid);
   const r = await call('load', { sid, vol });
   return { ...r, version: sid };
 }
 
-/** 在 Worker 裡從 from 重播 ops，結果留在 Worker（新的版本號），複本回到主執行緒。 */
-export async function replayIn(from: EditState, req: Omit<Requests['replay']['req'], 'from' | 'to' | 'comps'>) {
+/** 開新帳簿 owner：複製 from 的那一本（Worker 端整陣列複製一次）。sid＝新帳簿的版本號（省略＝和 from 相同）。 */
+export function forkIn(owner: string, from: EditState, sid = sidOf(from)) {
+  ensure(from);
+  heads.set(owner, sid);
+  return call('fork', { owner, src: ownerOf(from), sid });
+}
+
+/** 釋放帳簿。 */
+export function dropOwners(owners: string[]) {
+  if (!owners.length) return;
+  for (const o of owners) heads.delete(o);
+  void call('drop', { owners }).catch(() => {});
+}
+
+/** 在 Worker 裡從 from 複製出 owner、重播 ops，結果留在 Worker（新的版本號），複本回到主執行緒。 */
+export async function replayIn(owner: string, from: EditState, req: Omit<Requests['replay']['req'], 'owner' | 'src' | 'from' | 'to' | 'comps'>) {
   const fromId = ensure(from);
   const to = newVersion();
-  inflight.add(to);
+  heads.delete(owner);
+  const r = await call('replay', { ...req, owner, src: ownerOf(from), from: fromId, to, comps: from.L.comps });
+  heads.set(owner, to);
+  return { ...r, version: to };
+}
+
+/** 一步操作在 Worker 裡原地算（§4.3）：from.owner 的帳簿前進到新版本號，回傳補丁與報告。 */
+export async function applyIn(from: EditState, req: Omit<Requests['apply']['req'], 'owner' | 'from' | 'to' | 'comps'>) {
+  const owner = ownerOf(from);
+  const fromId = ensure(from);
+  const to = newVersion();
   try {
-    const r = await call('replay', { ...req, from: fromId, to, comps: from.L.comps });
-    resident.add(to);
+    const r = await call('apply', { ...req, owner, from: fromId, to, comps: from.L.comps });
+    heads.set(owner, r.step.data ? to : fromId);
     return { ...r, version: to };
-  } finally {
-    inflight.delete(to);
+  } catch (e) {
+    // Worker 的帳簿狀態不明：主執行緒還沒貼，內容仍是 from，補送回去
+    heads.delete(owner);
+    ensure(from);
+    throw e;
   }
 }
 
-/** 只留這些狀態在 Worker（原始一定留著）；復原用的舊步驟之後要用再補送。 */
-export function retain(states: EditState[]) {
-  const keep = new Set(states.map(sidOf));
-  for (const id of resident) if (!keep.has(id)) resident.delete(id);
-  call('retain', { sids: [...keep, ...inflight] });
-}
-
-/** 一步操作在 Worker 裡只算外框（§8.2）：結果留在 Worker（新版本號），回傳補丁與報告。 */
-export async function applyIn(from: EditState, req: Omit<Requests['apply']['req'], 'from' | 'to' | 'comps'>) {
-  const fromId = ensure(from);
-  const to = newVersion();
-  inflight.add(to);
-  try {
-    const r = await call('apply', { ...req, from: fromId, to, comps: from.L.comps });
-    resident.add(to);
-    return { ...r, version: to };
-  } finally {
-    inflight.delete(to);
-  }
-}
-
-/** 復原／重做：Worker 從 from 套補丁做出 to（to 通常是以前的版本號，內容相同）。 */
+/**
+ * 復原／重做：Worker 的帳簿從 from 原地套補丁成為 to（to 通常是以前的版本號，內容相同）。
+ * 必須在主執行緒原地貼之前呼叫（ensure 可能要補送 from 的內容）。
+ */
 export function deriveIn(from: EditState, to: number, step: Step, dir: 'fwd' | 'back') {
+  const owner = ownerOf(from);
   const fromId = ensure(from);
-  resident.add(to);
-  return call('derive', { from: fromId, to, step, dir });
+  heads.set(owner, to);
+  return call('derive', { owner, from: fromId, to, step, dir }).catch((e) => {
+    // Worker 沒跟上：下一次 ensure 會補送主執行緒的內容
+    if (heads.get(owner) === to) heads.delete(owner);
+    throw e;
+  });
 }

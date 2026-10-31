@@ -77,22 +77,56 @@ export interface Step {
 }
 
 /**
- * 從 s 套一步補丁做出下一個狀態（新的陣列，s 不變）。dir 'back' = 復原（貼 before、編號反查）。
+ * 原地套一步補丁（plan v9 §4.1）：data／labels 直接改，不影印整個陣列。dir 'back' = 復原（貼 before、編號反查）。
+ * 回傳新的 comps（labels 補丁為 null 時回傳 null，表示 comps 不變）。
+ */
+export function applyStepInPlace(dims: Dims, data: Uint8Array, labels: Int32Array, step: Step, dir: 'fwd' | 'back' = 'fwd'): Comp[] | null {
+  if (step.data) pasteArr(data, dims, step.data.box, dir === 'fwd' ? step.data.after : step.data.before);
+  const lp = step.labels;
+  if (!lp) return null;
+  if (dir === 'fwd') for (const m of lp.moves) moveLabel(labels, dims, m.box, m.from, m.to);
+  else for (let k = lp.moves.length - 1; k >= 0; k--) moveLabel(labels, dims, lp.moves[k].box, lp.moves[k].to, lp.moves[k].from);
+  pasteArr(labels, dims, lp.box, dir === 'fwd' ? lp.after : lp.before);
+  return dir === 'fwd' ? lp.compsAfter : lp.compsBefore;
+}
+
+/**
+ * 從 s 套一步補丁做出下一個狀態（新的陣列，s 不變）：applyStepInPlace 的純函式包裝，留給測試與對照。
  */
 export function applyStep(s: { vol: Volume; L: Labeled }, step: Step, dir: 'fwd' | 'back' = 'fwd'): { vol: Volume; L: Labeled } {
   const dims = s.vol;
-  const data = s.vol.data.slice();
-  if (step.data) pasteArr(data, dims, step.data.box, dir === 'fwd' ? step.data.after : step.data.before);
-  let L = s.L;
-  const lp = step.labels;
-  if (lp) {
-    const labels = s.L.labels.slice();
-    if (dir === 'fwd') for (const m of lp.moves) moveLabel(labels, dims, m.box, m.from, m.to);
-    else for (const m of [...lp.moves].reverse()) moveLabel(labels, dims, m.box, m.to, m.from);
-    pasteArr(labels, dims, lp.box, dir === 'fwd' ? lp.after : lp.before);
-    L = { labels, comps: dir === 'fwd' ? lp.compsAfter : lp.compsBefore };
-  }
-  return { vol: { X: dims.X, Y: dims.Y, Z: dims.Z, data }, L };
+  const data = step.data ? s.vol.data.slice() : s.vol.data;
+  const labels = step.labels ? s.L.labels.slice() : s.L.labels;
+  const comps = applyStepInPlace(dims, data, labels, step, dir);
+  return { vol: { X: dims.X, Y: dims.Y, Z: dims.Z, data }, L: comps ? { labels, comps } : s.L };
+}
+
+/**
+ * 補丁在 R 裡對 diff（和原始不同的格子）與材質體積帳的差量更新（plan v9 §4.4）：O(補丁)。
+ * data 是已經貼好補丁的陣列；回傳新的 diff 計數。
+ */
+export function carryStepStats(dims: Dims, data: Uint8Array, orig: Uint8Array, diff: Uint8Array, diffCount: number, counts: Float64Array, step: Step, dir: 'fwd' | 'back' = 'fwd') {
+  const p = step.data;
+  if (!p) return diffCount;
+  const { box } = p;
+  const was = dir === 'fwd' ? p.before : p.after;
+  const W = box.x1 - box.x0 + 1;
+  let k = 0;
+  for (let z = box.z0; z <= box.z1; z++)
+    for (let y = box.y0; y <= box.y1; y++) {
+      const row = (z * dims.Y + y) * dims.X + box.x0;
+      for (let i = row, e = row + W; i < e; i++, k++) {
+        const now = data[i];
+        const old = was[k];
+        if (now === old) continue;
+        counts[old]--;
+        counts[now]++;
+        const d = now !== orig[i] ? 1 : 0;
+        diffCount += d - diff[i];
+        diff[i] = d;
+      }
+    }
+  return diffCount;
 }
 
 /** 補丁佔多少位元組（復原堆疊的記憶體估算）。 */

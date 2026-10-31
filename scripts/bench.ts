@@ -1,6 +1,8 @@
 // Worker 核心的速度（plan v7 §8.6）：一步操作「只在外框裡算＋relabel 吃外框＋重算碰到的 chunk」對照舊的整個陣列重播。
 // 用法：npx vite-node scripts/bench.ts [scale ...]（預設 1 2 3）
 //       npx vite-node scripts/bench.ts drag [scale ...]：拖拉中每一幀主執行緒做的事（plan v8 §7.2、§8.4）
+//       npx vite-node scripts/bench.ts step [scale ...]：一步的全流程（plan v9 §2）：Worker 原地 apply、主執行緒貼補丁、
+//         chunk、整陣列複製位元組；mem [scale ...]：連做 50 步後的記憶體增量 vs 補丁總量
 import { MATERIALS, demoVolume, greedyMesh, initialLabeled } from '../src/volume/volume';
 import { type EditState, type Op, applyOp, matNameOf } from '../src/volume/ops';
 import { applyOpLocal } from '../src/volume/apply';
@@ -16,8 +18,75 @@ import { opOfGesture, sliceContext } from '../src/pages/Section3D/handleOps';
 const matName = matNameOf(MATERIALS);
 const ms = (t: number) => `${(performance.now() - t).toFixed(0)} ms`;
 const args = process.argv.slice(2);
-const dragMode = args[0] === 'drag';
-const scales = (dragMode ? args.slice(1) : args).length ? (dragMode ? args.slice(1) : args).map(Number) : [1, 2, 3];
+const mode = ['drag', 'step', 'mem', 'draw'].includes(args[0]) ? args[0] : 'old';
+const dragMode = mode === 'drag';
+const rest = mode === 'old' ? args : args.slice(1);
+const scales = rest.length ? rest.map(Number) : [1, 2, 3];
+
+// 整陣列複製計數器（只在 bench 開）：長度 ≥ minCopy 的 typed array .slice() 都算
+let copied = 0;
+let minCopy = Infinity;
+for (const T of [Uint8Array, Int32Array, Float64Array, Float32Array, Uint16Array] as unknown as { prototype: { slice: (...a: number[]) => ArrayLike<number> & { byteLength: number } } }[]) {
+  const orig = T.prototype.slice;
+  T.prototype.slice = function (this: { length: number }, ...a: number[]) {
+    const out = orig.apply(this, a);
+    if (this.length >= minCopy) copied += out.byteLength;
+    return out;
+  } as typeof orig;
+}
+const mb = (n: number) => `${(n / 2 ** 20).toFixed(1)} MB`;
+
+/** 一步的全流程（plan v9 §2）：Worker 原地 apply → 主執行緒原地貼補丁＋差量 diff → chunk（只回髒的）。 */
+async function benchStep(scale: number, steps: number) {
+  const core = await import('../src/volume/workerCore');
+  const { applyStepInPlace, carryStepStats, stepBytes } = await import('../src/volume/patch');
+  const vol = demoVolume(scale);
+  const N = vol.data.length;
+  const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
+  const hidden = new Uint8Array(256);
+  const palette = new Float32Array(768).fill(0.5);
+  const [ld] = core.handle('load', { sid: 1, vol }) as [{ labels: Int32Array; raw: unknown[] }, unknown];
+  const L = initialLabeled(vol, matName);
+  minCopy = N;
+  copied = 0;
+  // own：主執行緒與 Worker 各複製一次（唯一的整陣列複製）
+  core.handle('fork', { owner: 's1', src: 'base', sid: 1 });
+  const buf = { data: vol.data.slice(), labels: ld.labels.slice(), diff: new Uint8Array(N), diffCount: 0, counts: new Float64Array(256) };
+  console.log(`\n範例 ×${scale}（${(N / 1e6).toFixed(1)} M voxels）：own（主執行緒＋Worker 各一份）複製 ${mb(copied)}`);
+  let comps = L.comps;
+  const poly = comps.find((c) => c.mat === 6)!;
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  let sid = 1;
+  let shown = 1;
+  core.handle('chunks', { sid, key: 'k', hidden, diff: true, palette });
+  const mem0 = process.memoryUsage();
+  let patch = 0;
+  const rows: string[] = [];
+  for (let k = 0; k < steps; k++) {
+    copied = 0;
+    const op: Op = { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: k % 2 ? -1 : 1, follow: true, backfill: 'orig' };
+    let t = performance.now();
+    const [r] = core.handle('apply', { owner: 's1', from: sid, to: sid + 1, comps, op, matNames, keyCounter: 1000 + k * 10 }) as [{ step: import('../src/volume/patch').Step }, unknown];
+    const tApply = performance.now() - t;
+    if (!r.step.data) continue;
+    sid++;
+    t = performance.now();
+    comps = applyStepInPlace(vol, buf.data, buf.labels, r.step, 'fwd') ?? comps;
+    buf.diffCount = carryStepStats(vol, buf.data, vol.data, buf.diff, buf.diffCount, buf.counts, r.step, 'fwd');
+    const tMain = performance.now() - t;
+    t = performance.now();
+    const [ch] = core.handle('chunks', { sid, key: 'k', hidden, diff: true, palette, base: shown }) as [{ items: unknown[] }, unknown];
+    shown = sid;
+    const tChunks = performance.now() - t;
+    patch += stepBytes(r.step);
+    if (k < 10) rows.push(`  第 ${k + 1} 步：Worker apply ${tApply.toFixed(0)} ms｜主執行緒貼補丁＋diff ${tMain.toFixed(1)} ms｜chunk ${ch.items.length} 個 ${tChunks.toFixed(0)} ms｜整陣列複製 ${mb(copied)}`);
+  }
+  console.log(rows.join('\n'));
+  const mem1 = process.memoryUsage();
+  const grew = mem1.heapUsed + mem1.arrayBuffers - mem0.heapUsed - mem0.arrayBuffers;
+  if (steps > 10) console.log(`  ${steps} 步後記憶體增量 ${mb(grew)}（補丁總量 ${mb(patch)}；目標 < 補丁 ＋ 20 MB；GC 時機不定，只供參考）`);
+  minCopy = Infinity;
+}
 
 /**
  * 拖拉 60 幀（§7.2）：幾何層的環 → 浮點 ghost（dragDispFloat＋segmentPts）→ 手勢 → Op（snap、光柵化、BFS、RLE）
@@ -60,7 +129,8 @@ function benchDrag(scale: number) {
   console.log(`範例 ×${scale}（切面 ${vol.X}×${vol.Y}）：建立幾何層 ${build}｜拖拉每幀 中位數 ${p(0.5)} ms、p95 ${p(0.95)} ms、最大 ${p(1)} ms`);
 }
 
-if (dragMode) for (const scale of scales) benchDrag(scale);
+if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);
+else if (dragMode) for (const scale of scales) benchDrag(scale);
 else for (const scale of scales) {
   const vol = demoVolume(scale);
   const base: EditState = { vol, L: initialLabeled(vol, matName) };

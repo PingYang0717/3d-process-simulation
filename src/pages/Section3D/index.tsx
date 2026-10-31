@@ -135,6 +135,8 @@ function Brand() {
 
 export default function Section3DPage() {
   const ed = useEditor();
+  // 開發模式：e2e（scripts/e2e/m9.cjs、perf.cjs）讀編輯器狀態
+  if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
   // 開發模式：e2e 腳本從 window.__ed 讀狀態（正式打包不會有）
   if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
   const { message, modal } = App.useApp();
@@ -436,7 +438,6 @@ export default function Section3DPage() {
   const exportAll = async (fmt: Fmt = 'vti') => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${fmt}`;
     const files = ed.splits.map((s) => ({ name: fileOf(s), data: encode(s.cur.vol, fmt) }));
-    const diffs = await Promise.all(ed.splits.map((s) => ed.diffOf(s.cur)));
     const manifest = {
       source: ed.meta.name ?? 'demo',
       format: fmt,
@@ -446,10 +447,10 @@ export default function Section3DPage() {
       spacing,
       origin,
       nmPerVoxel: ed.nmPerVoxel,
-      splits: ed.splits.map((s, i) => ({
+      splits: ed.splits.map((s) => ({
         name: s.name,
         file: fileOf(s),
-        changedVoxels: diffs[i].count,
+        changedVoxels: s.buf?.diffCount ?? 0,
         ops: s.ops.map((op) => ({ ...op, text: ed.opText(op, ed.orig.L) })),
       })),
     };

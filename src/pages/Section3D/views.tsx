@@ -48,7 +48,7 @@ import {
   idx,
   voxelFromHit,
 } from '../../volume/volume';
-import { call, ensure, sidOf } from '../../volume/client';
+import { call, sidOf } from '../../volume/client';
 import type { EditState, Local, Op } from '../../volume/ops';
 import type { Preview } from '../../volume/preview';
 import type { CellCloud } from './cellCloud';
@@ -777,7 +777,7 @@ export function View3D({
     const look = [[...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
     const req =
       mode === 'diff'
-        ? cached(`diff|${sidOf(state)}|${look}`, () => call('diffMesh', { sid: ensure(state), hidden: hiddenTable(hidden), palette: palette(materials) })).then((r) => {
+        ? cached(`diff|${sidOf(state)}|${look}`, () => call('diffMesh', { sid: sidOf(state), hidden: hiddenTable(hidden), palette: palette(materials) })).then((r) => {
             if (seq !== meshSeq.current || !ctxRef.current) return;
             setParts(c, [{ k: -1, m: r.changed }], true);
             c.shown = null;
@@ -796,7 +796,7 @@ export function View3D({
         : (() => {
             const key = `${look}|${showDiff}`;
             const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
-            const sid = ensure(state);
+            const sid = sidOf(state);
             return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials), base }).then((r) => {
               if (seq !== meshSeq.current || !ctxRef.current) return;
               setParts(c, r.items, r.full);
@@ -940,7 +940,7 @@ export function View3D({
     };
     if (!xray || hidden.has(VOID)) return off();
     const only = { mat: VOID };
-    call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint: [0.15, 0.15, 0.15] }).then((m) => {
+    call('mesh', { sid: sidOf(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint: [0.15, 0.15, 0.15] }).then((m) => {
       if (seq !== voidSeq.current || !ctxRef.current) return;
       c.voidMesh.geometry.dispose();
       c.voidMesh.geometry = toGeometry(m);
@@ -949,7 +949,7 @@ export function View3D({
       // 沒有空洞時網格是空的
       c.voidMesh.visible = c.voidEdges.visible = m.quads > 0;
       kick();
-    });
+    }).catch(() => {}); // 過期的版本（Worker 已前進）：等新的 state 再畫
   }, [state, hidden, xray]);
 
   // 選取：半透明網格（只含 affMask，沿法線外推）＋ bbox 線框；換選取時先藏舊的再等新的
@@ -970,13 +970,13 @@ export function View3D({
     c.selBox.visible = true;
     const tint = SEL_RGB.map((v) => v / 255) as Vec3;
     const only = { comps: selComps, scope, box: b };
-    call('mesh', { sid: ensure(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint, inflate: INFLATE }).then((m) => {
+    call('mesh', { sid: sidOf(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint, inflate: INFLATE }).then((m) => {
       if (seq !== selSeq.current || !ctxRef.current) return;
       c.selFill.geometry.dispose();
       c.selFill.geometry = toGeometry(m);
       c.selFill.visible = true;
       kick();
-    });
+    }).catch(() => {}); // 過期的版本：等新的 state 再畫
   }, [state, selComps, scope, selBBox]);
 
   /** 剖面的世界座標平面；null = 不剖。 */

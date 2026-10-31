@@ -712,7 +712,7 @@ const labelNumber = (label: string) => parseInt(label.split(' ').pop() ?? '0', 1
  * 大的先認領；同材質或重疊過半才繼承 key 與名字；沒人認領的取新名（同材質最大編號 ＋1）。
  */
 function nameByVotes(
-  prev: Labeled,
+  prev: { comps: Comp[] },
   fresh: RawComp[],
   votes: Map<number, number>,
   matName: (id: number) => string,
@@ -993,11 +993,63 @@ export function relabelFast(
   R: BBox | null,
 ): RelabelInfo {
   if (!R) return { L: prev, S: null, moves: [] };
+  const labels = prev.labels.slice();
+  const r = relabelInPlace(labels, prev.comps, cropBox(prevVol.data, next, R), next, (i) => moved(i), matName, newKey, R);
+  return { L: { labels, comps: r.comps }, S: r.S, moves: r.moves };
+}
+
+/** 外框裡的資料（複製）；patch.ts 的 cropArr 同一件事（這裡避免循環 import）。 */
+function cropBox<T extends Uint8Array | Int32Array>(src: T, dims: { X: number; Y: number }, b: BBox): T {
+  const W = b.x1 - b.x0 + 1;
+  const H = b.y1 - b.y0 + 1;
+  const D = b.z1 - b.z0 + 1;
+  const out = new (src.constructor as { new (n: number): T })(W * H * D);
+  for (let z = 0; z < D; z++)
+    for (let y = 0; y < H; y++) {
+      const s = ((z + b.z0) * dims.Y + y + b.y0) * dims.X + b.x0;
+      out.set(src.subarray(s, s + W), (z * H + y) * W);
+    }
+  return out;
+}
+
+export interface RelabelInPlace {
+  comps: Comp[];
+  S: BBox;
+  moves: LabelMove[];
+  /** 改前的 labels 在 S 裡的裁片（Step.labels.before）。 */
+  before: Int32Array;
+}
+
+/**
+ * relabelFast 的原地版本（plan v9 §4.3）：labels 直接改成新的編號，不影印整個陣列。
+ * - dataBefore：改前的體素在 R 裡的裁片（取代整個改前陣列；R 外面改前改後相同）。
+ * - 任何寫入之前先把 Smax（R ∪ 碰到的結構的外框，⊇ 最後的 S）裡的舊 labels 裁下來當快照，之後讀舊值都讀它。
+ * - moved(i, o)：舊的第 i 格（舊編號 o）搬到哪。
+ */
+export function relabelInPlace(
+  labels: Int32Array,
+  prevComps: Comp[],
+  dataBefore: Uint8Array,
+  next: Volume,
+  moved: (i: number, o: number) => number,
+  matName: (id: number) => string,
+  newKey: () => string,
+  R: BBox,
+): RelabelInPlace {
+  const prev = { comps: prevComps };
   const { X, Y, Z } = next;
-  const a = prevVol.data;
   const b = next.data;
-  const nOld = prev.comps.length;
-  const P = prev.labels;
+  const nOld = prevComps.length;
+  const RW = R.x1 - R.x0 + 1;
+  const RH = R.y1 - R.y0 + 1;
+  // R 裡改過的格子
+  const chg = new Uint8Array(dataBefore.length);
+  for (let z = R.z0, k = 0; z <= R.z1; z++)
+    for (let y = R.y0; y <= R.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + R.x0, e = row + R.x1; i <= e; i++, k++) if (dataBefore[k] !== b[i]) chg[k] = 1;
+    }
+  const inR = (x: number, y: number, z: number) => x >= R.x0 && x <= R.x1 && y >= R.y0 && y <= R.y1 && z >= R.z0 && z <= R.z1;
   // 1. 碰到的結構，以及掉了體素的（R 裡原本屬於它、現在材質不同）
   const touched = new Uint8Array(nOld);
   const lost = new Uint8Array(nOld);
@@ -1005,15 +1057,28 @@ export function relabelFast(
   for (let z = ex.z0; z <= ex.z1; z++)
     for (let y = ex.y0; y <= ex.y1; y++) {
       const row = (z * Y + y) * X;
-      for (let i = row + ex.x0; i <= row + ex.x1; i++) {
-        const l = P[i];
+      for (let x = ex.x0; x <= ex.x1; x++) {
+        const l = labels[row + x];
         if (l < 0) continue;
         touched[l] = 1;
-        if (a[i] !== b[i]) lost[l] = 1;
+        if (inR(x, y, z) && chg[((z - R.z0) * RH + y - R.y0) * RW + x - R.x0]) lost[l] = 1;
       }
     }
-  // 平移：已選結構整塊搬走，算掉了體素（moved 指到別處）
-  // （moved(i) !== i 的只會是已選結構的體素，它們在 R 裡一定有改動，上面已標 lost）
+  // 舊值快照：Smax = R ∪ 碰到的結構的外框（掉了體素的、被併掉的都是碰到的，所以 ⊇ 最後的 S）
+  const Smax: BBox = { ...R };
+  for (let k = 0; k < nOld; k++)
+    if (touched[k]) {
+      const bb = prevComps[k].bbox;
+      Smax.x0 = Math.min(Smax.x0, bb.x0);
+      Smax.x1 = Math.max(Smax.x1, bb.x1);
+      Smax.y0 = Math.min(Smax.y0, bb.y0);
+      Smax.y1 = Math.max(Smax.y1, bb.y1);
+      Smax.z0 = Math.min(Smax.z0, bb.z0);
+      Smax.z1 = Math.max(Smax.z1, bb.z1);
+    }
+  const PS = cropBox(labels, next, Smax);
+  const SW = Smax.x1 - Smax.x0 + 1;
+  const SH = Smax.y1 - Smax.y0 + 1;
   const S: BBox = { ...R };
   const grow = (bb: BBox) => {
     S.x0 = Math.min(S.x0, bb.x0);
@@ -1023,10 +1088,9 @@ export function relabelFast(
     S.z0 = Math.min(S.z0, bb.z0);
     S.z1 = Math.max(S.z1, bb.z1);
   };
-  for (let k = 0; k < nOld; k++) if (lost[k]) grow(prev.comps[k].bbox);
+  for (let k = 0; k < nOld; k++) if (lost[k]) grow(prevComps[k].bbox);
   const F: BBox = { ...S }; // 要重新 flood fill 的範圍
   // 2. 清掉：掉了體素的結構（F 裡）、R 裡改過的格子
-  const labels = P.slice();
   for (let z = F.z0; z <= F.z1; z++)
     for (let y = F.y0; y <= F.y1; y++) {
       const row = (z * Y + y) * X;
@@ -1035,10 +1099,10 @@ export function relabelFast(
         if (l >= 0 && lost[l]) labels[i] = -1;
       }
     }
-  for (let z = R.z0; z <= R.z1; z++)
+  for (let z = R.z0, k = 0; z <= R.z1; z++)
     for (let y = R.y0; y <= R.y1; y++) {
       const row = (z * Y + y) * X;
-      for (let i = row + R.x0; i <= row + R.x1; i++) if (a[i] !== b[i]) labels[i] = -1;
+      for (let i = row + R.x0; i <= row + R.x1; i++, k++) if (chg[k]) labels[i] = -1;
     }
   // 3. flood fill 清掉的格子：新片段編號 nOld 起
   const fresh: RawComp[] = [];
@@ -1099,7 +1163,7 @@ export function relabelFast(
   for (let k = 0; k < nOld; k++) if (touched[k] && !lost[k]) add(k);
   for (let j = 0; j < fresh.length; j++) add(nOld + j);
   const raw: RawComp[] = members.map(({ gs, fs }) => {
-    const parts = [...gs.map((k) => prev.comps[k] as RawComp), ...fs.map((j) => fresh[j])];
+    const parts = [...gs.map((k) => prevComps[k] as RawComp), ...fs.map((j) => fresh[j])];
     const bb = { ...parts[0].bbox };
     let count = 0;
     for (const p of parts) {
@@ -1115,7 +1179,7 @@ export function relabelFast(
   });
   // 6. 投票：整塊照舊的結構把全部體素投給自己那一類；掉了體素的照位移數它的體素落在哪一類
   const votes = new Map<number, number>();
-  members.forEach(({ gs }, c) => gs.forEach((k) => votes.set(c * nOld + k, prev.comps[k].count)));
+  members.forEach(({ gs }, c) => gs.forEach((k) => votes.set(c * nOld + k, prevComps[k].count)));
   // 編號（舊結構 0..nOld−1、新片段 nOld..）→ 結果類別；−1 = 不在任何類（沒碰到的舊結構、掉了體素的舊結構）
   const cls = new Int32Array(nOld + fresh.length).fill(-1);
   for (let k = 0; k < cls.length; k++) if (k >= nOld || (touched[k] && !lost[k])) cls[k] = classOf.get(find(k))!;
@@ -1123,10 +1187,12 @@ export function relabelFast(
   for (let z = F.z0; z <= F.z1; z++)
     for (let y = F.y0; y <= F.y1; y++) {
       const row = (z * Y + y) * X;
-      for (let i = row + F.x0; i <= row + F.x1; i++) {
-        const o = P[i];
+      const prow = ((z - Smax.z0) * SH + y - Smax.y0) * SW - Smax.x0;
+      for (let x = F.x0; x <= F.x1; x++) {
+        const i = row + x;
+        const o = PS[prow + x];
         if (o < 0 || !lost[o]) continue;
-        const j = moved(i);
+        const j = moved(i, o);
         if (j < 0) continue;
         const c = resOf(labels[j]);
         if (c < 0) continue;
@@ -1136,7 +1202,7 @@ export function relabelFast(
     }
   const named = nameByVotes(prev, raw, votes, matName, newKey);
   // 7. 編號：有整塊照舊結構的類用其中最小的編號；其他照舊結構併進來（它的外框併進 S，labels 在 S 裡重寫）
-  const comps = prev.comps.slice();
+  const comps = prevComps.slice();
   const target = new Int32Array(members.length).fill(-1);
   const freed: number[] = [];
   members.forEach(({ gs }, c) => {
@@ -1147,7 +1213,7 @@ export function relabelFast(
     for (const g of gs)
       if (g !== t) {
         freed.push(g);
-        grow(prev.comps[g].bbox);
+        grow(prevComps[g].bbox);
       }
   });
   for (let k = 0; k < nOld; k++) if (lost[k]) freed.push(k);
@@ -1185,9 +1251,18 @@ export function relabelFast(
   }
   while (n > 0 && holes.has(n - 1)) n--;
   comps.length = n;
+  // 改前的 labels 在 S 裡（S ⊆ Smax，從快照裁，不必再讀已改寫的陣列）
+  const SW2 = S.x1 - S.x0 + 1;
+  const before = new Int32Array(SW2 * (S.y1 - S.y0 + 1) * (S.z1 - S.z0 + 1));
+  for (let z = S.z0, k = 0; z <= S.z1; z++)
+    for (let y = S.y0; y <= S.y1; y++, k += SW2) {
+      const s0 = ((z - Smax.z0) * SH + y - Smax.y0) * SW + S.x0 - Smax.x0;
+      before.set(PS.subarray(s0, s0 + SW2), k);
+    }
   for (const mv of moves) moveLabel(labels, next, mv.box, mv.from, mv.to);
-  return { L: { labels, comps }, S, moves };
+  return { comps, S, moves, before };
 }
+
 
 /** box 裡 labels == from 的改成 to。 */
 export function moveLabel(labels: Int32Array, d: { X: number; Y: number }, b: BBox, from: number, to: number) {

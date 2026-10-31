@@ -7,6 +7,7 @@ import { type Report, addCell, removeCell } from './kernel';
 import { type Scope, axisIndex, planeAxes, to3D } from './scope';
 import { type ProfileCell, type Rle2D, decodeRle } from './rle';
 import { type RelGesture, type TracedHandle, relativeCells, traceHandle } from '../slice/relative';
+import { type RoundGesture, roundCells } from '../slice/round';
 
 export { type ProfileCell, type Rle2D, decodeRle, encodeRle, rleBox } from './rle';
 
@@ -28,6 +29,11 @@ export interface ProfileOp {
    * 對不到的片才用上面的絕對 add／remove（報告裡記 fallback）。
    */
   gestures?: Record<string, RelGesture>;
+  /**
+   * 圓頭（plan v10 §4.6）：每個結構的 RoundGesture。有的話每一片用自己的外框重算（永遠對得到、沒有 fallback），
+   * 優先於 gestures。和 gestures 分開放，RelGesture 的型別與既有程式不受影響。
+   */
+  rounds?: Record<string, RoundGesture>;
   /**
    * 參考片（at）用上面的絕對 add／remove，不重做手勢（plan v8：2D 的幾何層是持久的，參考片的格子
    * 就是那份幾何光柵化出來的，重描 voxel 再重做會差一格）。舊的 Op 沒有這一欄，重播不變。
@@ -93,7 +99,7 @@ export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, U
       any = true;
       // 相對式：這一片自己的輪廓上找同一個把手、重做手勢（切面座標＝整個陣列的）
       let c: { add: ProfileCell[]; remove: ProfileCell[] } = absolute[key];
-      const g = op.gestures?.[key];
+      const g = op.rounds?.[key] ?? op.gestures?.[key];
       if (g && !(op.refExact && t + off[a] === op.at)) {
         const tb = t * st;
         const local = (u: number, v: number) => {
@@ -102,16 +108,21 @@ export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, U
           return lu >= 0 && lv >= 0 && lu < A0 && lv < B0 && !!mask[tb + lu * su + lv * sv];
         };
         const [ru0, rv0, ru1, rv1] = [off[ua], off[va], off[ua] + A0 - 1, off[va] + B0 - 1];
-        const pre = ringsFor?.(key, t + off[a], () => traceHandle(local, ru0, rv0, ru1, rv1, g));
-        // 快取把輪廓一模一樣的片合成同一份（沿法線擠出的結構多半每片都一樣）：同一份只重做一次手勢。
-        // 輪廓（含洞）就是這一片結構的邊界，所以輪廓相同＝結構這一片相同，重做的結果也相同。
-        let rel = pre ? relMemo.get(pre) : undefined;
-        if (rel === undefined) {
-          rel = relativeCells(local, ru0, rv0, ru1, rv1, g, pre);
-          if (pre) relMemo.set(pre, rel);
+        if (g.kind === 'round') {
+          // 圓頭：這一片自己的外框重算（純函式、只看這一片），不走輪廓快取
+          c = roundCells(local, ru0, rv0, ru1, rv1, g) ?? c;
+        } else {
+          const pre = ringsFor?.(key, t + off[a], () => traceHandle(local, ru0, rv0, ru1, rv1, g));
+          // 快取把輪廓一模一樣的片合成同一份（沿法線擠出的結構多半每片都一樣）：同一份只重做一次手勢。
+          // 輪廓（含洞）就是這一片結構的邊界，所以輪廓相同＝結構這一片相同，重做的結果也相同。
+          let rel = pre ? relMemo.get(pre) : undefined;
+          if (rel === undefined) {
+            rel = relativeCells(local, ru0, rv0, ru1, rv1, g, pre);
+            if (pre) relMemo.set(pre, rel);
+          }
+          if (rel) c = rel;
+          else fellBack.add(t + off[a]);
         }
-        if (rel) c = rel;
-        else fellBack.add(t + off[a]);
       }
       // 先拿：只拿屬於這個結構的
       for (const cell of c.remove) {

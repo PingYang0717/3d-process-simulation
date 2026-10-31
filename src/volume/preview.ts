@@ -148,12 +148,24 @@ function profileBox(s: EditState, op: ProfileOp, b: BBox): BBox | null {
         grow(rb.u1, rb.v1);
       }
     }
-  if (op.gestures && Object.keys(op.gestures).length) {
+  const relative = (op.gestures && Object.keys(op.gestures).length) || (op.rounds && Object.keys(op.rounds).length);
+  if (relative) {
     // 相對式：每一片要描整個剖面才找得到同一個把手；結構在別的片偏了多少，要加的格子也跟著偏
     const ref = sliceBoxOf(s, op.keys, op.scope.axis, op.at);
     const over = ref && u0 <= u1 ? [Math.max(0, ref.u0 - u0), Math.max(0, ref.v0 - v0), Math.max(0, u1 - ref.u1), Math.max(0, v1 - ref.v1)] : [0, 0, 0, 0];
     grow(l[ua] - over[0], l[va] - over[1]);
     grow(h[ua] + over[2], h[va] + over[3]);
+    // 圓頭（plan v10 §4.6）：每一片用自己的外框重算；內圓角會補到外框外 max(ru, rv) 格，
+    // 結構沿法線偏移時別的片的格子和襯層也跟著偏，所以整段外框再往外留 max(ru, rv)＋襯層
+    let ext = 0;
+    for (const g of Object.values(op.rounds ?? {})) {
+      const r = g.corners.some((c) => c.concave) ? Math.ceil(Math.max(g.ru ?? g.r, g.rv ?? g.r)) : 0;
+      ext = Math.max(ext, r + 1 + (op.follow ? LINER_MARGIN : 0));
+    }
+    if (ext) {
+      grow(l[ua] - ext, l[va] - ext);
+      grow(h[ua] + ext, h[va] + ext);
+    }
   }
   if (u0 > u1) return null;
   // 襯層：每一格沿它的方向，這一段每一片實際要讀到多遠（同一條線上前面先加的格子會把襯層再往前推）
@@ -192,7 +204,7 @@ function profileBox(s: EditState, op: ProfileOp, b: BBox): BBox | null {
   h[a] = t1;
   const out = clampBox(fromLoHi(l, h), s.vol);
   // 每片輪廓快取（plan v9 §4.5）的前提：有手勢時切面上包住結構整個外框（描出來的環才和這一幀的範圍無關）
-  if (out && op.gestures && Object.keys(op.gestures).length) {
+  if (out && relative) {
     const ob = lo(out);
     const oh = hi(out);
     const bl = lo(b);

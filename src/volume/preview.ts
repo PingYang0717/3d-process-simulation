@@ -157,15 +157,19 @@ function profileBox(s: EditState, op: ProfileOp, b: BBox): BBox | null {
     grow(h[ua] + over[2], h[va] + over[3]);
     // 圓頭（plan v10 §4.6）：每一片用自己的外框重算；內圓角會補到外框外 max(ru, rv) 格，
     // 結構沿法線偏移時別的片的格子和襯層也跟著偏，所以整段外框再往外留 max(ru, rv)＋襯層
-    let ext = 0;
-    for (const g of Object.values(op.rounds ?? {})) {
-      const r = g.corners.some((c) => c.concave) ? Math.ceil(Math.max(g.ru ?? g.r, g.rv ?? g.r)) : 0;
-      ext = Math.max(ext, r + 1 + (op.follow ? LINER_MARGIN : 0));
-    }
-    if (ext) {
-      grow(l[ua] - ext, l[va] - ext);
-      grow(h[ua] + ext, h[va] + ext);
-    }
+    // 只往有勾角的那幾側留（上面兩個角不必往下留）：[左, 上, 右, 下]
+    const ext = [0, 0, 0, 0];
+    for (const g of Object.values(op.rounds ?? {}))
+      for (const c of g.corners) {
+        const r = c.concave ? Math.ceil(Math.max(g.ru ?? g.r, g.rv ?? g.r)) : 0;
+        const e = r + 1 + (op.follow ? LINER_MARGIN : 0);
+        const k = c.id[1] === 'l' ? 0 : 2;
+        const j = c.id[0] === 'u' ? 1 : 3;
+        ext[k] = Math.max(ext[k], e);
+        ext[j] = Math.max(ext[j], e);
+      }
+    grow(l[ua] - ext[0], l[va] - ext[1]);
+    grow(h[ua] + ext[2], h[va] + ext[3]);
   }
   if (u0 > u1) return null;
   // 襯層：每一格沿它的方向，這一段每一片實際要讀到多遠（同一條線上前面先加的格子會把襯層再往前推）

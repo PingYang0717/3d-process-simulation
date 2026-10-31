@@ -1,64 +1,97 @@
-import { useState } from 'react';
-import { Alert, Button, Empty, Flex, InputNumber, Table, Tooltip, Typography } from 'antd';
+import { useMemo, useState } from 'react';
+import { Alert, Button, Checkbox, Empty, Flex, InputNumber, Segmented, Table, Tooltip, Typography } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
 import { bboxDims, isVoid } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
 import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
-import { MaterialCard, MoveCard, PushCard, ShapeCard } from './OpCard';
+import { CardShell, MaterialCard, MoveCard, PushCard, ShapeCard, wordsOf } from './OpCard';
 import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handleOps';
-import { groupNormal, smoothEdgeGroup } from '../../slice/gestures';
-import { Checkbox } from 'antd';
+import { type DragArg, type DragMode, groupNormal, resolveNodeDrag, smoothEdgeGroup } from '../../slice/gestures';
+import type { Op } from '../../volume/ops';
+import { describeOp } from './opWords';
 
 const { Text } = Typography;
 
 export const matOf = (ed: Editor, id: number) =>
   ed.materials.find((m) => m.id === id) ?? { id, name: `材質 ${id}`, color: '#ff00ff' };
 
-/** 選到節點或邊時：數值輸入（和拖拉產生完全相同的 Op，§5.5）。 */
+/**
+ * 選到節點或邊時的卡片（plan v10 §4.4）：數值＋拖法，先預覽再套用；和拖拉同一條路（opOfGesture → commitGesture）。
+ * 拖法：自動（依形狀選矩形角或單點）／矩形角／單點／自由衰減（同 Alt＋拖）。
+ */
 function HandleRow({ ed }: { ed: Editor }) {
   const h = ed.handle!;
   const [uName, vName] = h.axis === 'z' ? ['x', 'y'] : h.axis === 'y' ? ['x', 'z'] : ['z', 'y'];
-  const [pos, setPos] = useState<[number | null, number | null]>([h.p[0], h.p[1]]);
-  const [n, setN] = useState<number | null>(1);
+  const [pos, setPos] = useState<[number, number]>([h.p[0], h.p[1]]);
+  const [n, setN] = useState(1);
+  const [drag, setDrag] = useState<DragMode>('auto');
   const [single, setSingle] = useState(false);
   const [lastP, setLastP] = useState(h.p);
   if (lastP !== h.p) {
     setLastP(h.p);
     setPos([h.p[0], h.p[1]]);
   }
-  const ctx = () => modelContext(ed, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel });
-  const run = (delta: [number, number], shift = false) => {
-    const c = ctx();
-    const hh = resolveHandle(c, h);
+  const c = useMemo(
+    () => modelContext(ed, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ed.L, ed.vol, ed.sel, ed.scope, ed.follow, ed.backfill, ed.nmPerVoxel, ed.version, h],
+  );
+  const hh = resolveHandle(c, h);
+  const r = hh ? c.rings.get(hh.key)?.[hh.ring] : undefined;
+  const group = r && hh && h.kind === 'edge' ? smoothEdgeGroup(r, hh.index, single) : [];
+  const mode: DragArg = h.kind === 'node' ? drag : single;
+  const delta: [number, number] = useMemo(() => {
+    if (h.kind === 'node') return [pos[0] - h.p[0], pos[1] - h.p[1]];
+    if (!r || !group.length) return [0, 0];
+    const nrm = groupNormal(r, group);
+    return [nrm[0] * n, nrm[1] * n];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [h, pos[0], pos[1], n, r, group.join()]);
+  const op = useMemo(() => (hh && (delta[0] || delta[1]) ? opOfGesture(c, hh, delta, mode, ed.mirror).op : null), [c, hh?.index, hh?.ring, hh?.key, delta, mode, ed.mirror]); // eslint-disable-line react-hooks/exhaustive-deps
+  const apply = (o: Op) => {
     if (!hh) return;
-    const { op } = opOfGesture(c, hh, delta, shift, ed.mirror);
-    if (op) {
-      // 和拖拉同一條路：幾何層先更新、再送 Op（§7.8）
-      commitGesture(ed, c, hh, delta, shift, op);
-      const p = h.vid ? c.model?.vertices[h.vid] : null;
-      ed.setHandle({ ...h, p: p && h.kind === 'node' ? [p.u, p.v] : [h.p[0] + Math.round(delta[0]), h.p[1] + Math.round(delta[1])] });
-    }
+    commitGesture(ed, c, hh, delta, mode, o);
+    const p = h.vid ? c.model?.vertices[h.vid] : null;
+    ed.setHandle({ ...h, p: p && h.kind === 'node' ? [p.u, p.v] : [h.p[0] + Math.round(delta[0]), h.p[1] + Math.round(delta[1])] });
   };
+  const words = op ? describeOp(wordsOf(ed), op) : '';
+  const picked = r && hh && h.kind === 'node' ? resolveNodeDrag(r, hh.index, drag) : null;
   if (h.kind === 'node')
     return (
-      <Flex vertical gap={10}>
+      <CardShell ed={ed} op={op} words={words} onApply={apply}>
         <Flex gap={10} align="end">
           <label className="field">
             <span>{uName}</span>
-            <InputNumber value={pos[0]} onChange={(v) => setPos([v, pos[1]])} precision={0} style={{ width: '100%' }} onPressEnter={() => run([(pos[0] ?? h.p[0]) - h.p[0], (pos[1] ?? h.p[1]) - h.p[1]])} />
+            <InputNumber value={pos[0]} onChange={(v) => v !== null && setPos([Math.round(v), pos[1]])} precision={0} style={{ width: '100%' }} />
           </label>
           <label className="field">
             <span>{vName}</span>
-            <InputNumber value={pos[1]} onChange={(v) => setPos([pos[0], v])} precision={0} style={{ width: '100%' }} onPressEnter={() => run([(pos[0] ?? h.p[0]) - h.p[0], (pos[1] ?? h.p[1]) - h.p[1]])} />
+            <InputNumber value={pos[1]} onChange={(v) => v !== null && setPos([pos[0], Math.round(v)])} precision={0} style={{ width: '100%' }} />
           </label>
-          <Button onClick={() => run([(pos[0] ?? h.p[0]) - h.p[0], (pos[1] ?? h.p[1]) - h.p[1]])} disabled={pos[0] === h.p[0] && pos[1] === h.p[1]}>
-            套用
-          </Button>
+        </Flex>
+        <Flex align="center" gap={8} wrap>
+          <span style={{ fontSize: 12 }}>拖法</span>
+          <Segmented
+            size="small"
+            value={drag}
+            onChange={(v) => setDrag(v as DragMode)}
+            options={[
+              { label: '自動', value: 'auto' },
+              { label: '矩形角', value: 'corner' },
+              { label: '單點', value: 'single' },
+              { label: '自由衰減', value: 'falloff' },
+            ]}
+          />
+          {drag === 'auto' && picked && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              這個節點用「{picked === 'corner' ? '矩形角' : picked === 'single' ? '單點' : '自由衰減'}」
+            </Text>
+          )}
         </Flex>
         <Flex gap={8}>
-          <Button size="small" onClick={() => run([h.origin[0] - h.p[0], h.origin[1] - h.p[1]])} disabled={h.origin[0] === h.p[0] && h.origin[1] === h.p[1]}>
+          <Button size="small" onClick={() => setPos([h.origin[0], h.origin[1]])} disabled={h.origin[0] === pos[0] && h.origin[1] === pos[1]}>
             回到原位（{h.origin[0]}, {h.origin[1]}）
           </Button>
           <Button size="small" type="text" onClick={() => ed.setHandle(null)}>
@@ -66,34 +99,23 @@ function HandleRow({ ed }: { ed: Editor }) {
           </Button>
         </Flex>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          節點在 {h.axis} = {h.at} 那一片；Enter 套用到範圍，和拖這個節點產生同一個步驟。方向鍵一次 1 格（Shift 10）。
+          節點在 {h.axis} = {h.at} 那一片；拖法和拖這個節點一樣（Shift＋拖＝單點、Alt＋拖＝自由衰減）。
         </Text>
-      </Flex>
+      </CardShell>
     );
-  const c = ctx();
-  const hh = resolveHandle(c, h);
-  const r = hh ? c.rings.get(hh.key)![hh.ring] : null;
-  const group = r && hh ? smoothEdgeGroup(r, hh.index, single) : [];
   let len = 0;
   if (r) for (let k = 0; k + 1 < group.length; k++) len += Math.hypot(r.pts[group[k + 1]][0] - r.pts[group[k]][0], r.pts[group[k + 1]][1] - r.pts[group[k]][1]);
-  const push = () => {
-    if (!r || !hh || !n) return;
-    const nrm = groupNormal(r, group);
-    run([nrm[0] * n, nrm[1] * n], single);
-  };
   return (
-    <Flex vertical gap={10}>
+    <CardShell ed={ed} op={op} words={words} onApply={apply}>
       <Text style={{ fontSize: 12 }}>
         長度 {len.toFixed(1)} vx（{(len * ed.nmPerVoxel).toFixed(1)} nm）
       </Text>
-      <Flex gap={10} align="end">
-        <label className="field">
-          <span>往外推（負＝往內）</span>
-          <InputNumber value={n} onChange={setN} precision={0} suffix="vx" style={{ width: '100%' }} onPressEnter={push} />
-        </label>
-        <Button type="primary" onClick={push} disabled={!n || !r}>
-          推（{(Math.abs(n ?? 0) * ed.nmPerVoxel).toFixed(1)} nm）
-        </Button>
+      <Flex align="center" gap={8}>
+        <span style={{ fontSize: 12 }}>長／縮（負＝往內）</span>
+        <InputNumber value={n} onChange={(v) => v !== null && setN(Math.round(v))} precision={0} suffix="vx" style={{ width: 96 }} />
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {(Math.abs(n) * ed.nmPerVoxel).toFixed(1)} nm
+        </Text>
       </Flex>
       <Checkbox checked={single} onChange={(e) => setSingle(e.target.checked)}>
         只推這一小段（同 Shift＋拖）
@@ -101,12 +123,12 @@ function HandleRow({ ed }: { ed: Editor }) {
       <Button size="small" type="text" onClick={() => ed.setHandle(null)} style={{ alignSelf: 'flex-start' }}>
         取消選把手（Esc）
       </Button>
-    </Flex>
+    </CardShell>
   );
 }
 
 /** 右欄「選取與調整」。 */
-export function Inspector({ ed, roundPart }: { ed: Editor; roundPart?: React.ReactNode }) {
+export function Inspector({ ed }: { ed: Editor }) {
   const nm = ed.nmPerVoxel;
   const sel = ed.selComps;
   if (!sel.length)
@@ -222,7 +244,7 @@ export function Inspector({ ed, roundPart }: { ed: Editor; roundPart?: React.Rea
         <PushCard ed={ed} />
       </Section>
       <Section title="方頭／圓頭">
-        <ShapeCard ed={ed} roundPart={roundPart} />
+        <ShapeCard ed={ed} />
       </Section>
       <Section title="移動">
         <MoveCard ed={ed} />

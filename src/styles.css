@@ -335,3 +335,9 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .face-picker .fp-hidden.on rect { fill: #fa541c; stroke: #d4380d; stroke-dasharray: none; }
 .face-picker .off { opacity: .3; pointer-events: none; }
 .face-picker g:focus { outline: none; }
+.round-sketch { flex: none; background: #fafafa; border-radius: 6px; }
+.round-sketch .rs-box { fill: none; stroke: #bfbfbf; stroke-dasharray: 3 2; stroke-width: 1; }
+.round-sketch .rs-shape { fill: rgba(22, 119, 255, .18); stroke: #1677ff; stroke-width: 1.5; }
+.round-sketch .rs-dot { fill: #fff; stroke: #8c8c8c; stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: pointer; }
+.round-sketch .rs-dot.convex { fill: #fa541c; stroke: #d4380d; }
+.round-sketch .rs-dot.concave { fill: #722ed1; stroke: #531dab; }

@@ -12,6 +12,8 @@ import type { Editor } from './editor';
 import { ScopeControl, scopeWords } from './PositionBar';
 import { FacePicker } from './FacePicker';
 import { type WordsCtx, describeOp, faceName } from './opWords';
+import { RoundCard } from './RoundCard';
+import type { RoundGesture } from '../../slice/round';
 
 const { Text } = Typography;
 
@@ -108,7 +110,7 @@ function useCardPreview(op: Op | null, previewable = true) {
 }
 
 /** 卡片外殼：一句話 → 參數 → 套用到／套用。 */
-function CardShell({
+export function CardShell({
   ed,
   op,
   words,
@@ -155,7 +157,7 @@ function CardShell({
     >
       <Flex align="start" gap={8}>
         <Text className="op-card-words" style={{ flex: 1 }}>
-          {op ? words : '先調參數'}
+          {op || words ? words || '先調參數' : '先調參數'}
         </Text>
         {extra}
       </Flex>
@@ -238,25 +240,23 @@ function LevelPart({ ed, compact, plane }: { ed: Editor; compact?: boolean; plan
 }
 
 /**
- * 方頭／圓頭：同一個地方決定頭型（plan v10 §4.6）。右上角切換；圓頭的面板由 roundPart 提供（M10.6）。
+ * 方頭／圓頭：同一個地方決定頭型（plan v10 §4.6）。右上角切換；initial＝從角把手／右鍵帶進來的圓頭參數。
  */
-export function ShapeCard({ ed, compact, plane, roundPart }: { ed: Editor; compact?: boolean; plane?: Axis; roundPart?: ReactNode }) {
-  const [kind, setKind] = useState<'round' | 'level'>(roundPart ? 'round' : 'level');
+export function ShapeCard({ ed, compact, plane, start = 'round', initial }: { ed: Editor; compact?: boolean; plane?: Axis; start?: 'round' | 'level'; initial?: Partial<RoundGesture> }) {
+  const [kind, setKind] = useState<'round' | 'level'>(start);
   return (
     <Flex vertical gap={8}>
-      {roundPart && (
-        <Segmented
-          size="small"
-          value={kind}
-          onChange={(v) => setKind(v as 'round' | 'level')}
-          options={[
-            { label: '圓頭', value: 'round' },
-            { label: '方頭', value: 'level' },
-          ]}
-          style={{ alignSelf: 'flex-end' }}
-        />
-      )}
-      {kind === 'round' && roundPart ? roundPart : <LevelPart ed={ed} compact={compact} plane={plane} />}
+      <Segmented
+        size="small"
+        value={kind}
+        onChange={(v) => setKind(v as 'round' | 'level')}
+        options={[
+          { label: '圓頭', value: 'round' },
+          { label: '方頭', value: 'level' },
+        ]}
+        style={{ alignSelf: 'flex-end' }}
+      />
+      {kind === 'round' ? <RoundCard ed={ed} compact={compact} plane={plane} initial={initial} /> : <LevelPart ed={ed} compact={compact} plane={plane} />}
     </Flex>
   );
 }
@@ -314,7 +314,7 @@ export function MaterialCard({ ed, compact }: { ed: Editor; compact?: boolean })
  * 五顆操作按鈕（plan v10 §4.7）：長／縮 · 方頭／圓頭 · 移動 · 材質 · 對應（多選）；每顆開對應卡片的 Popover。
  * 3D 的編輯工具列與 2D 浮動列共用（plane＝2D 剖面的法線軸，卡片只開放切面上的方向）。
  */
-export function OpButtons({ ed, plane, roundPart }: { ed: Editor; plane?: Axis; roundPart?: ReactNode }) {
+export function OpButtons({ ed, plane }: { ed: Editor; plane?: Axis }) {
   const busy = !!ed.busy && ed.queued >= 3;
   const pop = (content: ReactNode) => <div style={{ width: 380 }}>{content}</div>;
   return (
@@ -324,7 +324,7 @@ export function OpButtons({ ed, plane, roundPart }: { ed: Editor; plane?: Axis; 
           長／縮
         </Button>
       </Popover>
-      <Popover trigger="click" placement="bottom" destroyOnHidden content={pop(<ShapeCard ed={ed} compact plane={plane} roundPart={roundPart} />)}>
+      <Popover trigger="click" placement="bottom" destroyOnHidden content={pop(<ShapeCard ed={ed} compact plane={plane} />)}>
         <Button size="small" icon={<RadiusSettingOutlined />} disabled={busy}>
           方頭／圓頭
         </Button>

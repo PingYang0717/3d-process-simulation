@@ -31,6 +31,9 @@ export type Only = { comps: number[]; scope: Scope; box: BBox } | { mat: number 
 
 export const BASE_OWNER = 'base';
 
+/** 圖層要畫哪些格子：選取（comps＝結構編號；box＝它們的外框，只用來限制全量時算哪些 chunk）或某個材質。 */
+export type LayerFilter = { comps: number[]; scope: Scope; box: BBox } | { mat: number };
+
 export interface Requests {
   /** 載入原始：存起來並標記結構；之前的狀態全部丟掉。回傳原始的體積帳（主執行緒不再自己數）。 */
   load: { req: { sid: number; vol: Volume }; res: { labels: Int32Array; raw: RawComp[]; counts: Float64Array } };
@@ -85,6 +88,15 @@ export interface Requests {
   };
   /** 保留給測試與保險。 */
   count: { req: { sid: number }; res: number[] };
+  /**
+   * 圖層（§4.6）：選取（結構編號 ∩ scope）或某個材質（VOID）的單色網格，和主網格同一套 chunk。
+   * key＝畫法（選了哪些結構的 key、scope、外推、顏色）；base 是 sid 的上一步時只回改到的 chunk
+   * （選取看 labels，髒的範圍是 relabel 的 S；材質看體素，髒的是補丁外框），否則只算和 box 相交的 chunk。
+   */
+  layer: {
+    req: { sid: number; key: string; filter: LayerFilter; tint: [number, number, number]; inflate?: number; base?: number };
+    res: { full: boolean; items: ChunkItem[] };
+  };
   /**
    * 拖拉第 2 級預覽（§4.5）：在 Worker 裡裁切重算＋預覽網格；拖拉期間 Worker 閒著、狀態已常駐，不必傳陣列。
    * 每片的輪廓同一次拖拉只描一次（快取 key 含 sid 與手勢的把手，換 sid 就清空）。超過 cap 回 none。
@@ -396,6 +408,59 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: b.diffCount }, [mask.buffer]];
   },
   count: ({ sid }) => [Array.from(stateOf(sid).book.counts), []],
+  layer: ({ sid, filter, tint, inflate, base }) => {
+    const { vol, labels } = stateOf(sid);
+    const g = gridOf(vol);
+    const data = vol.data;
+    let code: (i: number) => number;
+    let box: BBox | null;
+    let sel = false;
+    if ('mat' in filter) {
+      const mat = filter.mat;
+      code = (i) => (data[i] === mat ? 1 : 0);
+      box = null;
+    } else {
+      sel = true;
+      const on = new Uint8Array(Math.max(1, ...filter.comps.map((c) => c + 1)));
+      filter.comps.forEach((c) => (on[c] = 1));
+      box = clipBox(filter.box, filter.scope);
+      // scope 只看一個軸：沿那個軸的座標在 [lo, hi] 裡
+      const { X, Y } = vol;
+      const plane = X * Y;
+      const { axis, lo, hi } = filter.scope;
+      const along = axis === 'z' ? (i: number) => Math.floor(i / plane) : axis === 'y' ? (i: number) => Math.floor(i / X) % Y : (i: number) => i % X;
+      code = (i) => {
+        const l = labels[i];
+        if (l < 0 || l >= on.length || !on[l]) return 0;
+        const t = along(i);
+        return t >= lo && t <= hi ? 1 : 0;
+      };
+    }
+    const par = parents.get(sid);
+    let ks: number[];
+    let full = true;
+    if (base === sid) {
+      full = false;
+      ks = [];
+    } else if (par && base !== undefined && base === par.from) {
+      full = false;
+      const d = sel ? par.labelBox : par.box;
+      ks = d ? chunksTouching(vol, g, d) : [];
+    } else {
+      if (!sel) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
+      ks = box ? chunksTouching(vol, g, box) : [];
+    }
+    const color = (): [number, number, number] => tint;
+    const items: ChunkItem[] = [];
+    for (const k of ks) {
+      const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
+      if (inflate) for (let i = 0; i < m.positions.length; i++) m.positions[i] += m.normals[i] * inflate;
+      if (m.quads || !full) items.push({ k, m });
+    }
+    const transfer: Transferable[] = [];
+    for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
+    return [{ full, items }, transfer];
+  },
   preview: ({ sid, comps, op, cap, hidden, palette, showDiff, seq, mesh }) => {
     const { vol, labels, book } = stateOf(sid);
     if (previewSid !== sid) {

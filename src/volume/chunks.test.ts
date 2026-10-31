@@ -61,3 +61,90 @@ describe('chunk 網格（§8.4）', () => {
     expect(t).toEqual([0, 1]);
   });
 });
+
+// ---- plan v9 §4.6：圖層 chunk 化 ----
+import { MATERIALS, initialLabeled } from './volume';
+import { matNameOf } from './ops';
+import * as core from './workerCore';
+
+/** 每個 quad（連續 6 個頂點）拆成單位面：`法線|平面座標|u|v`；inflate 先扣回去。 */
+function unitFaces(ms: MeshData[], inflate = 0) {
+  const out = new Set<string>();
+  for (const m of ms)
+    for (let q = 0; q < m.positions.length; q += 18) {
+      const n = [m.normals[q], m.normals[q + 1], m.normals[q + 2]];
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < 18; k += 3)
+        for (let a = 0; a < 3; a++) {
+          const v = Math.round(m.positions[q + k + a] - n[a] * inflate);
+          lo[a] = Math.min(lo[a], v);
+          hi[a] = Math.max(hi[a], v);
+        }
+      const d = n[0] ? 0 : n[1] ? 1 : 2;
+      const [u, w] = [0, 1, 2].filter((a) => a !== d);
+      for (let i = lo[u]; i < hi[u]; i++) for (let j = lo[w]; j < hi[w]; j++) out.add(`${n.join(',')}|${lo[d]}|${i}|${j}`);
+    }
+  return out;
+}
+const setEq = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+
+describe('圖層 chunk 化（plan v9 §4.6）', () => {
+  const vol = demoVolume();
+  const L = initialLabeled(vol, matNameOf(MATERIALS));
+  const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
+  type Res = { full: boolean; items: { k: number; m: MeshData }[] };
+  const layer = (req: Parameters<typeof core.handlers.layer>[0]) => core.handle('layer', req)[0] as Res;
+
+  it('選取層的 chunk 合起來＝外框裡一次 greedy mesh（含外推、scope 只有一段）', () => {
+    core.handle('load', { sid: 1, vol });
+    const polys = L.comps.flatMap((c, i) => (c.mat === 6 ? [i] : []));
+    const box = L.comps[polys[0]].bbox;
+    for (const scope of [
+      { axis: 'z' as const, lo: 0, hi: vol.Z - 1 },
+      { axis: 'x' as const, lo: box.x0 + 3, hi: box.x0 + 20 },
+    ]) {
+      const filter = { comps: polys.slice(0, 2), scope, box: { ...box, x1: Math.max(box.x1, L.comps[polys[1]].bbox.x1), z0: Math.min(box.z0, L.comps[polys[1]].bbox.z0), z1: Math.max(box.z1, L.comps[polys[1]].bbox.z1) } };
+      const r = layer({ sid: 1, key: 'sel', filter, tint: [0, 0, 1], inflate: 0.02 });
+      expect(r.full).toBe(true);
+      const ref = core.handle('mesh', { sid: 1, hidden: new Uint8Array(256), only: filter, palette: new Float32Array(768), tint: [0, 0, 1], inflate: 0.02 })[0] as MeshData;
+      expect(ref.quads).toBeGreaterThan(0);
+      expect(setEq(unitFaces(r.items.map((i) => i.m), 0.02), unitFaces([ref], 0.02))).toBe(true);
+    }
+    // VOID 層＝材質 254（範例裡有 bamboo defect）
+    const v = layer({ sid: 1, key: 'void', filter: { mat: 254 }, tint: [0, 0, 0] });
+    const vref = core.handle('mesh', { sid: 1, hidden: new Uint8Array(256), only: { mat: 254 }, palette: new Float32Array(768), tint: [0, 0, 0] })[0] as MeshData;
+    expect(setEq(unitFaces(v.items.map((i) => i.m)), unitFaces([vref]))).toBe(true);
+  });
+
+  it('增量：髒的範圍用 relabel 的 S——切斷 fin（體素只改中間幾片），另一段換了結構也會重畫', () => {
+    core.handle('load', { sid: 10, vol });
+    core.handle('fork', { owner: 'a', src: 'base', sid: 10 });
+    const fi = L.comps.findIndex((c) => c.mat === 3);
+    const fin = L.comps[fi];
+    const scope = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+    const filter0 = { comps: [fi], scope, box: fin.bbox };
+    const before = layer({ sid: 10, key: 'k', filter: filter0, tint: [0, 0, 1] });
+    const [r] = core.handle('apply', { owner: 'a', from: 10, to: 11, comps: L.comps, op: { kind: 'material', keys: [fin.key], scope: { axis: 'z', lo: 60, hi: 63 }, m: 0 }, matNames, keyCounter: 1000 }) as [
+      { step: import('./patch').Step },
+      unknown,
+    ];
+    const comps = r.step.labels!.compsAfter;
+    // 選取仍是同一個 key：被切下來的另一段換了新 key，不再是選取
+    const idx = comps.flatMap((c, i) => (c.key === fin.key ? [i] : []));
+    expect(idx.length).toBe(1);
+    const filter = { comps: idx, scope, box: comps[idx[0]].bbox };
+    const inc = layer({ sid: 11, key: 'k', filter, tint: [0, 0, 1], base: 10 });
+    expect(inc.full).toBe(false);
+    const full = layer({ sid: 11, key: 'k', filter, tint: [0, 0, 1] });
+    // 合成：舊的 chunk 換掉髒的 ＝ 全量
+    const map = new Map(before.items.map((i) => [i.k, i.m]));
+    for (const it of inc.items) if (it.m.quads) map.set(it.k, it.m);
+    else map.delete(it.k);
+    expect(setEq(unitFaces([...map.values()]), unitFaces(full.items.map((i) => i.m)))).toBe(true);
+    // 只用體素補丁外框（舊做法）會漏掉被切下來那一段
+    const g = gridOf(vol);
+    const dataOnly = new Set(chunksTouching(vol, g, r.step.data!.box));
+    expect(inc.items.some((i) => !dataOnly.has(i.k))).toBe(true);
+  });
+});

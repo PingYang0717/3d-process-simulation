@@ -31,7 +31,7 @@ import {
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
-import { Group } from 'three';
+import { Group, type Intersection, type Material as ThreeMaterial, Sphere } from 'three';
 import type { ChunkItem } from '../../volume/worker';
 import {
   type Axis,
@@ -106,11 +106,17 @@ interface Ctx {
   partGroup: Group;
   /** 目前畫的是哪個版本、哪種畫法（下一次只要改到的 chunk）。 */
   shown: { sid: number; key: string } | null;
+  /**
+   * 主網格的 chunk 快取（plan v9 §4.6）：`${sid}|${畫法}` → chunk 網格，最近用的 PARTS_CACHE 組。
+   * 增量更新時沒動到的 chunk 的 Mesh 在多組之間共用；釋放前確認沒有任何一組或目前畫的還在用（disposeOrphans）。
+   */
+  partsCache: Map<string, Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>>;
   ghostMesh: Mesh<BufferGeometry, MeshLambertMaterial>;
   changedEdges: LineSegments<BufferGeometry, LineBasicMaterial>;
-  selFill: Mesh<BufferGeometry, MeshLambertMaterial>;
-  voidMesh: Mesh<BufferGeometry, MeshBasicMaterial>;
-  voidEdges: LineSegments<EdgesGeometry, LineBasicMaterial>;
+  /** 選取層、空洞層、空洞的紅邊：和主網格同一套 chunk（§4.6）。 */
+  selFill: Layer<Mesh>;
+  voidMesh: Layer<Mesh>;
+  voidEdges: Layer<LineSegments>;
   selBox: LineSegments<BufferGeometry, LineBasicMaterial>;
   hoverBox: LineSegments<BufferGeometry, LineBasicMaterial>;
   /** 即時預覽：裁切範圍重算的網格；主網格在同一個範圍裡的片段由 shader 挖掉（hole）。 */
@@ -206,26 +212,111 @@ const withHole = <M extends MeshLambertMaterial>(m: M, hole: Ctx['hole']) => {
   return m;
 };
 
-/** 換 chunk 網格：full = 全部換掉；否則只換 items 裡的（quads = 0 的拿掉）。每個 chunk 自己一棵 BVH。 */
-const setParts = (c: Ctx, items: ChunkItem[], full: boolean) => {
-  const drop = (k: number) => {
-    const p = c.parts.get(k);
-    if (!p) return;
-    c.partGroup.remove(p);
-    p.geometry.dispose();
-    c.parts.delete(k);
+/** 一層 chunk 網格（選取層、空洞層、紅邊）：group 在體素座標裡，parts 是 chunk 編號 → 物件。 */
+interface Layer<T extends Mesh | LineSegments> {
+  group: Group;
+  parts: Map<number, T>;
+  shown: { sid: number; key: string } | null;
+  material: ThreeMaterial;
+  order: number;
+}
+/** 描邊（EdgesGeometry，O(n log n)）的 quad 數上限：超過就不描（差異模式紅邊、空洞紅邊）。 */
+const EDGE_QUADS_MAX = 60000;
+/** 主網格快取幾組（切 B、切 split、復原時不必再跟 Worker 要）。 */
+const PARTS_CACHE = 3;
+
+const _sphere = new Sphere();
+/**
+ * BVH 懶建（plan v9 P5）：射線碰到這個 chunk 的外接球才建它的 BVH（通常 1～3 個），整個網格換上時不再同步建幾百棵。
+ * 沒碰到的 chunk 直接略過。
+ */
+function lazyRaycast(this: Mesh, raycaster: Raycaster, intersects: Intersection[]) {
+  const g = this.geometry;
+  if (!g.attributes.position?.count) return;
+  if (!g.boundingSphere) g.computeBoundingSphere();
+  _sphere.copy(g.boundingSphere!).applyMatrix4(this.matrixWorld);
+  if (!raycaster.ray.intersectsSphere(_sphere)) return;
+  if (!g.boundsTree) g.boundsTree = new MeshBVH(g);
+  acceleratedRaycast.call(this, raycaster, intersects);
+}
+/** 閒置時補建還沒建的 BVH（一次一個；沒有 requestIdleCallback 的瀏覽器就等第一次點到再建）。 */
+const idleBVH = (meshes: () => Iterable<Mesh>) => {
+  const ric = (globalThis as { requestIdleCallback?: (cb: (d: { timeRemaining: () => number }) => void) => number }).requestIdleCallback;
+  if (!ric) return;
+  const step = (d: { timeRemaining: () => number }) => {
+    for (const m of meshes()) {
+      if (d.timeRemaining() < 4) return void ric(step);
+      if (!m.geometry.boundsTree && m.geometry.attributes.position?.count) m.geometry.boundsTree = new MeshBVH(m.geometry);
+    }
   };
-  if (full) for (const k of [...c.parts.keys()]) drop(k);
+  ric(step);
+};
+
+const newPart = (c: Ctx, m: MeshData) => {
+  const part = new Mesh(toGeometry(m), c.mesh.material);
+  part.raycast = lazyRaycast;
+  return part;
+};
+/** 從 base（增量）或空的（全量）做出新的一組 chunk：quads = 0 的拿掉。不釋放任何東西（base 可能還在快取裡）。 */
+const nextParts = (c: Ctx, base: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>> | null, items: ChunkItem[]) => {
+  const map = new Map(base ?? []);
   for (const { k, m } of items) {
-    drop(k);
-    if (!m.quads) continue;
-    const g = toGeometry(m);
-    g.boundsTree = new MeshBVH(g);
-    const part = new Mesh(g, c.mesh.material);
-    part.raycast = acceleratedRaycast;
-    c.partGroup.add(part);
-    c.parts.set(k, part);
+    if (m.quads) map.set(k, newPart(c, m));
+    else map.delete(k);
   }
+  return map;
+};
+/** 釋放這些組裡沒有任何快取或目前畫的還在用的 geometry。 */
+const disposeOrphans = (c: Ctx, maps: Map<number, Mesh>[]) => {
+  const alive = new Set<Mesh>(c.parts.values());
+  for (const m of c.partsCache.values()) for (const p of m.values()) alive.add(p);
+  for (const m of maps) for (const p of m.values()) if (!alive.has(p)) p.geometry.dispose();
+};
+/** 換上一組主網格 chunk；cache＝存進快取（差異模式那一組不存）。 */
+const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>, shown: { sid: number; key: string } | null, cache: boolean) => {
+  const prev = c.parts;
+  c.partGroup.clear();
+  for (const p of map.values()) c.partGroup.add(p);
+  c.parts = map;
+  c.shown = shown;
+  const evicted: Map<number, Mesh>[] = [prev];
+  if (cache && shown) {
+    const ck = `${shown.sid}|${shown.key}`;
+    c.partsCache.delete(ck);
+    c.partsCache.set(ck, map);
+    while (c.partsCache.size > PARTS_CACHE) {
+      const k = c.partsCache.keys().next().value!;
+      evicted.push(c.partsCache.get(k)!);
+      c.partsCache.delete(k);
+    }
+  }
+  disposeOrphans(c, evicted);
+  idleBVH(() => c.parts.values());
+};
+
+/** 圖層換 chunk：full = 全部換掉；否則只換 items 裡的（quads = 0 的拿掉）。換掉的立刻釋放（圖層不快取）。 */
+const setLayer = <T extends Mesh | LineSegments>(layer: Layer<T>, items: { k: number; geometry: BufferGeometry | null }[], full: boolean, make: (g: BufferGeometry) => T) => {
+  const drop = (k: number) => {
+    const p = layer.parts.get(k);
+    if (!p) return;
+    layer.group.remove(p);
+    p.geometry.dispose();
+    layer.parts.delete(k);
+  };
+  if (full) for (const k of [...layer.parts.keys()]) drop(k);
+  for (const { k, geometry } of items) {
+    drop(k);
+    if (!geometry) continue;
+    const o = make(geometry);
+    o.renderOrder = layer.order;
+    o.frustumCulled = false;
+    layer.group.add(o);
+    layer.parts.set(k, o);
+  }
+};
+const clearLayer = (layer: Layer<Mesh | LineSegments>) => {
+  setLayer(layer, [], true, () => null as never);
+  layer.shown = null;
 };
 
 /** 收掉即時預覽：預覽網格藏起來、主網格不再挖洞。 */
@@ -433,6 +524,8 @@ export function View3D({
   useEffect(() => {
     const host = hostRef.current!;
     const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    // 開發模式：e2e（scripts/e2e/perf.cjs）讀 renderer.info（geometry 數、draw call）
+    if (import.meta.env.DEV) (window as unknown as { __renderer?: WebGLRenderer }).__renderer = renderer;
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
     renderer.localClippingEnabled = true;
     host.appendChild(renderer.domElement);
@@ -475,12 +568,13 @@ export function View3D({
     const probe = new Raycaster();
     /** 從 pos 看 target 會不會先被別的面擋住（對準選取用）。 */
     const occluded = (pos: Vector3, target: Vector3, radius: number) => {
-      if (!parts.size) return false;
+      const ps = ctxRef.current?.parts;
+      if (!ps?.size) return false;
       const dir = target.clone().sub(pos);
       const dist = dir.length();
       probe.set(pos, dir.normalize());
       probe.firstHitOnly = true;
-      const h = probe.intersectObjects([...parts.values()], false)[0];
+      const h = probe.intersectObjects([...ps.values()], false)[0];
       return !!h && h.distance < dist - radius;
     };
     const setView = (preset: ViewPreset) => {
@@ -537,6 +631,7 @@ export function View3D({
     // 點選與滑過提示走 BVH（three-mesh-bvh），不必每次掃過全部三角形
     mesh.raycast = acceleratedRaycast;
     const parts = new Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>();
+    const partsCache: Ctx['partsCache'] = new Map();
     const partGroup = new Group();
     partGroup.scale.set(1, -1, 1);
     partGroup.position.y = vol.Y;
@@ -547,26 +642,25 @@ export function View3D({
       new Mesh(new BufferGeometry(), new MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.38, depthWrite: false, side: DoubleSide })),
       1,
     );
-    ghostMesh.raycast = acceleratedRaycast;
+    ghostMesh.raycast = lazyRaycast;
     // 差異模式：改過的部分描紅邊，和半透明的「沒改」分開
     const changedEdges = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0xff4d4f })), 2);
     changedEdges.visible = false;
-    const selFill = voxelSpace(
-      new Mesh(new BufferGeometry(), withHole(new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide }), hole)),
-      2,
-    );
-    const voidMesh = voxelSpace(
-      new Mesh(new BufferGeometry(), new MeshBasicMaterial({ color: 0x262626, transparent: true, opacity: 0.8, depthTest: false, side: DoubleSide })),
-      3,
-    );
-    const voidEdges = voxelSpace(
-      new LineSegments(new EdgesGeometry(), new LineBasicMaterial({ color: 0xff7875, depthTest: false, transparent: true, opacity: 0.75 })),
-      4,
-    );
+    const layerOf = <T extends Mesh | LineSegments>(material: ThreeMaterial, order: number): Layer<T> => {
+      const group = new Group();
+      group.scale.set(1, -1, 1);
+      group.position.y = vol.Y;
+      group.visible = false;
+      scene.add(group);
+      return { group, parts: new Map(), shown: null, material, order };
+    };
+    const selFill = layerOf<Mesh>(withHole(new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide }), hole), 2);
+    const voidMesh = layerOf<Mesh>(new MeshBasicMaterial({ color: 0x262626, transparent: true, opacity: 0.8, depthTest: false, side: DoubleSide }), 3);
+    const voidEdges = layerOf<LineSegments>(new LineBasicMaterial({ color: 0xff7875, depthTest: false, transparent: true, opacity: 0.75 }), 4);
     const ring = voxelSpace(new LineLoop(new BufferGeometry(), new LineBasicMaterial({ color: BRUSH_COLOR, depthTest: false, linewidth: 2 })), 5);
     // 法線箭頭：往外＝長、往內＝縮，按下前就知道會往哪推
     const arrow = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: BRUSH_COLOR, depthTest: false })), 5);
-    selFill.visible = voidMesh.visible = voidEdges.visible = ghostMesh.visible = ring.visible = arrow.visible = false;
+    ghostMesh.visible = ring.visible = arrow.visible = false;
     const selBox = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0x1677ff }));
     selBox.visible = false;
     scene.add(selBox);
@@ -592,7 +686,7 @@ export function View3D({
     const capEdges = new LineSegments(new EdgesGeometry(cap.geometry), new LineBasicMaterial({ color: 0xd46b08 }));
     capEdges.visible = false;
     scene.add(capEdges);
-    ctxRef.current = { renderer, scene, camera, controls, mesh, parts, partGroup, shown: null, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
+    ctxRef.current = { renderer, scene, camera, controls, mesh, parts, partGroup, shown: null, partsCache, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
     // 按下要在 OrbitControls（掛在 canvas 上）之前決定是不是筆刷：capture 階段先跑，筆刷就先把 controls 關掉，
     // OrbitControls 連這一下都不會記到。之前是 React 的 onPointerDown 事後才關，OrbitControls 已經記了一個指標、
     // 又因為指標被我們捕捉而收不到放開，之後滾輪縮放就一直沒反應（視角像被鎖住）。
@@ -613,7 +707,13 @@ export function View3D({
     };
 
     const recolor = (mask: Uint8Array, color: Vec3) => {
-      for (const part of parts.values()) recolorGeometry(part.geometry, mask, color);
+      const c = ctxRef.current;
+      if (!c) return;
+      // 直接改 GPU 上的顏色：共用這些 Mesh 的快取組就不對了，整個快取作廢（目前畫的留著）
+      const old = [...c.partsCache.values()];
+      c.partsCache.clear();
+      disposeOrphans(c, old);
+      for (const part of c.parts.values()) recolorGeometry(part.geometry, mask, color);
     };
     const recolorGeometry = (g: BufferGeometry, mask: Uint8Array, color: Vec3) => {
       const pos = g.attributes.position;
@@ -747,6 +847,9 @@ export function View3D({
         }
       });
       cap.material.map?.dispose();
+      // 快取裡、不在場景上的 chunk
+      for (const m of partsCache.values()) for (const p of m.values()) p.geometry.dispose();
+      for (const l of [selFill, voidMesh, voidEdges]) l.material.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);
       ctxRef.current = null;
@@ -766,34 +869,42 @@ export function View3D({
       mode === 'diff'
         ? cached(`diff|${sidOf(state)}|${look}`, () => call('diffMesh', { sid: sidOf(state), hidden: hiddenTable(hidden), palette: palette(materials) })).then((r) => {
             if (seq !== meshSeq.current || !ctxRef.current) return;
-            setParts(c, [{ k: -1, m: r.changed }], true);
-            c.shown = null;
+            const changed = new Map([[-1, newPart(c, r.changed)]]);
+            showParts(c, changed, null, false);
             hidePreview(c);
             const g = toGeometry(r.ghost);
-            if (r.ghost.quads) g.boundsTree = new MeshBVH(g);
             c.ghostMesh.geometry.dispose();
             c.ghostMesh.geometry = g;
             c.ghostMesh.visible = true;
             // 改動很大時描邊太貴（EdgesGeometry 是 O(n log n)），就只靠實色
             c.changedEdges.geometry.dispose();
             const part = c.parts.get(-1);
-            c.changedEdges.geometry = part && r.changed.quads < 60000 ? new EdgesGeometry(part.geometry, 1) : new BufferGeometry();
+            c.changedEdges.geometry = part && r.changed.quads < EDGE_QUADS_MAX ? new EdgesGeometry(part.geometry, 1) : new BufferGeometry();
             c.changedEdges.visible = true;
           })
         : (() => {
             const key = `${look}|${showDiff}`;
-            const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
             const sid = sidOf(state);
-            return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials), base }).then((r) => {
-              if (seq !== meshSeq.current || !ctxRef.current) return;
-              setParts(c, r.items, r.full);
-              c.shown = { sid, key };
+            const done = (n: number, full: boolean) => {
               // 量測用（scripts/e2e/perf.cjs）：最近一次換上正式網格的時間與換了幾個 chunk
-              (window as unknown as { __meshAt?: { t: number; n: number; full: boolean } }).__meshAt = { t: performance.now(), n: r.items.length, full: r.full };
+              (window as unknown as { __meshAt?: { t: number; n: number; full: boolean } }).__meshAt = { t: performance.now(), n, full };
               // 正式網格到了，預覽收掉
               hidePreview(c);
               c.ghostMesh.visible = false;
               c.changedEdges.visible = false;
+            };
+            // 快取裡有（看原始、切 split、復原）：直接換上，不必跟 Worker 要
+            const hit = c.partsCache.get(`${sid}|${key}`);
+            if (hit) {
+              showParts(c, hit, { sid, key }, true);
+              done(0, false);
+              return Promise.resolve();
+            }
+            const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
+            return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: showDiff, palette: palette(materials), base }).then((r) => {
+              if (seq !== meshSeq.current || !ctxRef.current) return;
+              showParts(c, nextParts(c, r.full ? null : c.parts, r.items), { sid, key }, true);
+              done(r.items.length, r.full);
             });
           })();
     req.then(() => (setMeshing(false), kick())).catch(() => setMeshing(false));
@@ -883,31 +994,47 @@ export function View3D({
     if (!c) return;
     const seq = ++voidSeq.current;
     const off = () => {
-      c.voidMesh.visible = c.voidEdges.visible = false;
+      c.voidMesh.group.visible = c.voidEdges.group.visible = false;
     };
     if (!xray || hidden.has(VOID)) return off();
-    const only = { mat: VOID };
-    call('mesh', { sid: sidOf(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint: [0.15, 0.15, 0.15] }).then((m) => {
-      if (seq !== voidSeq.current || !ctxRef.current) return;
-      c.voidMesh.geometry.dispose();
-      c.voidMesh.geometry = toGeometry(m);
-      c.voidEdges.geometry.dispose();
-      c.voidEdges.geometry = new EdgesGeometry(c.voidMesh.geometry, 30);
-      // 沒有空洞時網格是空的
-      c.voidMesh.visible = c.voidEdges.visible = m.quads > 0;
-      kick();
-    }).catch(() => {}); // 過期的版本（Worker 已前進）：等新的 state 再畫
+    const sid = sidOf(state);
+    const L = c.voidMesh;
+    const base = L.shown?.key === 'void' ? L.shown.sid : undefined;
+    call('layer', { sid, key: 'void', filter: { mat: VOID }, tint: [0.15, 0.15, 0.15], base })
+      .then((r) => {
+        if (seq !== voidSeq.current || !ctxRef.current) return;
+        setLayer(L, r.items.map((it) => ({ k: it.k, geometry: it.m.quads ? toGeometry(it.m) : null })), r.full, (g) => new Mesh(g, L.material));
+        L.shown = { sid, key: 'void' };
+        // 紅邊：每個 chunk 一份；空洞太多時描邊太貴（EdgesGeometry 是 O(n log n)），就不描（plan v9 P18）
+        let quads = 0;
+        for (const p of L.parts.values()) quads += p.geometry.attributes.position.count / 6;
+        const E = c.voidEdges;
+        if (quads > EDGE_QUADS_MAX) clearLayer(E);
+        else {
+          const ks = r.full || !E.shown ? [...L.parts.keys()] : r.items.map((it) => it.k);
+          setLayer(E, ks.map((k) => ({ k, geometry: L.parts.has(k) ? new EdgesGeometry(L.parts.get(k)!.geometry, 30) : null })), r.full || !E.shown, (g) => new LineSegments(g, E.material));
+          E.shown = L.shown;
+        }
+        // 沒有空洞時網格是空的
+        c.voidMesh.group.visible = c.voidEdges.group.visible = L.parts.size > 0;
+        kick();
+      })
+      .catch(() => {}); // 過期的版本（Worker 已前進）：等新的 state 再畫
   }, [state, hidden, xray]);
 
+  /** 選取的結構 key（不隨 relabel 換編號）：選取層的畫法 key。 */
+  const selKeys = useMemo(() => (selComps ?? []).map((i) => state.L.comps[i]?.key).sort().join(','), [selComps, state]);
   // 選取：半透明網格（只含 affMask，沿法線外推）＋ bbox 線框；換選取時先藏舊的再等新的
   const selSeq = useRef(0);
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
     const seq = ++selSeq.current;
-    c.selFill.visible = false;
+    const L = c.selFill;
     if (!selComps?.length || !selBBox) {
       c.selBox.visible = false;
+      L.group.visible = false;
+      clearLayer(L);
       return;
     }
     const b = selBBox;
@@ -916,15 +1043,22 @@ export function View3D({
     c.selBox.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
     c.selBox.visible = true;
     const tint = SEL_RGB.map((v) => v / 255) as Vec3;
-    const only = { comps: selComps, scope, box: b };
-    call('mesh', { sid: sidOf(state), hidden: hiddenTable(hidden), only, palette: palette(materials), tint, inflate: INFLATE }).then((m) => {
-      if (seq !== selSeq.current || !ctxRef.current) return;
-      c.selFill.geometry.dispose();
-      c.selFill.geometry = toGeometry(m);
-      c.selFill.visible = true;
-      kick();
-    }).catch(() => {}); // 過期的版本：等新的 state 再畫
-  }, [state, selComps, scope, selBBox]);
+    // key＝選了哪些結構（key 不隨 relabel 換編號）＋範圍：同一個選取、每一步只重算改到的 chunk（§4.6）
+    const key = `${selKeys}|${scope.axis}:${scope.lo}-${scope.hi}`;
+    const sid = sidOf(state);
+    const base = L.shown?.key === key ? L.shown.sid : undefined;
+    // 換選取時先藏舊的再等新的
+    if (base === undefined) L.group.visible = false;
+    call('layer', { sid, key, filter: { comps: selComps, scope, box: b }, tint, inflate: INFLATE, base })
+      .then((r) => {
+        if (seq !== selSeq.current || !ctxRef.current) return;
+        setLayer(L, r.items.map((it) => ({ k: it.k, geometry: it.m.quads ? toGeometry(it.m) : null })), r.full, (g) => new Mesh(g, L.material));
+        L.shown = { sid, key };
+        L.group.visible = true;
+        kick();
+      })
+      .catch(() => {}); // 過期的版本：等新的 state 再畫
+  }, [state, selComps, scope, selBBox, selKeys]);
 
   /** 剖面的世界座標平面；null = 不剖。 */
   const clipPlane = (cl: Clip | null) => {
@@ -941,7 +1075,8 @@ export function View3D({
     if (!c) return;
     const plane = clipPlane(clip);
     const planes = plane ? [plane] : [];
-    for (const o of [c.mesh, c.previewMesh, c.ghostMesh, c.selFill, c.voidMesh, c.voidEdges]) o.material.clippingPlanes = planes;
+    for (const o of [c.mesh, c.previewMesh, c.ghostMesh]) o.material.clippingPlanes = planes;
+    for (const l of [c.selFill, c.voidMesh, c.voidEdges]) l.material.clippingPlanes = planes;
     if (!clip) {
       c.cap.visible = c.capEdges.visible = false;
       return;

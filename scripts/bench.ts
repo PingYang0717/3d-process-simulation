@@ -3,7 +3,7 @@
 //       npx vite-node scripts/bench.ts drag [scale ...]：拖拉中每一幀主執行緒做的事（plan v8 §7.2、§8.4）
 //       npx vite-node scripts/bench.ts step [scale ...]：一步的全流程（plan v9 §2）：Worker 原地 apply、主執行緒貼補丁、
 //         chunk、整陣列複製位元組；mem [scale ...]：連做 50 步後的記憶體增量 vs 補丁總量
-import { MATERIALS, demoVolume, greedyMesh, initialLabeled } from '../src/volume/volume';
+import { MATERIALS, demoVolume, greedyMesh, initialLabeled, unionBBox } from '../src/volume/volume';
 import { type EditState, type Op, applyOp, matNameOf } from '../src/volume/ops';
 import { applyOpLocal } from '../src/volume/apply';
 import { applyStep } from '../src/volume/patch';
@@ -61,6 +61,14 @@ async function benchStep(scale: number, steps: number) {
   let sid = 1;
   let shown = 1;
   core.handle('chunks', { sid, key: 'k', hidden, diff: true, palette });
+  // 選取：基板（最大的結構）＋要長高的 poly；第一次是全量（∝ 選取大小）
+  const sub = comps.reduce((a, c) => (c.count > a.count ? c : a));
+  const selKeys = new Set([sub.key, poly.key]);
+  let t0 = performance.now();
+  const sel0 = comps.flatMap((c, i) => (selKeys.has(c.key) ? [i] : []));
+  const [ly0] = core.handle('layer', { sid, key: 'sel', filter: { comps: sel0, scope: full, box: unionBBox(sel0.map((i) => comps[i]))! }, tint: [0, 0, 1], inflate: 0.02 }) as [{ items: unknown[] }, unknown];
+  console.log(`  選到基板（${sub.label}，${(sub.count / 1e6).toFixed(1)} M 格）＋poly：選取層全量 ${ly0.items.length} 個 chunk ${(performance.now() - t0).toFixed(0)} ms`);
+  let selShown = sid;
   const mem0 = process.memoryUsage();
   let patch = 0;
   const rows: string[] = [];
@@ -80,8 +88,17 @@ async function benchStep(scale: number, steps: number) {
     const [ch] = core.handle('chunks', { sid, key: 'k', hidden, diff: true, palette, base: shown }) as [{ items: unknown[] }, unknown];
     shown = sid;
     const tChunks = performance.now() - t;
+    // 選取層（§4.6）：選了基板＋這根 poly，每一步只重算改到的 chunk
+    t = performance.now();
+    const selIdx = comps.flatMap((c, i) => (selKeys.has(c.key) ? [i] : []));
+    const [ly] = core.handle('layer', { sid, key: 'sel', filter: { comps: selIdx, scope: full, box: unionBBox(selIdx.map((i) => comps[i]))! }, tint: [0, 0, 1], inflate: 0.02, base: selShown }) as [{ items: unknown[] }, unknown];
+    selShown = sid;
+    const tLayer = performance.now() - t;
     patch += stepBytes(r.step);
-    if (k < 10) rows.push(`  第 ${k + 1} 步：Worker apply ${tApply.toFixed(0)} ms｜主執行緒貼補丁＋diff ${tMain.toFixed(1)} ms｜chunk ${ch.items.length} 個 ${tChunks.toFixed(0)} ms｜整陣列複製 ${mb(copied)}`);
+    if (k < 10)
+      rows.push(
+        `  第 ${k + 1} 步：Worker apply ${tApply.toFixed(0)} ms｜主執行緒貼補丁＋diff ${tMain.toFixed(1)} ms｜chunk ${ch.items.length} 個 ${tChunks.toFixed(0)} ms｜選取層 ${ly.items.length} 個 chunk ${tLayer.toFixed(0)} ms｜整陣列複製 ${mb(copied)}`,
+      );
   }
   console.log(rows.join('\n'));
   const mem1 = process.memoryUsage();

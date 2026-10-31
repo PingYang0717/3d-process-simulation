@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { type Vec3, type Volume, AIR, MATERIALS, demoVolume, initialLabeled, levelMask } from './volume';
 import { type EditState, type Op, applyOp, matNameOf } from './ops';
 import { boxVoxels, cropVolume, previewBox, previewOp } from './preview';
+import { type Ring, type XY, traceRings } from '../slice/trace';
+import { type GestureCtx, type Handle, gestureToOp } from '../slice/gestures';
 
 const matName = matNameOf(MATERIALS);
 
@@ -98,5 +100,95 @@ describe('補平跟推襯層', () => {
     const out = levelMask(v, v, mask(v), { axis: 'z', lo: 0, hi: 0 }, up, [2, 4, 0], 0, 'square', 4, 'orig', true);
     expect(col(out, 2)).toEqual([AIR, AIR, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3]);
     expect(col(out, 1)).toEqual(col(v, 1));
+  });
+});
+
+describe('profile 的緊外框（plan v8 §7.7）', () => {
+  const vol = demoVolume();
+  const base: EditState = { vol, L: initialLabeled(vol, matName) };
+  let seq = 2000;
+  const ctx = { orig: vol, matName, newKey: () => `p${seq++}` };
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  const fins = base.L.comps.filter((c) => c.mat === 3);
+  const poly = base.L.comps.find((c) => c.mat === 6)!;
+  /** XY 第 z 片的環與手勢環境。 */
+  const sliceOf = (key: string, z: number, follow: boolean, scope = full) => {
+    const k = base.L.comps.findIndex((c) => c.key === key);
+    const inside = (u: number, v: number) => u >= 0 && v >= 0 && u < vol.X && v < vol.Y && base.L.labels[(z * vol.Y + v) * vol.X + u] === k;
+    const b = base.L.comps[k].bbox;
+    const rings = new Map([[key, traceRings(inside, b.x0, b.y0, b.x1, b.y1)]]);
+    let box: { u0: number; v0: number; u1: number; v1: number } | null = null;
+    for (let v = b.y0; v <= b.y1; v++)
+      for (let u = b.x0; u <= b.x1; u++)
+        if (inside(u, v)) box = box ? { u0: Math.min(box.u0, u), v0: Math.min(box.v0, v), u1: Math.max(box.u1, u), v1: Math.max(box.v1, v) } : { u0: u, v0: v, u1: u, v1: v };
+    const g: GestureCtx = { axis: 'z', at: z, scope, follow, backfill: 'orig', selKeys: [key], inside: (_k, u, v) => inside(u, v), sliceBox: () => box, nm: 0.5 };
+    return { rings, g };
+  };
+  const corner = (rings: Map<string, Ring[]>, key: string, pick: (p: XY, q: XY) => boolean): Handle => {
+    const r = rings.get(key)![0];
+    let best = [...r.nodes][0];
+    r.nodes.forEach((i) => {
+      if (pick(r.pts[i], r.pts[best])) best = i;
+    });
+    return { kind: 'node', key, ring: 0, index: best };
+  };
+  const slanted = (rings: Map<string, Ring[]>, key: string): Handle => {
+    const r = rings.get(key)![0];
+    const i = r.pts.findIndex((p, k) => {
+      const q = r.pts[(k + 1) % r.pts.length];
+      return p[0] !== q[0] && p[1] !== q[1] && Math.hypot(q[0] - p[0], q[1] - p[1]) > 2;
+    });
+    return { kind: 'edge', key, ring: 0, index: Math.max(0, i) };
+  };
+  const cases: [string, () => Op | null][] = [
+    ['fin 1 右上角往外 (+2, −2)、襯層跟推', () => {
+      const { rings, g } = sliceOf(fins[0].key, 26, true);
+      return gestureToOp(rings, corner(rings, fins[0].key, (p, q) => p[0] - p[1] > q[0] - q[1]), [2, -2], false, g);
+    }],
+    ['fin 1 右上角往外 (+2, −2)、防穿層（follow 關）', () => {
+      const { rings, g } = sliceOf(fins[0].key, 26, false);
+      return gestureToOp(rings, corner(rings, fins[0].key, (p, q) => p[0] - p[1] > q[0] - q[1]), [2, -2], false, g);
+    }],
+    ['fin 2 斜邊往外 3（只改一段 z）', () => {
+      const { rings, g } = sliceOf(fins[1].key, 40, true, { axis: 'z', lo: 30, hi: 70 });
+      return gestureToOp(rings, slanted(rings, fins[1].key), [2.2, -2.2], false, g);
+    }],
+    ['fin 3 左上角往內 (+2, +2)', () => {
+      const { rings, g } = sliceOf(fins[2].key, 60, true);
+      return gestureToOp(rings, corner(rings, fins[2].key, (p, q) => -p[0] - p[1] > -q[0] - q[1]), [2, 2], false, g);
+    }],
+    ['poly 左上角往外（沒有襯層的那一側）', () => {
+      const z = (poly.bbox.z0 + poly.bbox.z1) >> 1;
+      const { rings, g } = sliceOf(poly.key, z, true, { axis: 'z', lo: poly.bbox.z0, hi: poly.bbox.z1 });
+      return gestureToOp(rings, corner(rings, poly.key, (p, q) => -p[0] - p[1] > -q[0] - q[1]), [-2, -2], false, g);
+    }],
+  ];
+  for (const [name, make] of cases)
+    it(`${name}：緊外框內與 applyOp 逐體素相同，外框外零改動`, () => {
+      const op = make()!;
+      expect(op?.kind).toBe('profile');
+      const box = previewBox(base, op)!;
+      const p = previewOp(base, vol, op)!;
+      const real = applyOp(base, op, ctx).vol;
+      expect(p.data).toEqual(cropVolume(real, box).data);
+      let changed = 0;
+      for (let i = 0; i < vol.data.length; i++) {
+        if (real.data[i] === vol.data[i]) continue;
+        const x = i % vol.X;
+        const y = ((i - x) / vol.X) % vol.Y;
+        const z = (i - x - y * vol.X) / (vol.X * vol.Y);
+        const inside = x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1 && z >= box.z0 && z <= box.z1;
+        if (!inside) expect([x, y, z]).toEqual('inside box');
+        changed++;
+      }
+      expect(changed).toBeGreaterThan(0);
+      // 拖拉中的即時預覽上限（LIVE_PREVIEW_CAP）
+      expect(boxVoxels(box)).toBeLessThan(400_000);
+    }, 30_000);
+
+  it('×1 範例拖 fin 1 節點：外框從 45 萬格（v7）降到 20 萬格以下，進得了拖拉中的即時預覽', () => {
+    // 相對式手勢每片要描整個剖面，所以切面上至少是結構外框（12×40）；省下的是四周固定的 17 格
+    const op = cases[0][1]()!;
+    expect(boxVoxels(previewBox(base, op)!)).toBeLessThan(200_000);
   });
 });

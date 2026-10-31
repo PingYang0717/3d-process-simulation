@@ -44,6 +44,8 @@ export function hitTest(
   zoom: number,
   inside: (key: string, u: number, v: number) => boolean,
   only?: HandleKind,
+  /** 哪些節點抓得到（plan v11 §4.10：自由形變關閉時只有矩形角）；省略＝全部。 */
+  nodeOk?: (r: Ring, i: number) => boolean,
 ): Handle | null {
   const nodeR = NODE_PX / zoom;
   const edgeR = EDGE_PX / zoom;
@@ -53,6 +55,7 @@ export function hitTest(
     for (const [key, rs] of rings)
       rs.forEach((r, ri) =>
         r.nodes.forEach((i) => {
+          if (nodeOk && !nodeOk(r, i)) return;
           const d = Math.hypot(r.pts[i][0] - p[0], r.pts[i][1] - p[1]);
           if (d <= nodeR && d < nd) {
             nd = d;

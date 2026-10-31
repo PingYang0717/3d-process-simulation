@@ -1,5 +1,5 @@
 // 編輯工具列（plan v10 §4.7）：選到結構才出現，在 3D／主切面上方。
-// [瀏覽 | 3D 把手 | 2D 剖面 | 筆刷] 頁籤 ＋ 五顆操作按鈕（長／縮 · 方頭／圓頭 · 移動 · 材質 · 對應）。
+// [瀏覽 | 3D 把手 | 2D 剖面 |（進階）筆刷] 頁籤 ＋ 五顆操作按鈕（長／縮 · 方頭／圓頭 · 移動 · 材質 · 對應）。
 // 未進聚焦時按鈕一樣在（按了直接開卡片，預覽照畫），只是 3D 上沒有把手。
 import { Button, Divider, Flex, InputNumber, Popover, Segmented, Slider, Tooltip, Typography } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
@@ -69,7 +69,8 @@ export function EditToolbar({ ed, onTab }: { ed: Editor; onTab: (t: EditTab) => 
             { label: '瀏覽', value: 'browse' },
             { label: '3D 把手', value: 'handles' },
             { label: '2D 剖面', value: '2d' },
-            { label: '筆刷', value: 'brush' },
+            // 筆刷降級成進階（plan v11 §4.10 P15）：設定裡打開才有這個頁籤；局部缺陷請用「缺陷」
+            ...(ed.brushOn || tab === 'brush' ? [{ label: '筆刷', value: 'brush' }] : []),
           ]}
         />
       </Tooltip>

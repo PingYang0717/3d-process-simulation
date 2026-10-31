@@ -16,7 +16,8 @@ const ok = (cond, msg) => {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(url);
-  await page.evaluate(() => localStorage.clear());
+  // plan v11 §8：舊腳本照 v10 行為跑——進階開關（自由形變、筆刷）打開、推面蓋過去
+  await page.evaluate(() => { localStorage.clear(); localStorage.setItem('se3d.v1.freeform', 'true'); localStorage.setItem('se3d.v1.brushOn', 'true'); localStorage.setItem('se3d.v1.pushPolicy', '"overwrite"'); });
   await page.reload();
   await page.getByRole('button', { name: /用範例試試看/ }).click();
   await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 60000 });

@@ -41,6 +41,17 @@ export function SettingsDrawer({
           <Row label="推面時，外層薄層一起推" sub="HfO₂／TiN 這類襯層跟著位移，不會被蓋掉">
             <Switch checked={ed.follow} onChange={ed.setFollow} />
           </Row>
+          <Row label="推面碰到厚的別的材質" sub="擋住：不穿過 fin／STI（預設）；蓋過去：v10 以前的行為。卡片上可以單張勾「允許穿過」">
+            <Select
+              value={ed.pushPolicy}
+              onChange={ed.setPushPolicy}
+              style={{ width: 150 }}
+              options={[
+                { value: 'block' as const, label: '擋住' },
+                { value: 'overwrite' as const, label: '蓋過去' },
+              ]}
+            />
+          </Row>
           <Row label="搬走／縮短後空出來的地方填" sub="「原本的內容」讓往上再往下、長高再縮短都能回到原點">
             <Select
               value={ed.backfill}
@@ -66,6 +77,14 @@ export function SettingsDrawer({
               suffix="萬格"
               style={{ width: 130 }}
             />
+          </Row>
+        </Section>
+        <Section title="進階">
+          <Row label="自由形變" sub="2D 節點可任意拖、Shift＝單點、Alt＝自由衰減；容易畫出非物理的形狀，預設關（只有矩形角與推邊）">
+            <Switch checked={ed.freeform} onChange={ed.setFreeform} />
+          </Row>
+          <Row label="筆刷" sub="編輯工具列多一個「筆刷」頁籤（局部長縮、局部方頭）；局部缺陷建議用「缺陷」">
+            <Switch checked={ed.brushOn} onChange={ed.setBrushOn} />
           </Row>
         </Section>
         <Section title="單位">

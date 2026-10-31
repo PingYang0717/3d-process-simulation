@@ -41,7 +41,8 @@ function HandleRow({ ed }: { ed: Editor }) {
   const hh = resolveHandle(c, h);
   const r = hh ? c.rings.get(hh.key)?.[hh.ring] : undefined;
   const group = r && hh && h.kind === 'edge' ? smoothEdgeGroup(r, hh.index, single) : [];
-  const mode: DragArg = h.kind === 'node' ? drag : single;
+  // 自由形變關閉（plan v11 §4.10）：節點只有矩形角、邊不能只推一段
+  const mode: DragArg = h.kind === 'node' ? (ed.freeform ? drag : 'corner') : ed.freeform && single;
   const delta: [number, number] = useMemo(() => {
     if (h.kind === 'node') return [pos[0] - h.p[0], pos[1] - h.p[1]];
     if (!r || !group.length) return [0, 0];
@@ -73,6 +74,11 @@ function HandleRow({ ed }: { ed: Editor }) {
         </Flex>
         <Flex align="center" gap={8} wrap>
           <span style={{ fontSize: 12 }}>拖法</span>
+          {!ed.freeform ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              矩形角（設定 → 進階：自由形變 打開才有單點、自由衰減）
+            </Text>
+          ) : (
           <Segmented
             size="small"
             value={drag}
@@ -84,7 +90,8 @@ function HandleRow({ ed }: { ed: Editor }) {
               { label: '自由衰減', value: 'falloff' },
             ]}
           />
-          {drag === 'auto' && picked && (
+          )}
+          {ed.freeform && drag === 'auto' && picked && (
             <Text type="secondary" style={{ fontSize: 12 }}>
               這個節點用「{picked === 'corner' ? '矩形角' : picked === 'single' ? '單點' : '自由衰減'}」
             </Text>
@@ -117,7 +124,7 @@ function HandleRow({ ed }: { ed: Editor }) {
           {(Math.abs(n) * ed.nmPerVoxel).toFixed(1)} nm
         </Text>
       </Flex>
-      <Checkbox checked={single} onChange={(e) => setSingle(e.target.checked)}>
+      <Checkbox checked={single && ed.freeform} disabled={!ed.freeform} onChange={(e) => setSingle(e.target.checked)}>
         只推這一小段（同 Shift＋拖）
       </Checkbox>
       <Button size="small" type="text" onClick={() => ed.setHandle(null)} style={{ alignSelf: 'flex-start' }}>

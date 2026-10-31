@@ -7,6 +7,7 @@ import {
   type Comp,
   type Labeled,
   type Material,
+  type MaterialKind,
   type Vec3,
   type Volume,
   MATERIALS,
@@ -1058,6 +1059,11 @@ export function useEditor() {
     (id: number, color: string) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, color } : m))),
     [],
   );
+  /** 材質類別（plan v11 §4.10）：換材質清單的「合理」分組用，寫進 manifest。 */
+  const setMaterialKind = useCallback(
+    (id: number, kind: MaterialKind) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, kind } : m))),
+    [],
+  );
 
   // ---- 十字 ----
 
@@ -1268,6 +1274,7 @@ export function useEditor() {
     demo,
     renameMaterial,
     setMaterialColor,
+    setMaterialKind,
   };
 }
 

@@ -59,7 +59,7 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     const brush = op.local.radius === null ? '每一排' : `筆刷 r${op.local.radius} 內每一排`;
     const ref = op.ref ? w.L.comps.find((c) => c.key === op.ref!.key) : undefined;
     const rel = op.ref && ref ? `（= ${ref.label} ${a === 1 ? (op.ref.side === 'lo' ? '頂' : '底') : op.ref.side === 'lo' ? AXIS[a] + ' 小端' : AXIS[a] + ' 大端'} ${op.ref.offset >= 0 ? '+' : '−'}${Math.abs(op.ref.offset)} 格 = ${nmText(op.ref.offset, w.nm)}）` : `（${nmText(op.to, w.nm)}）`;
-    return `${who} 方頭：${faceName(op.dir)}${brush}補到 ${AXIS[a]} = ${op.to}${rel} · 只填空氣${op.follow ? '、襯層跟著' : ''}${tail}`;
+    return `${who} 方頭：${faceName(op.dir)}${brush}補到 ${AXIS[a]} = ${op.to}${rel}· 只填空氣${op.follow ? '、襯層跟著' : ''}${tail}`;
   }
   if (op.kind === 'translate') {
     const parts: string[] = [];

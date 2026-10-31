@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react';
-import { Button, ColorPicker, Input, Tooltip, Typography } from 'antd';
+import { Button, ColorPicker, Dropdown, Input, Tooltip, Typography } from 'antd';
 import { EditOutlined, EyeInvisibleOutlined, EyeOutlined, RightOutlined } from '@ant-design/icons';
-import { type Comp, isVoid } from '../../volume/volume';
+import { type Comp, type MaterialKind, isVoid, kindOf } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
 import { type Editor, selectModeOf } from './editor';
 
 const { Text } = Typography;
+/** 材質類別的中文名（plan v11 §4.10）。 */
+const KIND_NAME: Record<MaterialKind, string> = { semi: '半導體', diel: '介電', metal: '金屬', void: '空洞', other: '其他' };
 const labelNumber = (l: string) => parseInt(l.split(' ').pop() ?? '0', 10) || 0;
 
 /** 左欄：依材質分組；點材質名選整組；點色塊改色、雙擊改名；> 3 塊的材質預設收合。 */
@@ -114,6 +116,23 @@ export function StructureList({ ed, width }: { ed: Editor; width: number }) {
                 )}
                 {!only && <span className="group-count">×{regions.length}</span>}
                 <span className="group-acts">
+                  {!isVoid(mat.id) && (
+                    <Dropdown
+                      trigger={['click']}
+                      menu={{
+                        selectable: true,
+                        selectedKeys: [kindOf(mat)],
+                        items: (Object.keys(KIND_NAME) as MaterialKind[]).map((k) => ({ key: k, label: KIND_NAME[k] })),
+                        onClick: ({ key }) => ed.setMaterialKind(mat.id, key as MaterialKind),
+                      }}
+                    >
+                      <Tooltip title="材質類別（換材質時「合理」清單用）">
+                        <Button type="text" size="small" className="kind-btn" aria-label="材質類別">
+                          {KIND_NAME[kindOf(mat)].slice(0, 2)}
+                        </Button>
+                      </Tooltip>
+                    </Dropdown>
+                  )}
                   <Tooltip title="改名稱">
                     <Button type="text" size="small" icon={<EditOutlined />} onClick={() => setEditing(mat.id)} aria-label="改名稱" />
                   </Tooltip>

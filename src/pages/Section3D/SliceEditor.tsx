@@ -7,7 +7,7 @@ import { type Scope, axisIndex, axisLen, planeAxes, to3D } from '../../volume/sc
 import { type Ring, type XY, boundaryLoops, traceRings } from '../../slice/trace';
 import { editRing } from '../../slice/raster';
 import { type Handle, type HandleKind, dragDisp, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
-import { type DragArg, type NodeDrag, dragDispFloat, isSingle, resolveNodeDrag, selfIntersects, snapAmount } from '../../slice/snap';
+import { type DragArg, type NodeDrag, dragDispFloat, isAxisCorner, isSingle, resolveNodeDrag, selfIntersects, snapAmount } from '../../slice/snap';
 import { type ModelStore, type VId, insertNode, locate, removeHandle, ringsOf, sliceOfKey, vidOf } from '../../slice/model';
 import { type ModelHost, commitGesture, opOfGesture, sliceContext } from './handleOps';
 import { type SlicePreview, SlicePreviewLayer } from './SlicePreviewLayer';
@@ -136,6 +136,7 @@ export function SliceEditor({
   overlay,
   onMenu,
   geo,
+  freeform = true,
 }: {
   vol: Volume;
   axis: Axis;
@@ -182,6 +183,8 @@ export function SliceEditor({
   onMenu?: (p: Vec3 | null, clientX: number, clientY: number) => void;
   /** 幾何層（plan v8）；沒給就每次從 voxel 重描（v7 行為）。 */
   geo?: GeoOpts;
+  /** 進階：自由形變（plan v11 §4.10）。關閉時節點只有矩形角抓得到、Shift／Alt 不改拖法；省略＝開（v10 行為）。 */
+  freeform?: boolean;
 }) {
   const [W, H] = planeDims(vol, axis);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -250,7 +253,17 @@ export function SliceEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [got]);
   /** 手勢 → Op（多選＋對應時一起改長得一樣的結構）。 */
-  const opFor = (h: Handle, delta: XY, shift: DragArg) => (sctx ? opOfGesture(sctx, h, delta, shift, mirror) : { op: null, missed: [] as string[] });
+  /** 修飾鍵 → 拖法；自由形變關閉時一律依形狀（Shift／Alt 不生效）。 */
+  const argOf = (e: { shiftKey: boolean; altKey: boolean }): DragArg => (freeform ? dragArgOf(e) : false);
+  const opFor = (h: Handle, delta: XY, shift: DragArg) => {
+    if (!sctx) return { op: null, missed: [] as string[] };
+    const res = opOfGesture(sctx, h, delta, shift, mirror);
+    // 自由形變（單點、自由衰減、單段）產生的 Op：text 前面加「自由形變：」，矩陣表與 manifest 看得出來
+    const r = rings.get(h.key)?.[h.ring];
+    const free = freeform && r && (h.kind === 'node' ? resolveNodeDrag(r, h.index, shift) !== 'corner' : h.kind === 'edge' && isSingle(shift));
+    if (free && res.op?.kind === 'profile' && !res.op.text?.startsWith('自由形變：')) res.op = { ...res.op, text: `自由形變：${res.op.text ?? '剖面調整'}` };
+    return res;
+  };
   const labelOf = (key: string) => L?.comps.find((c) => c.key === key)?.label ?? key;
   const noteMissed = (missed: string[], h: Handle) => {
     if (missed.length) onNote?.(`${missed.map(labelOf).join('、')} 找不到對應的${h.kind === 'node' ? '節點' : '邊'}，未改`);
@@ -433,7 +446,7 @@ export function SliceEditor({
     const q = planeAt(clientX, clientY);
     const p = xfRef.current;
     if (!q || !p || !rings.size) return null;
-    return hitTest(rings, q, p.zoom, insideKey, only.current);
+    return hitTest(rings, q, p.zoom, insideKey, only.current, freeform ? undefined : isAxisCorner);
   };
   /** 拖動中的提示文字（§5.2）：浮點 → 放開後取的整數。 */
   const tipText = (h: Handle, delta: XY, shift: DragArg, op: Op | null) => {
@@ -588,7 +601,7 @@ export function SliceEditor({
       if (at2 && rings.get(at2.key)?.[at2.ring]) return { kind: h.kind, ...at2 };
     }
     // id 不在了（重描時對不到，例如被擋住的邊退回原位）：用記下的位置附近找同一種
-    return hitTest(rings, h.p, 8 / 3, insideKey, h.kind);
+    return hitTest(rings, h.p, 8 / 3, insideKey, h.kind, freeform ? undefined : isAxisCorner);
   };
   // 幾何改了（套用了一步、重描、加刪節點）：把手的索引跟著頂點 id 走；id 不在了（重描對不到）才放掉
   useEffect(() => {
@@ -753,11 +766,11 @@ export function SliceEditor({
         if (pr?.hit) {
           // 拖動：過了 4px 才算；pointermove 只記位置，每一幀算一次（rAF 合併，§8.1）
           if (!pr.dragging && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < CLICK_PX) return;
-          latestMove.current = { x: e.clientX, y: e.clientY, shift: dragArgOf(e) };
+          latestMove.current = { x: e.clientX, y: e.clientY, shift: argOf(e) };
           if (!pr.dragging) {
             pr.dragging = true;
             onDragState?.(true);
-            setDrag({ h: pr.hit, delta: [0, 0], shift: dragArgOf(e), op: null, missed: [] });
+            setDrag({ h: pr.hit, delta: [0, 0], shift: argOf(e), op: null, missed: [] });
           }
           if (!raf.current) raf.current = requestAnimationFrame(tick);
           return;
@@ -786,7 +799,7 @@ export function SliceEditor({
         if (pr.dragging) {
           // 放開＝一步（立刻套用到範圍）。還沒算的那一幀先同步算掉：commit 的就是最後看到的格子
           press.current = pr;
-          latestMove.current = { x: e.clientX, y: e.clientY, shift: dragArgOf(e) };
+          latestMove.current = { x: e.clientX, y: e.clientY, shift: argOf(e) };
           if (raf.current) cancelAnimationFrame(raf.current);
           tick();
           press.current = null;
@@ -972,7 +985,7 @@ export function SliceEditor({
           <div>在<b>裡面</b>可以搬</div>
         </div>
       )}
-      <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · 拖角：Shift＝單點、Alt＝自由衰減 · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>
+      <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · {freeform ? '拖角：Shift＝單點、Alt＝自由衰減' : '拖矩形角或推邊（設定裡開「自由形變」才能拖任意節點）'} · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>
     </div>
   );
 }

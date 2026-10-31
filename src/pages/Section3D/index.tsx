@@ -840,6 +840,7 @@ export default function Section3DPage() {
                   <WithLivePv live={faceHi} pv={null}>
                     {(fh) => (
               <SliceEditor
+                freeform={ed.freeform}
                 vol={shown}
                 axis={axis}
                 at={at}

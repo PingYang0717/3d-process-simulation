@@ -457,3 +457,42 @@ README 的「掃描」段改成「實驗」；HelpDrawer 加一條任務「撒 s
 | D16 | 改到的點比例寫新材質 1.0、其他 0 | 最簡單、可重播；邊界比原始硬一點先接受（使用者選擇） |
 | D17 | 載入用所有 `material_k` 的 argmax，而不是只看 `material_1` | 只看一個陣列拿不到編號；比例為 0／1 時結果和「哪個是 1」相同，介面有部分比例時也成立 |
 | D18 | 比例陣列不常駐記憶體，匯出時從原始 bytes 重新解碼一次 | 4,000 萬點 × 多個 Float32 放不下 |
+
+## 10. 實作紀錄（2026-10-31）
+
+### 完成的範圍
+
+| 里程碑 | 內容 | 測試 |
+| --- | --- | --- |
+| M11.0 | `vti.ts`：`parseHead`／`readValues`／`inspectVti`；比例陣列 argmax（平手取小、全 0＝Air、單一陣列 ≥ 0.5、`material_254`＝VOID）；FieldData 代碼／名稱（String 或 0 結尾 UInt8，ascii 是字元碼或空白分隔字）／顏色（三分量 0～255、0～1 或十六進位字串）；`encodeVtiLike` 照原格式寫回（ascii 只換改到的 token；appended 照原 offset 順序重排，沒改的區塊原封不動複製；壓縮沿用原 blockSize）；上傳確認畫面（手動勾選陣列與編號）；匯出選單多「單一編號 .vti」；manifest `input` | `vtiFrac.test.ts`（6 種編碼 × 讀＋寫：沒改＝逐位元組相同、未改點 bit-identical、改點 1／0、新材質補陣列與 FieldData）；舊 `vti.test.ts` 不變 |
+| M11.1 | `factors.ts`、`editor.addDesign`／`commitTo`、`ExperimentTab.tsx`、`MatrixTab.tsx`、`matrix.ts`（CSV、manifest）、刪 `SweepModal.tsx` | `factors.test.ts`、`v12.test.ts`（3×3＝9 個 split，Worker 重播 ≡ manifest ops 重播，levels／designs round-trip） |
+| M11.2 | `OverlayView.tsx`、`overlay.ts`、CompareView 並排／疊圖、基準選擇、卡片自動放大、腳註改 levels；`SliceView` 多 `box` | `overlay.test.ts` |
+| M11.3 | `cd`、`taper`（展開成 `pushSeq`）、`dilate`（`dilateMask`）、`defect`（`setRegionMaterial`）、`level.ref`、push `policy`；卡片：長／縮四模式、允許穿層、方頭相對於、缺陷卡、FacePicker 軸模式 | `cd`／`taper`／`dilate`／`defect`／`policy`／`levelRef.test.ts`（每個都驗預覽裁切 ≡ applyOp ≡ applyOpLocal） |
+| M11.4 | 設定：推面 policy 預設、進階「自由形變」「筆刷」；`hitTest` 的 `nodeOk`、Shift／Alt 關閉、自由形變 Op 加「自由形變：」；`Material.kind`／`guessKind`、左欄改類別、MaterialCard 分組；README、HelpDrawer | `scripts/e2e/m11.cjs`（§0～§4 全過）；m0／m2／m3／m5／m9／m10 開頭打開進階開關後全過 |
+
+### 和計畫不同的地方
+
+- **實驗頁籤的變數表單**：沒有重用 OpCard 加「這個欄位當變數」那一列，改成頁籤裡的精簡表單（操作、軸／面、錨點、相對於、高度軸、缺陷形狀與位置…）。OpCard 的預覽／套用流程和「一個欄位變成多個水平」對不太起來，硬塞會讓卡片變複雜；產生的 Op 仍走同一組產生函式（`opOfFactor` 和卡片產生的欄位相同）。
+- **A vs B 的 diff 在主執行緒算**：兩個 split 的帳簿都在主執行緒（plan v9 §4.1），直接逐格比、以版本對快取（最近 24 對），不經 Worker `diff`（那個 handler 只回「對原始」的 diff，要另開版本對的請求還得把另一本送過去）。
+- **匯出在主執行緒、沒有進度條**：`encodeVtiLike` 一次解一個比例陣列，記憶體符合 §9 D18；但沒有搬進 Worker。4,000 萬點的實測還沒做（沒有真實檔案）。不支援 `CompressionStream` 的瀏覽器會報錯並請使用者改用「單一編號 .vti」，不是自動退回 appended raw。
+- **同一個組合裡多個變數的 Op 都從起點狀態量**：`level` 的 `to`、`defect` 的 `abs`、`round` 的參考片在產生時用起點（原始或目前 split）的外框算，不會看同一組合裡前一個變數改過的形狀。CD＋偏移這類只靠 keys 的組合不受影響。
+- **taper 的 scope**：每一段推面的 scope 沿高度軸；使用者的範圍另外當 `clip` 夾（`growMask` 新增的參數），插值仍按整根算。
+- **dilate 減薄只從露出的面退**：計畫寫「到最近非 mask 格的距離」；實作時 HfO₂ 的內面貼著 fin，照字面會兩面一起退、厚度 2 的殼整個不見。改成只從外面是空氣或薄襯層的面算距離（和加厚時被厚材質擋住對稱）。
+- **block 時被擋的格子不算長出來**：`growMask` 原本把 front 全部標進 mask；block 時被擋的格子若也標進去，下一步會從擋住的格子再往前長、穿過薄的鄰居。現在只標真的寫到的格子（overwrite 照舊，舊 Op 重播不變）。
+- **dilate 的 TiN 體積**：測試只驗變化 < 5%；角落的格子沿主分量推襯層，體積不是逐格守恆（§8 已列這個風險）。
+- **範本的多結構**：`match` 多一個 `ordinals`（多個結構時）；level 的 `ref` 也換成 `match`。defect 的位置變數（`center[k]`）沒有單位（0～1）。
+- 逐體素測試在整個範例上跑，vitest 的單一測試上限調到 120 s（`vite.config.ts`）。
+
+### 數字
+
+| 項目 | 結果 |
+| --- | --- |
+| 單元測試 | 34 個檔案、231 個測試全過 |
+| 3×3 設計 Worker 重播（×1，node） | 約 3.5 s（`v12.test.ts`，目標 < 5 s） |
+| e2e m11 | §0～§4 共 19 項全過 |
+
+### 還沒做
+
+- 物理 lint、量測器（本來就在下一輪）。
+- 3D 上拖缺陷位置（§4.7 本來就說這一輪不做）。
+- 匯出搬進 Worker＋進度條；拿到第一個真實檔案時跑一次 round-trip（§8）。

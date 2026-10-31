@@ -38,7 +38,8 @@ const shots = process.argv[4] || null;
     return page.evaluate(() => [window.__long, Math.round(window.__longMax)]);
   };
   await page.goto(url);
-  await page.evaluate(() => localStorage.clear());
+  // plan v11 §8：舊腳本照 v10 行為跑——進階開關（自由形變、筆刷）打開、推面蓋過去
+  await page.evaluate(() => { localStorage.clear(); localStorage.setItem('se3d.v1.freeform', 'true'); localStorage.setItem('se3d.v1.brushOn', 'true'); localStorage.setItem('se3d.v1.pushPolicy', '"overwrite"'); });
   await page.reload();
   const t0 = Date.now();
   await page.getByRole('button', { name: scale === 1 ? /用範例試試看/ : new RegExp(`大範例 ×${scale}`) }).click();

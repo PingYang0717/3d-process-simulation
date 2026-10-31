@@ -365,3 +365,4 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .legend-row.on { background: var(--c-bg-2, #f0f5ff); }
 .legend-row.off { opacity: .4; }
 .legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 0; padding: 0; cursor: pointer; flex: none; }
+.kind-btn { font-size: 11px; padding: 0 4px; color: var(--c-text-3, #888); }

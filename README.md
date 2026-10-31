@@ -17,6 +17,8 @@ npm run build      # 型別檢查 + 打包
 
 `.vti` 讀取支援 CellData（沒有則 PointData）、八種數值型別、ascii／inline base64／appended raw／appended base64、zlib 壓縮（header UInt32／UInt64）。整數 0～254 直接當編號，其他依值重新編號。檔案沒有材質名稱，所以載入後一律「材質 n」、自動配色；在左欄雙擊改名、點色塊改色，會寫進 manifest.json。
 
+**比例陣列＋FieldData（plan v11 §4.0）**：真實檔案常是 `PointData` 裡每個材質一個比例陣列（`material_1`、`material_2`…，0～1）＋`FieldData` 材質表（代碼、名稱、顏色）。上傳時先列出偵測結果確認（名稱不符規則的陣列標橘色，可勾選並指定材質編號）；每一點取比例最大者（平手取編號小的、全 0＝Air、只有一個陣列時 ≥ 0.5），名稱與顏色用 FieldData 的。原檔位元組留在記憶體，匯出時一次重新解碼一個比例陣列、套上這個 split 的改動、照原格式寫回（`encodeVtiLike`，`vtiFrac.test.ts`）。
+
 **聚焦編輯（plan v10，主要的改法）**：主畫面預設是 3D，用來看、選、轉；瀏覽時 3D 上怎麼拖都只轉視角。選好結構按 **E**（或雙擊它、右鍵「編輯 {結構}」、上方編輯工具列「3D 把手」）進入聚焦編輯：其他結構半透明、選取用材質原色、相機對準、範圍設成整根。結構上長出**面把手**（選取外框六面中央的橘色箭頭：沿箭頭拖＝那一面整面長／縮）與**角把手**（剖面四個角的紫色菱形：往內拖＝圓角半徑、點一下開圓頭面板）；只有按在把手上才是編輯，其他地方一律轉視角。再按 E＝**2D 剖面**：主畫面換成放大的切面，3D 與另外兩張切面縮到右側小窗；再按 E 回瀏覽（D9），Esc 隨時離開，選取與範圍都留著。編輯工具列另有「筆刷」頁籤（局部長／縮、局部方頭）。2D 剖面的方向自動選結構最長那一軸的法線（fin 沿 z → XY 正面；poly 沿 x → YZ 側面），頁籤可換、換過之後沿用；主切面跳到十字那一片（那一片沒有這個結構就跳到最近的一片），並自動放大到選取。主切面滾輪朝游標縮放（0.25×～32×）、右鍵／中鍵／空白鍵＋左鍵拖平移、雙擊空白適合視窗；換片用 Ctrl＋滾輪、`,` `.`、PgUp／PgDn、位置列。聚焦中右鍵（點在結構上）：對準這裡、{方向}長／縮…、方頭、圓頭…、換材質、在這個面上看 2D 剖面。
 
 **卡片：先看再套用（plan v10）**：所有數值操作都是同一種卡片——第一行一句話（「Poly-Si 2 頂面 y 40 → 37（長高 3 格 = 1.5 nm）· 襯層跟著 · 整根」，`opWords.ts`）、參數、下方「套用到：整根 ▾」與「套用」。改參數 50 ms 後走既有的拖拉預覽管線畫出結果（3D 即時網格、主切面淡綠／淡紅），按「套用」（Enter）才 commit；點別處、Esc、收合就收掉。右欄（長／縮、方頭／圓頭、移動、材質、選到的節點／邊）、上方編輯工具列與 2D 浮動列開的是同一張卡片（`OpCard.tsx`）。方向用六面小方塊（`FacePicker.tsx`，滑過時 3D 選取外框那一面亮橘色＋箭頭）。卡片、把手、右鍵、方向鍵都呼叫同一個產生 Op 的函式（`editor.ts` 的 `pushOp`／`levelOp`／`translateOp`／`materialOp`、`handles3d.ts`）。
@@ -36,6 +38,14 @@ npm run build      # 型別檢查 + 打包
 **3D 視角（plan v10）**：滾輪自己接（OrbitControls 的 zoomToCursor 會把旋轉中心帶跑）：朝游標下的實際表面縮放，旋轉中心放在那個面的深度；沒打到東西就朝現在的中心縮放、中心不動。左鍵旋轉前中心先放到游標下；雙擊模型＝對準那一點（動畫）。中心跑到模型（放大 25%）外、退得太遠或整個模型都在畫面外 → 自動拉回模型中心（只轉頭）。極點留 0.02 rad，上視也能繼續拖。開發模式 `window.__controls`。
 
 **筆刷（聚焦編輯的一個工具）**：編輯工具列切到「筆刷」才有。選好結構後滑鼠移到它的面上會看到筆刷圈與法線箭頭（半徑、圓／方在工具列），按住沿法線拖＝圈圈裡局部長／縮，拖的時候 3D 與切面就顯示結果，放開才套用（橘色虛線框是範圍、游標旁顯示格數與 nm）。先拖過 8px 才算拖拉；正對著面看時改用垂直位移估算；拖到一半按 Esc 取消。切到「局部方頭」時點一個面＝圈圈裡每一排補到或削到那一面。換材質點下去 3D 立刻變色（GPU 上先改面的顏色，Worker 的正式結果幾秒後覆蓋）。
+
+**撒 split（plan v11「實驗」頁籤）**：右欄「實驗」定義變數——結構（目前的選取）＋操作（CD、長／縮一面、移動、方頭到／相對 recess、圓頭半徑、保形層厚度、側壁斜度、缺陷）＋固定欄位；標稱自動量（CD＝現在的寬、保形層＝量到的厚度、相對 recess＝面 − 參照面），水平可填絕對或相對（`16, 18, 20`、`±2 step 1`、`-2..2 step 1`、`nominal ±10%`），兩欄都顯示、小於半格標橘。組合：逐一掃描（其他維持標稱）／全因子／手動勾選；從原始、接在目前 split 之後，或「套用到所有現有 split」（單一組合時：每個 split 各 commit 一步，例如全部加同一個 void）。名字照樣板 `{id}={value}{unit}`（`Lg=12nm_off=+1nm`），id 預設 `PolySi2_W` 這種、可改；產生前可試算每個組合的改動與被擋格數。範本（變數用材質名＋序號對回結構）存在瀏覽器、可匯出／匯入 JSON。Factor／水平只是標註：每個 split 仍是一串絕對格數的 Op，刪掉 levels 也能重播（`factors.ts`、`factors.test.ts`、`v12.test.ts`）。
+
+**新操作（plan v11 §4.5～§4.9）**：`cd`（對稱 CD：展開成兩個推面，奇數格多的給 hi 側）、`dilate`（保形層加厚／減薄：歐氏距離，由近到遠呼叫核心規則「加」，外面的薄層推開、厚的擋住；減薄只從露在空氣或薄襯層的那一面退）、`taper`（側壁斜度：沿高度軸每一片線性插值的位移，相鄰同值合成一段推面）、`defect`（結構內部換材質：片／球／盒，位置相對結構外框、Op 另存絕對外框）、`level.ref`（相對參照，`to` 仍是絕對值）。推面新增 `policy`：預設 `block`（碰到厚的別的材質擋住），舊 Op 沒有 policy＝`overwrite`，重播逐位元組不變（`policy.test.ts`）。
+
+**比較（plan v11 §4.4）**：「並排看」可選基準（原始或任一 split，A vs B；3D 差異模式與「改了哪些」仍對原始），卡片自動放大到所有 split 在這一片的差異外框；「疊圖」把每個 split 的輪廓畫在同一張切面（基準黑線、各 split 不同色），圖例點名字切 split、點色塊隱藏、滑過加粗。「矩陣」頁籤（原 Split 總表）一列一個 split、一欄一個變數，加 W／H／D、改動、被擋、tags，可排序、隱藏欄、勾選匯出、匯出 CSV（和 manifest 同源）。
+
+**收斂（plan v11 §4.10）**：設定 → 進階「自由形變」預設關：2D 節點只有矩形角抓得到、Shift／Alt 不改拖法；打開後和 v10 相同，產生的剖面 Op 描述前加「自由形變：」。「筆刷」頁籤也收進進階。換材質清單先列合理的（VOID、原始材質、同類材質），材質類別依名稱猜（Si／Poly→半導體、SiO₂／SiN／HfO₂→介電、TiN／W／Cu→金屬），左欄可改。
 
 **即時預覽**：每一步（卡片的預覽與套用、把手、方向鍵、筆刷）送 Worker 之前，主執行緒先把這一步會動到的小塊裁下來（選取外框 ∩ 筆刷範圍，沿法線多留 |n|＋襯層），用同一組純函式算一次並 greedy mesh，主網格同一範圍用 shader 挖掉、疊上這塊小網格，切面與剖面貼圖也蓋上同一份結果；Worker 的正式網格到了就收掉。裁切範圍內逐體素和正式結果相同（`preview.test.ts`）。範圍超過 600 萬 voxels（例如整個基板）就不預覽、只畫橘色塊；拖拉中的即時預覽上限 40 萬。
 
@@ -57,7 +67,9 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/editor.ts` | `useEditor`（async）：splits、選取、範圍（`scope`／`scopeMode`／`editAxis`）、聚焦編輯（`focus`）與自動放大設定、commit → Worker、undo／redo（每 split 10 步）、busy、diff／ledger、鍵盤、`loadVolume(vol, meta)` |
 | `src/pages/Section3D/views.tsx` | `View3D`（Worker greedy mesh、選取層沿法線外推、差異模式兩層、三軸剖面＋剖口貼圖、命中、筆刷圈與拖拉預覽、即時預覽網格＋主網格挖洞 shader、視角預設、座標軸、即時變色 `recolor`）、`drawSlice`、`SliceView`。按下用 capture 階段的原生事件判斷筆刷，OrbitControls 才不會記到一個收不到放開的指標 |
 | `scripts/build-proto.mjs` | `node scripts/build-proto.mjs out.html`：esbuild 打成單一 .html（Worker 內嵌） |
-| `src/pages/Section3D/*.tsx` | Inspector、ChangesTab、SplitsTab、SplitBar、SweepModal、CompareView、StructureList（改名／改色）、SettingsDrawer、UploadPanel（.vti／.npy、Spacing 單位、大範例）、HelpDrawer、index（版面、匯出） |
+| `src/pages/Section3D/*.tsx` | Inspector、ChangesTab、ExperimentTab（實驗變數、組合、產生、範本）、MatrixTab（矩陣表、CSV）、SplitBar、CompareView（並排、基準）、OverlayView（疊圖）、StructureList（改名／改色／材質類別）、SettingsDrawer（含進階開關）、UploadPanel（.vti 偵測確認／.npy、Spacing 單位、大範例）、HelpDrawer、index（版面、匯出） |
+| `src/volume/factors.ts` | plan v11：Factor／Design、`combosOf`、`opsOfCombo`、`nameOfCombo`、`measureNominal`、`parseLevels`、`defaultId`、範本 `toTemplate`／`fromTemplate`（`factors.test.ts`） |
+| `src/pages/Section3D/matrix.ts`、`overlay.ts` | plan v11：矩陣表／CSV／manifest 的純函式；疊圖的描輪廓快取、差異外框、A vs B 的版本對 diff（`overlay.test.ts`） |
 | `src/pages/Section3D/OpCard.tsx`、`FacePicker.tsx`、`RoundCard.tsx`、`opWords.ts`、`EditToolbar.tsx`、`handles3d.ts` | plan v10：預覽 → 套用的卡片、六面小方塊、圓頭面板、一句話、編輯工具列（瀏覽／3D 把手／2D 剖面／筆刷＋五顆操作按鈕）、3D 把手的純函式（`handles.test.ts`） |
 | `src/slice/round.ts` | 圓頭：每片的目標形狀 → 加／拿的格子、`roundOp`、`roundStats`、`roundOutline`（`round.test.ts`） |
 | `src/pages/Section3D/SliceEditor.tsx` | 2D 編輯的主切面：縮放、平移、換片、縮放列（1:1／8×／適合／對準選取）、自動放大到選取 |
@@ -112,8 +124,8 @@ plan v9（`docs/plan-v9-performance.md`）之後：
 
 ## 匯出
 
-- 目前 split：`原檔__split名.vti`（同 Extent／Spacing／Origin、UInt8 CellData），或 `.npy`
-- 全部：`原檔__splits.zip`，每個 split 一個 `.vti`（或 `.npy`）＋ `manifest.json`（source、format、materials（id／name／color）、shape、dtype、spacing、origin、nmPerVoxel、每個 split 的檔名、改動體素數、ops 與白話描述）
+- 目前 split：`原檔__split名.vti`——輸入是比例陣列＋FieldData 時和輸入一模一樣（同 XML 結構、陣列名稱與型別、編碼與壓縮；未改點 bit-identical、改點新材質 1／其他 0），否則同 Extent／Spacing／Origin 的 UInt8 CellData；「單一編號 .vti」與 `.npy` 也可選
+- 全部：`原檔__splits.zip`，矩陣表勾選的 split 各一個檔＋ `manifest.json`（source、format、input（原檔是哪種格式）、materials（id／name／color／kind／source）、shape、dtype、spacing、origin、nmPerVoxel、designs（factors、levels、combine、nameTemplate）、baseline、每個 split 的檔名、改動體素數、被擋、designId、levels、tags、ops 與白話描述）。實驗表：`pd.DataFrame([{**s['levels'], 'file': s['file']} for s in m['splits']])`
 
 ```python
 import json, zipfile, io

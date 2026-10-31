@@ -107,7 +107,7 @@ export function SplitBar({
         trigger={['click']}
         menu={{
           items: [
-            { key: 'sweep', icon: <ThunderboltOutlined />, label: '同一個操作、不同數值（例：poly 長高 1／2／3 nm）…', onClick: onSweep },
+            { key: 'sweep', icon: <ThunderboltOutlined />, label: '撒 split：定義實驗變數（例：Lg 11／12／13 nm × 偏移）…', onClick: onSweep },
             { key: 'blank', icon: <PlusOutlined />, label: '空白 split（從原始開始）', onClick: () => ed.addSplit() },
             {
               key: 'dup',

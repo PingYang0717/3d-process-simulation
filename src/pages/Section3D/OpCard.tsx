@@ -202,9 +202,9 @@ function Steps({ ed, value, onChange, min = -32, max = 32, label = '格數' }: {
 }
 
 /** 長／縮：選一面、沿法線幾格（負＝縮）。 */
-export function PushCard({ ed, compact, plane }: { ed: Editor; compact?: boolean; plane?: Axis }) {
+export function PushCard({ ed, compact, plane, initialDir }: { ed: Editor; compact?: boolean; plane?: Axis; initialDir?: Vec3 }) {
   const host = useContext(CardHostCtx);
-  const [dir, setDir] = useState<Vec3>(() => defaultDir(plane));
+  const [dir, setDir] = useState<Vec3>(() => initialDir ?? defaultDir(plane));
   const [n, setN] = useState(1);
   const op = useMemo(() => ed.pushOp(dir, n), [ed.pushOp, dir, n]);
   return (

@@ -64,9 +64,9 @@ export function slicesWith(mask: Uint8Array, vol: Volume, axis: Axis, bbox?: BBo
   return out;
 }
 
-/** 3D 筆刷：推拉（沿法線長／縮 n 格）、補平（補到／削到點到的那一面）或關閉（拖拉一律轉視角）；半徑 null = 整面。 */
+/** 3D 筆刷（聚焦編輯裡的一個工具）：局部長／縮（沿法線 n 格）、局部方頭（補到／削到點到的那一面）；半徑 null = 整面。 */
 export interface Brush {
-  mode: 'push' | 'level' | 'off';
+  mode: 'push' | 'level';
   radius: number | null;
   shape: BrushShape;
 }
@@ -79,6 +79,7 @@ import { boxVoxels } from '../../volume/preview';
 import { clipBox as clipScopeBox } from '../../volume/scope';
 import type { PickedHandle } from './SliceEditor';
 import { ModelStore } from '../../slice/model';
+import { pushOpOf } from './handles3d';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 
 export { type EditState, type Op, type SweepKind, applyOp, matNameOf, opText, replay, sweepOps } from '../../volume/ops';
@@ -160,6 +161,8 @@ const wrap = (owner: string, buf: SplitBuffers, comps: Comp[], version: number, 
 // ---- useEditor ----
 
 export type SelectMode = 'set' | 'add' | 'toggle';
+/** 聚焦編輯：哪個畫面（3D 把手／筆刷、2D 剖面）。 */
+export type Focus = null | { view: '3d' | '2d'; tool: 'handles' | 'brush' };
 export const selectModeOf = (e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): SelectMode =>
   e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'toggle' : 'set';
 
@@ -169,6 +172,9 @@ export interface MenuState {
   key: string | null;
   /** 沿射線往裡面還有哪些結構（含第一個），「這裡的其他結構」用。 */
   along?: string[];
+  /** 點到的體素與面的外法線（3D；聚焦編輯的「{方向}長／縮…」「在這個面上看 2D 剖面」用）。 */
+  voxel?: number | null;
+  n?: Vec3 | null;
 }
 
 export function useEditor() {
@@ -209,8 +215,11 @@ export function useEditor() {
   const [scopeMode, setScopeMode] = usePersisted<ScopeMode>('scopeMode', 'whole', isScopeMode);
   /** 自訂範圍的兩端（絕對座標，沿 editAxis）。 */
   const [customRange, setCustomRange] = useState<[number, number]>([0, 0]);
-  /** 在 3D 上雕刻（進階，預設關）：關著時 3D 上怎麼拖都只轉視角。 */
-  const [sculpt3d, setSculpt3d] = usePersisted('sculpt3d', false);
+  /**
+   * 聚焦編輯（plan v10 §4.5）：null＝瀏覽（3D 上怎麼拖都只轉視角）；3d＝3D 把手或筆刷；2d＝2D 剖面。
+   * E：瀏覽 → 3D 把手 → 2D 剖面 → 瀏覽（D9），Esc 離開；選取與範圍留著。
+   */
+  const [focus, setFocus] = useState<Focus>(null);
   /** 選到結構時主切面自動放大到它。 */
   const [autoZoom, setAutoZoom] = usePersisted('autoZoom', true);
   /** 大操作確認門檻（體素數）：一步會動到的範圍超過就先問。 */
@@ -226,7 +235,7 @@ export function useEditor() {
   const [brush, setBrush] = usePersisted<Brush>(
     'brush',
     { mode: 'push', radius: 6, shape: 'round' },
-    (v): v is Brush => !!v && typeof v === 'object' && ['push', 'level', 'off'].includes((v as Brush).mode) && ['round', 'square'].includes((v as Brush).shape),
+    (v): v is Brush => !!v && typeof v === 'object' && ['push', 'level'].includes((v as Brush).mode) && ['round', 'square'].includes((v as Brush).shape),
   );
   /** 每一步送 Worker 前先叫它：View3D 在主執行緒用裁切的小塊立刻畫出結果（正式結果幾秒後覆蓋）。 */
   const previewHook = useRef<((op: Op) => void) | null>(null);
@@ -759,8 +768,7 @@ export function useEditor() {
   );
   /** 長／縮：dir 那一面沿法線 n 格（負＝縮）；local＝筆刷。 */
   const pushOp = useCallback(
-    (dir: Vec3, n: number, local?: Local): Op | null =>
-      !sel.size || !n ? null : { kind: 'push', keys: [...sel], scope, dir, n, follow, backfill, ...(local ? { local } : {}) },
+    (dir: Vec3, n: number, local?: Local): Op | null => pushOpOf([...sel], scope, dir, n, follow, backfill, local),
     [sel, scope, follow, backfill],
   );
   const materialOp = useCallback((m: number): Op | null => (sel.size ? { kind: 'material', keys: [...sel], scope, m } : null), [sel, scope]);
@@ -955,8 +963,9 @@ export function useEditor() {
         return;
       }
       if (e.key === 'Escape') {
-        // 一層一層退：先關選單，再取消選取
+        // 一層一層退：先關選單，再離開聚焦編輯（選取留著），再取消選取
         if (menu) setMenu(null);
+        else if (focus) setFocus(null);
         else clearSel();
         return;
       }
@@ -987,7 +996,12 @@ export function useEditor() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId, menu]);
+  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId, menu, focus]);
+  // 沒有選取就沒有聚焦編輯；載入新檔案也回到瀏覽
+  useEffect(() => {
+    if (!sel.size) setFocus(null);
+  }, [sel.size]);
+  useEffect(() => setFocus(null), [origState]);
 
   return {
     ready,
@@ -1062,8 +1076,8 @@ export function useEditor() {
     setCustom,
     selBox,
     selRange,
-    sculpt3d,
-    setSculpt3d,
+    focus,
+    setFocus,
     autoZoom,
     setAutoZoom,
     follow,

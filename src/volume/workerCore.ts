@@ -94,7 +94,8 @@ export interface Requests {
    * （選取看 labels，髒的範圍是 relabel 的 S；材質看體素，髒的是補丁外框），否則只算和 box 相交的 chunk。
    */
   layer: {
-    req: { sid: number; key: string; filter: LayerFilter; tint: [number, number, number]; inflate?: number; base?: number };
+    /** palette：有給就用材質原色（聚焦編輯的「選取實色」，plan v10 §4.5），沒給就整層 tint。 */
+    req: { sid: number; key: string; filter: LayerFilter; tint: [number, number, number]; inflate?: number; base?: number; palette?: Float32Array };
     res: { full: boolean; items: ChunkItem[] };
   };
   /**
@@ -408,7 +409,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: b.diffCount }, [mask.buffer]];
   },
   count: ({ sid }) => [Array.from(stateOf(sid).book.counts), []],
-  layer: ({ sid, filter, tint, inflate, base }) => {
+  layer: ({ sid, filter, tint, inflate, base, palette }) => {
     const { vol, labels } = stateOf(sid);
     const g = gridOf(vol);
     const data = vol.data;
@@ -433,7 +434,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
         const l = labels[i];
         if (l < 0 || l >= on.length || !on[l]) return 0;
         const t = along(i);
-        return t >= lo && t <= hi ? 1 : 0;
+        return t >= lo && t <= hi ? (palette ? data[i] : 1) : 0;
       };
     }
     const par = parents.get(sid);
@@ -450,7 +451,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       if (!sel) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
       ks = box ? chunksTouching(vol, g, box) : [];
     }
-    const color = (): [number, number, number] => tint;
+    const color = (c: number): [number, number, number] => (palette ? [palette[c * 3], palette[c * 3 + 1], palette[c * 3 + 2]] : tint);
     const items: ChunkItem[] = [];
     for (const k of ks) {
       const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);

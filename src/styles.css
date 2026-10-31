@@ -341,3 +341,9 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .round-sketch .rs-dot { fill: #fff; stroke: #8c8c8c; stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: pointer; }
 .round-sketch .rs-dot.convex { fill: #fa541c; stroke: #d4380d; }
 .round-sketch .rs-dot.concave { fill: #722ed1; stroke: #531dab; }
+/* plan v10 §4.7：編輯工具列、浮動卡片 */
+.edit-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; margin: 0 12px 8px; background: #fff; border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); flex-wrap: wrap; }
+.edit-toolbar .grow { flex: 1; }
+.edit-toolbar .ant-btn { font-size: 12px; }
+.float-card { z-index: 1050; width: 400px; padding: 10px 12px; background: #fff; border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); box-shadow: 0 8px 28px rgba(0, 0, 0, .16); max-height: calc(100vh - 16px); overflow: auto; }
+.float-card .grow { flex: 1; }

@@ -1,7 +1,7 @@
 # 計畫 v12：改後不標色、差異只算改到的地方、split 改成一頁
 
 > 位置：`docs/plan-v12-splits-page.md`，分支 `claude/upbeat-einstein-wod16i`，接在 plan v11 之後（commit 053cd8c）。
-> 出發點：2026-10-31 使用者試用 v11 後的三點回饋（§1），加上本文件 §2 的查證（在 commit 053cd8c 上用 Playwright 重現、量測）。
+> 出發點：2026-10-31 使用者試用 v11 後的三點回饋（§1），加上本文件 §2 的查證（在 commit 053cd8c 上用 Playwright 重現、量測）。2026-11-01 使用者接受 §10 全部建議，並做了第二次審查（重點：實驗頁好懂、不卡）。
 > 範圍：M12.0 顏色與光照、M12.1 差異模式 chunk 化、M12.2 split 生命週期（live／parked）、M12.3 「實驗」改成一頁（設計、結果卡片、2D 縮圖、比較）、M12.4 文件。**物理 lint、量測器仍不在這一輪。**
 
 ---
@@ -87,7 +87,7 @@
 - **顏色**：範例 Poly-Si 3 圓頭 r＝8 後，改後模式 3D 上視圖取圓角帶與側面像素，和調色盤色的色相差 < 8°、飽和度差 < 0.1；任何材質的最亮面 ≤ 調色盤色（不飽和）。改後模式的畫面裡沒有任何像素落在 `REMOVED` 紅 ±12。單元測試：改後模式 `chunks`／`layer` 的請求 `diff === false`、預覽的 `showDiff === false`（e2e 從 `window.__calls` 讀）。
 - **差異模式**：×2 第一次按 D 到網格換上 < 300 ms（現 1,731）；Worker 不再配 O(N) 暫存；差異層 quad 數 ＝ 舊 `diffMesh.changed` 的 quad 數（逐面相同，`diffLayer.test.ts`）；旋轉時 draw call 增量 ＝ 改到的 chunk 數（×1 範例圓頭 ≤ 6 個）。
 - **記憶體**：×2 產生 20 個 split（每個改 3,000～5,000 格）後，`performance.measureUserAgentSpecificMemory`／`bench.ts splits` 的增量 < 1 個 live 帳簿＋20 × patch（< 250 MB，現 ≈ 3.8 GB）；切到 parked split 到 3D 換上網格 < 1.5 s（×2）。
-- **實驗頁**：範例上做 3×3 設計（L<sub>g</sub> × 偏移）：設計區能在不看說明的情況下完成（m12 腳本照「新使用者」路徑：選結構 → 加變數 → 點預設水平 chips → 看組合表 → 產生）；產生時留在實驗頁、進度 k／N；9 張卡片各有縮圖，縮圖上看得到差異描邊；勾 3 張 → 疊圖 3 條線；點「在 3D 看」→ 編輯頁、相機對準差異外框。200 個 split 時結果區捲動不掉幀（虛擬化：DOM 裡 ≤ 40 張卡）。
+- **實驗頁**：範例上做 3×3 設計（L<sub>g</sub> × 偏移）：設計區能在不看說明的情況下完成（m12 腳本照「新使用者」路徑：選結構 → 加變數 → 點預設水平 chips → 看組合表 → 產生）；產生時留在實驗頁、進度 k／N；9 張卡片各有縮圖，縮圖上看得到差異描邊；勾 3 張 → 疊圖 3 條線；點「在 3D 看」→ 編輯頁、相機對準差異外框。200 個 split 時結果區捲動不掉幀（虛擬化：DOM 裡 ≤ 40 張卡）、滑鼠在實驗頁移動 60 次整頁 render 0 次、點卡片不觸發任何 Worker 請求。產生 20 個 split（×2）期間主執行緒 heap 增量 < 60 MB。
 - **驗證**：圓頭半徑填 `−5` → 紅字「半徑不能小於 0」、產生鈕反灰；水平等於標稱的組合標「對照組（不改動）」。
 - 所有既有測試與 m0～m11 e2e 仍過（split 的 Op／重播／manifest 不變）。
 
@@ -155,9 +155,13 @@ interface SplitPatch {
 
 **park(split)**（純函式 `splits/lifecycle.ts` 的 `extractPatch(buf, diffBox, comps)`）：裁 `diffBox` 內的 data／labels，記 comps 與 counts 差，丟 `buf`、丟 `hist`／`future`（復原記錄釋放，ops 保留，D3），Worker `drop([id])`。O(外框)。
 
+**產生時直接在 Worker 做補丁，主執行緒不碰 O(N)**：現在 `replayIn` 把整本帳簿（6N bytes）傳回主執行緒；4,000 萬 voxels 一個 split 就是 240 MB 的傳輸與配置，產生 50 個就是 12 GB 的搬運。`replay` handler 加 `keep: 'live' | 'patch'`：`'patch'` 時 Worker 在一本**重複使用的 scratch 帳簿**上重播（每次先從 base memcpy 回來，不另外 fork）、算 stats、裁補丁、只傳回補丁與 stats，主執行緒拿到的就是 parked split。「套用到所有 split」（`commitTo` 對 parked split）同樣走 scratch：restore 進 scratch → 套用 → 裁補丁 → 不留帳簿。只有「第一個設為目前的 split」真的 restore 成 live。
+
 **restore(split)**（Worker 新 handler `restore: { owner, box, data, labels, comps, keyCounter }`）：`fork` 原始那本（O(N) memcpy，4,000 萬 ≈ 240 MB，數十到一百多 ms）→ 貼 data／labels 補丁 → 在 box 內對照原始算 `diff` 與 `diffCount` → counts ＝ 原始＋差量 → 新版本號、`parents` 設 `box`。主執行緒同樣 `own()` 式複製再貼補丁。比重播快、而且不依賴重播結果（但 `lifecycle.test.ts` 驗證 restore ≡ replay 逐位元組）。
 
-**政策**：`live` 集合 ＝ `{active}` ∪ 最近用過的 K−1 個（LRU）∪ 正在產生／匯出的暫時 live。K 依大小：N ≤ 500 萬 → 8、≤ 2,000 萬 → 3、否則 1；設定裡可改。超出的 park。`addDesign` 每產生一個就算 stats＋縮圖、立刻 park（只有第一個留 live，而且不切 active，D8）。原始永遠 live（本來就是 `base`）。
+**政策**：`live` 集合 ＝ `{active}` ∪ 最近用過的 K−1 個（LRU）∪ 正在產生／匯出的暫時 live。K 依大小：N ≤ 500 萬 → 8、≤ 2,000 萬 → 3、否則 1；設定裡可改。超出的 park。`addDesign` 每產生一個就是 parked（Worker 直接回補丁，見上），縮圖在補丁回來的同一個 tick 畫；產生完第一個 split 設為目前（restore 成 live），不切頁、不切 3D（D8）。原始永遠 live（本來就是 `base`）。
+
+**`setActiveId(parked)` 是非同步的**：先 busy 列「正在載入 {name}…」，Worker restore 回來才真的切 `cur`；切之前 `ed.cur` 仍是上一個，所以 3D 不會閃空畫面。實驗頁裡點卡片**不會**觸發這個（§5.4：點卡片只是高亮），只有「在 3D 看」、從 `SplitPicker` 選、或要編輯時才 restore。`duplicateSplit` 對 parked split ＝ 複製補丁（O(外框)），不 restore。
 
 **parked split 的切面**（並排、疊圖、縮圖、矩陣的 W／H／D）：不還原。`slabOf(split, axis, at)`：複製原始那一片（W×H）、把 patch 和這片相交的列蓋上去，labels 同理；包成 `{X, Y, Z}` 裡法線軸長度 1 的假 Volume（`at = 0`），餵給現有的 `drawSlice`／`sliceDiff`／`contourOf`（它們只靠 dims 與 index 算，不看 `Z` 真的多長）。快取 `(version, axis, at)`。W／H／D 從 `patch.comps` 的 bbox 來，不用切面。
 
@@ -177,25 +181,28 @@ interface SplitPatch {
 
 設計區（取代 `ExperimentTab`，拆成 `DesignPanel.tsx`、`FactorCard.tsx`、`LevelsEditor.tsx`、`ComboTable.tsx`）：
 
-1. **結構**：目前選取（沒有就列最近改過的／全部結構的下拉，選了會在編輯頁選取同步）。旁邊一張 120 px 的縮圖：這個結構最長軸的切面、結構用選取藍、其他半透明。
-2. **變數卡**（每個變數一張）：第一行一句話（opWords 風格）「**Poly-Si 2** 沿 z 的寬度（CD）· 現在 24 格＝12 nm」；第二行名稱（一個欄位，id 自動由名稱產生、灰字顯示，點才改）；第三行 **水平**：chips 編輯器——每個 chip 顯示 `18 nm（−2）`，可刪；下方預設按鈕「±1 格」「±2 格」「±10%」「3 個等距…」與「自訂…」（才出現現在的語法輸入框，placeholder 放範例）；絕對／相對只是顯示切換（存的都是格數）。標稱量不到的操作（移動、斜度、缺陷）卡片直接寫「從 0 起」，不顯示絕對模式。軸／面／錨點等固定欄位收在卡片底下的「設定 ▾」，含 `FacePicker` 小方塊（滑過時結構縮圖上那條邊亮起）。
-3. **組合**：Segmented 不變，下面改成 **組合表**（`ComboTable`）：一列一個會產生的 split、一欄一個變數、最後兩欄「改動 ≈」「被擋」（試算，背景算、逐列填）；等於標稱的列標「對照組」；無效的列（負半徑、超出陣列、改動 0）標紅並寫原因。手動勾選＝這張表的核取方塊。
+0. **空狀態與步驟列**：頁面頂端一條「① 選結構 → ② 加變數 → ③ 看組合 → ④ 產生」的步驟列，做到哪一步亮到哪一步；還沒有變數時設計區只顯示第 ① 步與一句話說明，結果區顯示「還沒有 split：在左邊定義變數，或從編輯頁直接改一刀」。範本（存／載入／匯出／匯入 JSON，v11 §4.3）保留在設計區右上角「範本 ▾」，載入範本＝直接跳到第 ③ 步。
+1. **結構**：目前選取（沒有就在這裡選：下拉依材質分組、列結構名與大小，不必回 3D 點；選了會和編輯頁的選取同步）。旁邊一張 120 px 的縮圖：這個結構最長軸的切面、結構用選取藍、其他半透明。
+2. **變數卡**（每個變數一張）：第一行一句話（opWords 風格）「**Poly-Si 2** 沿 z 的寬度（CD）· 現在 24 格＝12 nm」；第二行名稱（一個欄位，id 自動由名稱產生、灰字顯示，點才改）；第三行 **水平**：chips 編輯器——每個 chip 顯示 `18 nm（−2）`，可刪；下方預設按鈕用使用者的單位寫（有 nm 比例時「±0.5 nm」「±1 nm」「±10%」「3 個等距…」，括號裡附格數），與「自訂…」（才出現現在的語法輸入框，placeholder 放範例）；絕對／相對只是顯示切換（存的都是格數）。標稱量不到的操作（移動、斜度、缺陷）卡片直接寫「從 0 起」，不顯示絕對模式。軸／面／錨點等固定欄位收在卡片底下的「設定 ▾」，含 `FacePicker` 小方塊（滑過時結構縮圖上那條邊亮起）。
+3. **組合**：Segmented 不變，下面改成 **組合表**（`ComboTable`）：一列一個會產生的 split、一欄一個變數、最後兩欄「改動 ≈」「被擋」；等於標稱的列標「對照組」；無效的列（負半徑、超出陣列、改動 0）標紅並寫原因。手動勾選＝這張表的核取方塊。**試算不在主執行緒**：現在的 `runTrial` 對最多 60 個組合同步跑 `previewOp`，大模型會把畫面凍住；改成送 Worker 既有的 `preview` handler（`mesh: false`），一次一個、排隊、逐列填、改了變數就取消還沒算的；表格先顯示「計算中」。
 4. **從哪裡開始**、**命名**：同現在，但命名欄位旁即時顯示第一列的名字。
-5. **產生**：按鈕寫「產生 9 個 split」；進度 `k／N`、可取消（取消＝已產生的留著）；完成後停在實驗頁、結果區捲到新卡片並高亮（D8）。
+5. **產生**：按鈕寫「產生 9 個 split」；進度 `k／N`、可取消（取消＝已產生的留著）；完成後停在實驗頁、結果區捲到新卡片並高亮（D8），訊息帶「撤銷這次產生」（刪掉這一批，10 秒內）。
 
 結果區（`ResultGrid.tsx`、`SplitCard.tsx`，取代 `SplitBar` 的頁籤、`CompareView` 的入口、`MatrixTab`）：
 
 - 工具列：篩選（設計、tag、每個變數的水平）、排序（名字、產生順序、改動、每個變數）、檢視「卡片｜表格」（表格＝現在的 `MatrixTab`，欄位不變）、縮圖軸「自動｜XY｜XZ｜YZ」、「比較勾選的（並排／疊圖）」、「匯出勾選的」、「刪除勾選的」、「全選本設計」。
-- 卡片：縮圖（§5.5）、名字、水平 chips（同設計的變數同色點）、`Δ 3,096 vx`、被擋時橘字、`baseline`／tags、live／parked 小點、核取方塊。點卡片＝設為目前（`activeId`，不離開頁面，編輯頁回去就是它）；「在 3D 看」（或雙擊）＝切到編輯頁，`View3D` 對準 `diffBox`（新按鈕「對準差異」，鍵 `G`）。右鍵／⋯：重新命名、複製、刪除、接著改（＝在 3D 看）。
-- 虛擬化：列高固定，自己做簡單的視窗化（只渲染可見列 ± 2 列），DOM 裡 ≤ 40 張卡；縮圖用 `IntersectionObserver` 進視窗才畫。
+- **依設計分組**：預設一個設計一組，組標題寫設計的變數與時間（「L<sub>g</sub> × 偏移 · 3×3 · 14:02」）、可收合；手動改出來的 split 歸「手動」一組。排序與篩選在組內作用。
+- 卡片：縮圖（§5.5）、名字、水平 chips（同設計的變數同色點）、`Δ 3,096 vx`、被擋時橘字、`baseline`／tags、live／parked 小點、核取方塊。**點卡片＝高亮（純 UI，不 restore、不切 3D）**，Shift／Ctrl 多選同勾選；「在 3D 看」（或雙擊、Enter）＝設為目前並切到編輯頁，`View3D` 對準 `diffBox`（新按鈕「對準差異」，鍵 `G`）。目前在編輯頁看的那個另外標「目前」。右鍵／⋯：重新命名、複製、刪除、接著改（＝在 3D 看）。
+- **不卡的三個規定**：（a）虛擬化：列高固定，自己做簡單的視窗化（只渲染可見列 ± 2 列），DOM 裡 ≤ 40 張卡；縮圖用 `IntersectionObserver` 進視窗才畫。（b）`SplitCard` 用 `React.memo`，props 只有 `split.version`、名字、levels、stats、高亮／勾選旗標、縮圖；結果區只訂閱 `ed.splits`、`ed.designs`、`ed.activeId` 與頁面自己的 UI 狀態，**不**訂閱 `cursor`、hover、預覽這些每幀會變的值（它們本來就走 live value），所以在實驗頁移動滑鼠、3D 在背景算網格都不會重 render 200 張卡。（c）切面層的計算（`slabOf`、`sliceDiff`、縮圖）都以 `(split version, base version, axis, at)` 快取，捲回來的卡不重算。驗收：200 個 split 時實驗頁 `__renders` 在滑鼠移動 60 次後增量 0、捲動一頁 long task 0。
+- **窄螢幕**：寬度 < 1100 px 時設計區變左側抽屜（和編輯頁的左欄一樣），結果區單欄。
 - 並排／疊圖：`CompareView`／`OverlayView` 搬進來，對象＝勾選的 split（沒勾＝最近一次設計的全部，上限 12，超過提示先勾）；切面來源改成 `slabOf`（§5.3），不再要求 live。基準選擇、軸、自動放大不變。
 
 **為什麼不在卡片上放 3D**：每張卡一個 WebGL context 不可行（瀏覽器 8～16 個上限、每個都要一份網格）；一個共用 context 分格畫可以，但要為每個 split 建網格，正好是 §2.3 要避免的事。縮圖＋一個 3D 實例是對的取捨（P3d）。
 
 ### 5.5 2D 縮圖
 
-- **選片**：預設「自動」＝ `diffBox` 在三個投影裡面積最大的那個軸的法線，片＝`diffBox` 在那個軸的中點；沒改動（對照組）就用結構最長軸、結構中點。頁面統一切軸時三軸各算（快取）。
-- **畫法**：`slabOf` → `sliceRGBA`（傳 `diff` 片段，所以有深藍邊與紅）→ 裁到 `diffBox ∪ 改到結構的 bbox`＋8 格、長邊 ≤ 240 px、nearest 縮放 → `createImageBitmap`。純函式 `thumbs.ts` 的 `thumbOf(slab, box, diffSlab, palette)`，測試可比對像素。
+- **選片**：預設「自動」＝**同一個設計的所有 split 共用一個軸**（整個設計的 `diffBox` 聯集在三個投影裡面積最大的那個），這樣同一組卡片才能互相比；片＝各自 `diffBox` 在那個軸的中點；沒改動（對照組）就用結構最長軸、結構中點。縮圖角落標軸與片（`XY · z=64`）。頁面統一切軸時三軸各算（快取）。
+- **畫法**：`slabOf` → `sliceRGBA`（傳 `diff` 片段，所以有深藍邊與紅）→ **再疊上原始在同一片的輪廓（細黑線，`contourOf` 已有快取）**，一眼看得出是長了還是縮了 → 裁到 `diffBox ∪ 改到結構的 bbox`＋8 格、長邊 ≤ 240 px、nearest 縮放 → `createImageBitmap`。純函式 `thumbs.ts` 的 `thumbOf(slab, box, diffSlab, baseLoops, palette)`，測試可比對像素。卡片縮圖下方一行圖例只出現一次（結果區頂端）：「黑線＝原始輪廓、藍邊＝改過、紅＝拿掉」。
 - **快取**：split 上 `thumbs: Map<'${version}|${axis}', ImageBitmap>`，全域 LRU 300 張（每張 ≤ 240×240×4 ≈ 230 KB，上限 70 MB）。split 改了（version 變）就作廢。
 - **成本**：`drawSlice` 一張 ×3 2.5 ms（plan v9），縮圖再縮一次 < 1 ms；200 張全畫 < 1 s，而且只畫進視窗的。
 
@@ -212,14 +219,14 @@ interface SplitPatch {
 | 檔案 | 改什麼 |
 | --- | --- |
 | `src/pages/Section3D/views.tsx` | 燈光（§5.1）；差異模式：材質換 ghost、`layer` diff 圖層、每 chunk 描邊；刪 `diffMesh` 分支與 `meshCache` 的 diff 條目；`lookAtBox(diffBox)`（對準差異，鍵 G）；步驟外框閃爍；`handle` 加 `focusBox` |
-| `src/volume/workerCore.ts`、`client.ts` | `Book.diffBox`、`diffBoxOf`；`layer` 的 `filter: { diff: true }`（含 `REMOVED`）；新 handler `restore`、`export`；刪 `diffMesh`；`window.__calls`（DEV） |
+| `src/volume/workerCore.ts`、`client.ts` | `Book.diffBox`、`diffBoxOf`；`layer` 的 `filter: { diff: true }`（含 `REMOVED`）；`replay` 加 `keep: 'patch'`＋scratch 帳簿；新 handler `restore`、`export`、`applyParked`（commitTo 對 parked split）；刪 `diffMesh`；`window.__calls`（DEV） |
 | `src/volume/patch.ts` | `carryStepStats` 回傳 `{ diffCount, box }` 或另加 `unionBox` 工具 |
 | `src/pages/Section3D/editor.ts` | `Split.state`／`patch`／`stats`／`thumbs`；`park`／`restore`／live 集合 LRU 與 K；`addDesign` 逐個 park、不切 active、進度與取消；`diffBox`；`commit` 前 `ensureLive`；匯出改走 Worker；`page: 'edit' | 'lab'` 狀態 |
 | `src/splits/lifecycle.ts`（新） | `extractPatch`、`applyPatch`、`slabOf`、`liveSetFor(K, lru)`；純函式 |
 | `src/pages/Section3D/thumbs.ts`（新） | `thumbOf`、選片規則、LRU |
 | `src/pages/Section3D/ExperimentPage.tsx`（新） | 兩欄版面、工具列、頁面狀態（勾選、篩選、排序、檢視、縮圖軸） |
-| `DesignPanel.tsx`、`FactorCard.tsx`、`LevelsEditor.tsx`、`ComboTable.tsx`（新；由 `ExperimentTab.tsx` 拆） | §5.4 設計區、§5.6 驗證與預設 chips；`ExperimentTab.tsx` 刪 |
-| `ResultGrid.tsx`、`SplitCard.tsx`（新） | §5.4 結果區、虛擬化、IntersectionObserver |
+| `DesignPanel.tsx`、`FactorCard.tsx`、`LevelsEditor.tsx`、`ComboTable.tsx`、`StructurePicker.tsx`（新；由 `ExperimentTab.tsx` 拆） | §5.4 設計區（步驟列、空狀態、範本、結構下拉）、試算走 Worker、§5.6 驗證與預設 chips；`ExperimentTab.tsx` 刪 |
+| `ResultGrid.tsx`、`SplitCard.tsx`、`DesignGroup.tsx`（新） | §5.4 結果區、依設計分組、虛擬化、IntersectionObserver、`React.memo` 卡片、撤銷這次產生 |
 | `SplitPicker.tsx`（新，取代 `SplitBar.tsx`） | 可搜尋下拉、`[ ]`、新增 ▾ |
 | `CompareView.tsx`、`OverlayView.tsx`、`overlay.ts` | 對象＝勾選的 split；切面改 `slabOf`；搬進實驗頁 |
 | `MatrixTab.tsx` | 變成結果區的「表格」檢視（欄位不變、加 live／parked、縮圖欄可選） |
@@ -236,11 +243,12 @@ interface SplitPatch {
 - `diffLayer.test.ts`：`layer` diff 的 quads（去掉 chunk 邊界重複）≡ 舊 `diffMesh.changed`（保留舊函式在 `ref/` 當對照）；只碰 `diffBox` 相交的 chunk；一步之後增量 ≡ 全量。
 - `diffBox.test.ts`：apply／undo／redo／replay 後 `diffBoxOf` ⊇ 所有 diff 格、且貼合（收緊後每一面都有 diff 格）。
 - `lifecycle.test.ts`：`extractPatch` → `applyPatch` 到原始複本 ≡ live 帳簿逐位元組（data、labels）；Worker `restore` ≡ `replay`（data、labels、diff、counts、comps 的 key／bbox）；`slabOf` 三軸任一片 ≡ 從完整陣列切的那一片；park 後 `ops` 與 `levels` 不變；K 政策（LRU 行為）。
-- `thumbs.test.ts`：同一 split 兩次 `thumbOf` 像素相同；差異描邊像素數 > 0；對照組選結構中點。
+- `thumbs.test.ts`：同一 split 兩次 `thumbOf` 像素相同；差異描邊像素數 > 0；原始輪廓線存在；同一設計的 split 選同一個軸；對照組選結構中點。
+- `lifecycle.test.ts` 加：`replay keep:'patch'` 的補丁 ≡ live 重播後 `extractPatch`；scratch 帳簿連續重播 3 個 split 互不汙染（每個 ≡ 各自從 base 重播）；`applyParked` ≡ restore → apply → extractPatch。
 - `factors.test.ts` 加：`validateLevels`（負半徑、超出、推到 0）、`presetLevels`、round 標稱 0 的預設。
 - `views` 的光照：沒有單元測試，e2e 取像素（§3）。
 - 既有：`worker.test.ts` 改用 `layer` diff；其餘不動。
-- e2e `m12.cjs`：§0 改後無染色（`__calls`＋像素）；§1 差異模式時間與 draw call 數（×1、×2）；§2 實驗頁新使用者路徑（3×3）、進度、停留、縮圖、勾 3 張疊圖、在 3D 看→對準差異；§3 `−5` 被擋；§4 20 個 split 的記憶體（×2）、切 parked split 到網格換上的時間、200 個 split 的捲動（DOM 卡片數 ≤ 40）；§5 parked split 匯出 zip 與 live 匯出逐位元組相同；§6 m11 的 §1～§2 在新頁面重做一遍。
+- e2e `m12.cjs`：§0 改後無染色（`__calls`＋像素）；§1 差異模式時間與 draw call 數（×1、×2）；§2 實驗頁新使用者路徑（3×3：從空狀態開始、只靠步驟列與預設 chips）、試算不凍結（期間 `__renders` 仍在動、long task < 50 ms）、進度、停留、縮圖（軸相同、有黑線）、點卡片不 restore（Worker 沒有 `restore` 請求）、勾 3 張疊圖、在 3D 看→對準差異；§3 `−5` 被擋；§4 ×2 產生 20 個 split：主執行緒 heap 增量 < 60 MB、Worker 沒有 20 本帳簿、切 parked split 到網格換上的時間；200 個 split 的捲動（DOM 卡片數 ≤ 40、滑鼠移動 60 次 `__renders` 增量 0）；§5 parked split 匯出 zip 與 live 匯出逐位元組相同；§6 m11 的 §1～§2 在新頁面重做一遍；§7 窄螢幕（1000 px）設計區變抽屜。
 
 ## 8. 里程碑、工作拆解、驗收
 
@@ -254,7 +262,7 @@ interface SplitPatch {
 
 ### M12.2 split 生命週期（L）
 
-`SplitPatch`／`stats`；`extractPatch`／`applyPatch`／`slabOf`；Worker `restore`／`export`；K 政策；`addDesign` 逐個 park；CompareView／Overlay／Matrix 改吃 `slabOf`；匯出走 Worker＋進度。驗收：§3 記憶體兩條、lifecycle 測試、匯出逐位元組相同。這一步做完就算 UI 還是舊的頁籤，「split 多就卡」已經解掉。
+`SplitPatch`／`stats`；`extractPatch`／`applyPatch`／`slabOf`；Worker `replay keep:'patch'`＋scratch、`restore`／`export`／`applyParked`；K 政策；非同步 `setActiveId`；`addDesign` 直接拿補丁；CompareView／Overlay／Matrix 改吃 `slabOf`；匯出走 Worker＋進度。驗收：§3 記憶體兩條、lifecycle 測試、匯出逐位元組相同。這一步做完就算 UI 還是舊的頁籤，「split 多就卡」已經解掉。
 
 ### M12.3 實驗頁（L）
 
@@ -276,13 +284,16 @@ README（檔案表、效能表加 v12 欄）、HelpDrawer、本文件 §11 實�
 | parked split 丟掉復原記錄，使用者回來想 Ctrl+Z | 卡片與 picker 標 parked；restore 時訊息「復原記錄已釋放，ops 仍可重播」；K 預設在小模型夠大（8）所以常用的都還是 live |
 | `relabel` 在 box 外真的不改 key？ | `lifecycle.test.ts` 用 v10／v11 的黃金 Op 集驗 `patch.comps` ≡ live comps；若有例外（例如結構被切成兩段、其中一段在 box 外），`extractPatch` 把 `labelBox` 也納入 box（Worker 已經分開記 `labelBox`） |
 | `slabOf` 的假 Volume 騙不過某些函式（例如用 `Z` 算 stride 的） | 只餵 `drawSlice`／`sliceDiff`／`contourOf`／`sliceHasAny`，先在測試裡逐一驗三軸 |
-| 一次產生 200 個 split，縮圖＋patch 的時間 | 每個 split 的 stats／縮圖在 replay 回來的同一個 tick 做（O(外框)）；縮圖只畫自動軸那一張，其他軸進視窗再畫 |
+| 一次產生 200 個 split，縮圖＋patch 的時間 | 補丁與 stats 在 Worker 算、主執行緒只收 O(外框)；縮圖在補丁回來的同一個 tick 畫、只畫自動軸那一張，其他軸進視窗再畫 |
+| 實驗頁 200 張卡跟著編輯器任何 state 一起重 render | 卡片 `React.memo`、結果區不訂閱每幀變的值（§5.4 不卡的三個規定）；e2e 量 `__renders` |
+| 點卡片就 restore，大模型每點一下等一秒 | 點卡片只高亮；restore 只在「在 3D 看」、`SplitPicker` 選取、編輯時發生，且有 busy 列 |
+| 試算在主執行緒凍住畫面 | 試算送 Worker、一次一個、可取消 |
 | 實驗頁改動大，使用者習慣被打斷 | M12.3 之前先出 M12.2；頁面切換的快捷鍵與 `[ ]` 保留；HelpDrawer 寫對照（舊「Split 列」→ 新「Split ▾」與實驗頁） |
 | 匯出搬進 Worker 後 4,000 萬點比例陣列的記憶體 | Worker 一次只處理一個 split、一個比例陣列（plan v11 §9 D18 的原則不變）；主執行緒只收 bytes |
 
-## 10. 要決定的事（附建議）
+## 10. 決策記錄（2026-11-01 與使用者確認：全部照建議）
 
-| # | 問題 | 建議 |
+| # | 問題 | 決定 |
 | --- | --- | --- |
 | D1 | 改後模式套用一步後要不要有任何提示？ | 要：橘色虛線外框閃 1.5 s（不碰網格），設定可關 |
 | D2 | 光照改法 | 總和 ≤ 1.0（Hemisphere 0.62／0.50＋Directional 0.30）；不做完全無陰影 |
@@ -292,8 +303,12 @@ README（檔案表、效能表加 v12 欄）、HelpDrawer、本文件 §11 實�
 | D6 | Split 列 | 改成可搜尋下拉；頁籤列刪掉 |
 | D7 | 並排／疊圖的位置 | 搬進實驗頁，對象＝勾選的 split |
 | D8 | 產生後 | 留在實驗頁、不切 3D；第一個 split 設為目前（live） |
-| D9 | 縮圖的軸 | 自動（差異投影最大）＋頁面統一切換 |
+| D9 | 縮圖的軸 | 自動（同一設計共用、差異投影最大）＋頁面統一切換 |
 | D10 | 卡片上要不要 3D | 不要；「在 3D 看」回編輯頁並對準差異 |
+| D11 | 點卡片的意思 | 只高亮（不 restore、不切 3D）；雙擊／Enter／「在 3D 看」才切 |
+| D12 | 產生時主執行緒要不要拿整本帳簿 | 不要：Worker 直接回補丁（`replay keep:'patch'`） |
+
+第二次審查（2026-11-01，重點：實驗頁好懂、不卡）補進來的：§5.3 Worker 直接回補丁與 scratch 帳簿、非同步 `setActiveId`；§5.4 步驟列與空狀態、範本保留、結構下拉、水平預設用 nm、試算走 Worker、撤銷這次產生、依設計分組、點卡片只高亮、不卡的三個規定、窄螢幕；§5.5 同一設計共用軸、縮圖疊原始輪廓與圖例；§7、§9 對應的測試與風險。
 
 ---
 

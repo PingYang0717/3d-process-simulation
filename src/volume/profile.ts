@@ -160,6 +160,15 @@ export function applyProfileMask(
           else fellBack.add(t + off[a]);
         }
       }
+      // 'above'（plan v14 §5.3）：沿 −y 越過結構自己（mask 裡、還是原材質的格子），第一格就是「上面那層」；空氣或出界＝沒有
+      const above = (i: number, moved: number) => {
+        let j = i - X;
+        let y = Math.floor(i / X) % Y;
+        for (y--; y >= 0 && mask[j] && out[j] === moved; y--) j -= X;
+        if (y < 0) return -1;
+        const m = out[j];
+        return m === 0 ? -1 : m;
+      };
       // 先拿：只拿屬於這個結構的
       for (const cell of c.remove) {
         const i = at(cell.u, cell.v, t);
@@ -168,7 +177,7 @@ export function applyProfileMask(
         const y = ((i - x) / X) % Y;
         const z = (i - x - y * X) / (X * Y);
         const m = out[i];
-        removeCell(live, out, orig, x, y, z, dirVec(op.scope.axis, cell.dir), m, m, op.backfill, op.follow, report);
+        removeCell(live, out, orig, x, y, z, dirVec(op.scope.axis, cell.dir), m, m, op.backfill, op.follow, report, above);
       }
       // 再加：由近到遠（cells 已依 BFS 距離排序），要 4 鄰接「已是結構」的格子才填，材質取那個鄰居的
       const grown = new Set<number>();

@@ -1103,7 +1103,7 @@ export default function Section3DPage() {
               cornerAxis={frame?.axis}
               faceOp={ed.pushOp}
               roundOp={(id: CornerId, r: number) =>
-                frame ? roundOp(ed.L, ed.vol, [...ed.sel], frame.scope, frame.at, { kind: 'round', corners: [{ id }], r, n: 2, mode: 'match' }, ed.follow, ed.backfill, ed.nmPerVoxel) : null
+                frame ? roundOp(ed.L, ed.vol, [...ed.sel], frame.scope, frame.at, { kind: 'round', corners: [{ id }], r, n: 2, mode: 'match' }, false, ed.backfill, ed.nmPerVoxel) : null
               }
               onCommit={ed.commit}
               onCornerClick={(id, x, y) => {

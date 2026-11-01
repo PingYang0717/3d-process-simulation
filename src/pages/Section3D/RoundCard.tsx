@@ -48,6 +48,8 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
   const [rv, setRv] = useState(initial?.rv ?? initial?.r ?? 6);
   const [n, setN] = useState(initial?.n ?? 2);
   const [mode, setMode] = useState<RoundGesture['mode']>(initial?.mode ?? 'match');
+  // 圓頭預設不帶襯層（plan v14 §5.3）：襯層不在削的方向上，跟著搬只會在襯層環裡留洞；不讀全域的 ed.follow
+  const [follow, setFollow] = useState(false);
   const f = roundFrame(ed, plane);
   const { axis, at } = f;
   // 每次 render 都是新物件：用數字當 deps，Op 才不會每幀重算
@@ -66,8 +68,8 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
   const keys = useMemo(() => [...ed.sel], [ed.sel]);
   // Op 與參考片統計一次算好（plan v14 P5）
   const built = useMemo(
-    () => (g.corners.length && keys.length ? roundBuild(ed.L, ed.vol, keys, scope, at, g, ed.follow, ed.backfill, ed.nmPerVoxel) : null),
-    [g, keys, ed.L, ed.vol, scope, at, ed.follow, ed.backfill, ed.nmPerVoxel],
+    () => (g.corners.length && keys.length ? roundBuild(ed.L, ed.vol, keys, scope, at, g, follow, ed.backfill, ed.nmPerVoxel) : null),
+    [g, keys, ed.L, ed.vol, scope, at, follow, ed.backfill, ed.nmPerVoxel],
   );
   const op = built?.op ?? null;
   const stats = built?.stats ?? null;
@@ -85,8 +87,18 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
   const vb = `${box.u0 - pad} ${box.v0 - pad} ${W + 2 * pad} ${H + 2 * pad}`;
   const cornerAt: Record<CornerId, [number, number]> = { ul: [box.u0, box.v0], ur: [box.u1 + 1, box.v0], ll: [box.u0, box.v1 + 1], lr: [box.u1 + 1, box.v1 + 1] };
   const nm = (v: number) => `${(v * ed.nmPerVoxel).toFixed(1)} nm`;
+  // 削掉的格子填什麼：上面那層（找得到就寫材質名）／指定材質／原始
+  const fillWord = !op
+    ? ''
+    : op.backfill === 'above'
+      ? stats && stats.fillMat > 0
+        ? ` · 削掉的填 ${ed.matName(stats.fillMat)}（上面那層）`
+        : ' · 削掉的填上面那層（上面是空氣就留空）'
+      : typeof op.backfill === 'number'
+        ? ` · 削掉的填 ${ed.matName(op.backfill)}`
+        : '';
   const words = op
-    ? `${whoText(ed.L, op.keys, ed.matName)} ${op.text ?? ''} · 削 ${(stats?.cut ?? 0).toLocaleString()} 格、填 ${(stats?.fill ?? 0).toLocaleString()} 格（參考片 ${axis} = ${at}）· ${wordsOf(ed, op.scope).scope}`
+    ? `${whoText(ed.L, op.keys, ed.matName)} ${op.text ?? ''} · 削 ${(stats?.cut ?? 0).toLocaleString()} 格、填 ${(stats?.fill ?? 0).toLocaleString()} 格（參考片 ${axis} = ${at}）${fillWord}${follow ? ' · 襯層跟著' : ''} · ${wordsOf(ed, op.scope).scope}`
     : g.corners.length
       ? '這個設定不會改到任何格子'
       : '點小圖的角選要圓哪幾個';
@@ -181,6 +193,12 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
           { label: '只填', value: 'fill' },
         ]}
       />
+      <Flex align="center" gap={6}>
+        <Switch size="small" checked={follow} onChange={setFollow} aria-label="襯層跟著" />
+        <Tooltip title="開：削掉的地方外側的薄層（HfO₂、TiN…）一格一格退進來。圓頭頂部通常不必，開了容易在襯層環裡留洞">
+          <span style={{ fontSize: 12 }}>襯層跟著（預設關）</span>
+        </Tooltip>
+      </Flex>
     </CardShell>
   );
 }

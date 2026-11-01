@@ -97,7 +97,9 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     const kind = op.bottom > op.top ? '（footing）' : op.bottom < op.top ? '（倒梯形）' : '';
     return `${who} ${faceName(op.face)}側壁：${t0} ${sg(op.top)}、${t1} ${sg(op.bottom)} 格（線性${kind}）${op.both ? ' · 兩側對稱' : ''}${op.policy === 'overwrite' ? ' · 允許穿層' : ''}${tail}`;
   }
-  return `${who} ${op.text ?? '剖面調整'}${tail}`;
+  // 圓頭的回填（plan v14 §5.3）
+  const fill = op.kind === 'profile' && op.rounds ? (op.backfill === 'above' ? ' · 填上面那層' : typeof op.backfill === 'number' ? ` · 填 ${w.matName(op.backfill)}` : '') : '';
+  return `${who} ${op.text ?? '剖面調整'}${fill}${tail}`;
 }
 
 /** 方向的短名：「↑ 往上（−y）」。 */

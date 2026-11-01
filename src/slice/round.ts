@@ -9,6 +9,7 @@ import type { ProfileOp } from '../volume/profile';
 import type { XY } from './trace';
 import { deltaOf } from './raster';
 import { sliceOfKey } from './model';
+import { to3D } from '../volume/scope';
 
 /** 角：u 往右、v 往下；ul = (u0, v0) 那個角。 */
 export type CornerId = 'ul' | 'ur' | 'll' | 'lr';
@@ -188,7 +189,15 @@ export interface RoundStats {
   fill: number;
   limit: number;
   clamped: boolean;
+  /** 削掉的格子填什麼（參考片、第一個結構頂邊正上方那一格；'above' 時才有，-1＝沒有）。 */
+  fillMat: number;
 }
+
+/**
+ * 圓頭的回填（plan v14 §5.3）：使用者沒指定材質（'orig'）時填「上面那層」——閘極頂原本就是 Poly，照 'orig' 會變空氣。
+ * 只有剖面在 y 上（XY、YZ 剖面）才有「上」；XZ 剖面（沿 y）照舊。
+ */
+export const roundBackfill = (backfill: Backfill, axis: Axis): Backfill => (backfill === 'orig' && axis !== 'y' ? 'above' : backfill);
 
 /**
  * 圓頭的 Op 與參考片統計一次算好（plan v14 P5：面板不再為統計多算一次 roundCells）。
@@ -207,13 +216,20 @@ export function roundBuild(
 ): { op: ProfileOp | null; stats: RoundStats } {
   const perKey: ProfileOp['perKey'] = {};
   const rounds: Record<string, RoundGesture> = {};
+  const bf = roundBackfill(backfill, scope.axis);
   let any = false;
   let cut = 0;
   let fill = 0;
   let limit = Infinity;
+  let fillMat = -1;
   for (const key of keys) {
     const c = keyCells(L, vol, scope.axis, at, key, g);
     if (!c) continue;
+    if (bf === 'above' && fillMat < 0 && c.box.v0 > 0) {
+      // 參考片頂邊中間正上方那一格（v＝y，往上＝v 變小）
+      const p = to3D(scope.axis, (c.box.u0 + c.box.u1) >> 1, c.box.v0 - 1, at);
+      fillMat = vol.data[(p[2] * vol.Y + p[1]) * vol.X + p[0]];
+    }
     if (c.add.length || c.remove.length) any = true;
     perKey[key] = { add: encodeRle(c.add), remove: encodeRle(c.remove) };
     rounds[key] = g;
@@ -222,10 +238,10 @@ export function roundBuild(
     limit = Math.min(limit, roundLimit(c.box));
   }
   const want = Math.max(g.ru ?? g.r, g.rv ?? g.r);
-  const stats = { cut, fill, limit: Number.isFinite(limit) ? limit : 0, clamped: Number.isFinite(limit) && g.corners.some((c) => !c.concave) && want > limit };
+  const stats = { cut, fill, limit: Number.isFinite(limit) ? limit : 0, clamped: Number.isFinite(limit) && g.corners.some((c) => !c.concave) && want > limit, fillMat };
   if (!any) return { op: null, stats };
   const ks = keys.filter((k) => perKey[k]);
-  return { op: { kind: 'profile', keys: ks, scope, at, perKey, follow, backfill, text: roundText(g, nm), rounds, refExact: true }, stats };
+  return { op: { kind: 'profile', keys: ks, scope, at, perKey, follow, backfill: bf, text: roundText(g, nm), rounds, refExact: true }, stats };
 }
 
 /** 產生圓頭 Op（2D、3D 的面板、把手、右鍵、實驗頁都呼叫這一個）。沒有任何格子會變回傳 null。 */

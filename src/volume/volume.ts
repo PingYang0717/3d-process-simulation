@@ -64,8 +64,11 @@ export interface Labeled {
 
 export type Vec3 = [number, number, number];
 export type ZRange = [number, number];
-/** 空出來的體素填什麼：'orig' = 原始陣列在那個位置的材質，或指定編號。 */
-export type Backfill = 'orig' | number;
+/**
+ * 空出來的體素填什麼：'orig' = 原始陣列在那個位置的材質，或指定編號；
+ * 'above' = 上面那層（plan v14 §5.3，只有圓頭的削用：沿 −y 越過結構自己找到的第一格；找不到、或是空氣，照 'orig'）。
+ */
+export type Backfill = 'orig' | 'above' | number;
 
 export const AIR = 0;
 export const VOID = 254;

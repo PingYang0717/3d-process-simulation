@@ -103,7 +103,7 @@ export function legacyLevelMask(
 
 /** 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。 */
 const fillAt = (orig: Volume, i: number, movedMat: number, backfill: Backfill) => {
-  if (backfill !== 'orig') return backfill;
+  if (typeof backfill === 'number') return backfill;
   const o = orig.data[i];
   return o === movedMat ? AIR : o;
 };

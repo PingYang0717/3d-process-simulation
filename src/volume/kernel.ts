@@ -40,9 +40,19 @@ export function mergeReport(a: Report, b: Report): Report {
 
 export const inVol = (v: Volume, x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < v.X && y < v.Y && z < v.Z;
 
-/** 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。 */
-export const fillAt = (orig: Volume, i: number, movedMat: number, backfill: Backfill) => {
-  if (backfill !== 'orig') return backfill;
+/** 'above' 的回呼：第 i 格（材質 movedMat）上面那層的材質；沒有（或是空氣）回 -1。 */
+export type AboveOf = (i: number, movedMat: number) => number;
+
+/**
+ * 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。
+ * 'above'（plan v14 §5.3）→ above(i) 找到的材質；沒給 above 或找不到 → 照 'orig'。
+ */
+export const fillAt = (orig: Volume, i: number, movedMat: number, backfill: Backfill, above?: AboveOf) => {
+  if (typeof backfill === 'number') return backfill;
+  if (backfill === 'above' && above) {
+    const m = above(i, movedMat);
+    if (m >= 0) return m;
+  }
   const o = orig.data[i];
   return o === movedMat ? AIR : o;
 };
@@ -148,6 +158,7 @@ export function removeCell(
   backfill: Backfill,
   follow: boolean,
   report?: Report,
+  above?: AboveOf,
 ) {
   const { X, Y } = read;
   const i = (z * Y + y) * X + x;
@@ -160,11 +171,11 @@ export function removeCell(
         out[to] = read.data[j];
         to = j;
       }
-      out[to] = fillAt(orig, to, read.data[to], backfill);
+      out[to] = fillAt(orig, to, read.data[to], backfill, above);
       return;
     }
   }
-  out[i] = fillAt(orig, i, movedMat, backfill);
+  out[i] = fillAt(orig, i, movedMat, backfill, above);
 }
 
 const DIRS6: Vec3[] = [

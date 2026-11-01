@@ -187,7 +187,8 @@ export function opOfFactor(f: Factor, v: number, ctx: FactorCtx): Op | null {
       const g = { kind: 'round', corners: [{ id: 'ul' }, { id: 'ur' }], n: 2, mode: 'match', ...(t.gesture as object), r } as RoundGesture;
       const rs = (t.scope as Scope | undefined) ?? fullScope(ctx.vol, ((t.axis as Scope['axis']) ?? 'z'));
       const at = (t.at as number | undefined) ?? Math.round((loOf(b)[axisIdx(rs.axis)] + hiOf(b)[axisIdx(rs.axis)]) / 2);
-      return roundOp(ctx.L, ctx.vol, keys, rs, at, g, follow, backfill, ctx.nmPerVoxel);
+      // 圓頭預設不帶襯層（plan v14 §5.3）；樣板明確寫了才照樣板
+      return roundOp(ctx.L, ctx.vol, keys, rs, at, g, (t.follow as boolean | undefined) ?? false, backfill, ctx.nmPerVoxel);
     }
     case 'dilate':
       return { kind: 'dilate', keys, scope, n: d, metric: 'euclid', follow, backfill };

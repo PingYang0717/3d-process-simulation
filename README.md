@@ -23,7 +23,7 @@ npm run build      # 型別檢查 + 打包
 
 **卡片：先看再套用（plan v10）**：所有數值操作都是同一種卡片——第一行一句話（「Poly-Si 2 頂面 y 40 → 37（長高 3 格 = 1.5 nm）· 襯層跟著 · 整根」，`opWords.ts`）、參數、下方「套用到：整根 ▾」與「套用」。改參數 50 ms 後走既有的拖拉預覽管線畫出結果（3D 即時網格、主切面淡綠／淡紅），按「套用」（Enter）才 commit；點別處、Esc、收合就收掉。右欄（長／縮、方頭／圓頭、移動、材質、選到的節點／邊）、上方編輯工具列與 2D 浮動列開的是同一張卡片（`OpCard.tsx`）。方向用六面小方塊（`FacePicker.tsx`，滑過時 3D 選取外框那一面亮橘色＋箭頭）。卡片、把手、右鍵、方向鍵都呼叫同一個產生 Op 的函式（`editor.ts` 的 `pushOp`／`levelOp`／`translateOp`／`materialOp`、`handles3d.ts`）。
 
-**圓頭（plan v10）**：`slice/round.ts`。參數：哪些角（外圓角／內圓角＝貼著側壁往外填）、半徑 r（上限＝半寬／半高）、不對稱（寬 ru／肩高 rv）、方圓度 n（超橢圓指數：1 斜切、2 圓、8 方）、對齊形狀／只削／只填。存成 `profile` Op 的 `rounds`：每一片用自己的外框重算（不會 fallback），之後和 profile 一樣先拿再加、由近到遠、要 4 鄰接、kernel 規則、襯層跟著；只改角的區域，L 形缺的角不會被填。方頭（每一排補到最外側那一點）在同一張卡片右上角切換。
+**圓頭（plan v10）**：`slice/round.ts`。參數：哪些角（外圓角／內圓角＝貼著側壁往外填）、半徑 r（上限＝半寬／半高）、不對稱（寬 ru／肩高 rv）、方圓度 n（超橢圓指數：1 斜切、2 圓、8 方）、對齊形狀／只削／只填。存成 `profile` Op 的 `rounds`：每一片用自己的外框重算（不會 fallback），之後和 profile 一樣先拿再加、由近到遠、要 4 鄰接、kernel 規則、襯層跟著；只改角的區域，L 形缺的角不會被填。plan v14：範圍「整個結構」＝選取外框沿剖面法線的起止（不再是整條軸）、卡片下方印的就是實際送出的範圍；削掉的格子填「上面那層」（`Backfill` 的 `'above'`：沿 −y 越過結構自己找到的第一格，空氣或找不到才照「填回原始」；XZ 剖面沒有「上」照舊），面板寫「削掉的填 SiN（上面那層）」；圓頭預設不帶襯層（卡片上有「襯層跟著」開關、3D 角把手一律不帶），因為襯層不在削的方向上，跟著搬只會在襯層環裡留洞。方頭（每一排補到最外側那一點）在同一張卡片右上角切換。
 
 **拖剖面（plan v7 M2、v10）**：2D 剖面的主切面描出已選結構的輪廓（含內環），角上有節點。靠近節點＝拖節點、靠近邊＝推邊（沿到角為止的整段邊、平滑後的法線）、在結構裡面＝整塊搬（節點熱區 6 px，在熱區內就是節點）。拖節點預設依局部形狀：兩邊都是軸向直邊＝**矩形角**（相鄰的水平邊整條沿 v、垂直邊整條沿 u 平移，放開後仍是直角）、否則＝**單點**；Alt＋拖＝自由衰減（左右兩節點之間依 cos 跟著走，舊版的預設）、Shift＝單點／一小段，按住 V／E／R 只抓一種（`slice/snap.ts`，`RelGesture.drag`；舊 Op 沒這欄＝衰減，重播不變）。拖的時候輪廓自交會轉紅提示。每拖一下主切面就是這一片的結果（第 1 級），範圍 × 外框 ≤ 40 萬格時 3D 與小切面也即時（第 2 級），放開＝一步、立刻套用到範圍。手勢對到 Op：橫跨整個結構的最外側直邊 → `push`；整塊搬 → `translate`（帶殼）；其他（節點、斜邊、圓弧、部分邊）→ `profile`（每片：先拿再加、由近到遠、要和結構 4 鄰接才填，規則走 `kernel.ts`）。訊息帶格數、被擋的片數（「看這些片」跳過去、被擋的格子標紅）、略過的片數。大操作（預設 400 萬格）先確認；Worker 忙時排隊。`slice/trace.ts`（描輪廓）、`slice/raster.ts`（光柵化與差）、`slice/gestures.ts`（熱區、拖法、手勢 → Op）、`volume/profile.ts`。
 
@@ -84,7 +84,7 @@ npm run build      # 型別檢查 + 打包
 | `src/volume/factors.ts` | plan v11：Factor／Design、`combosOf`、`opsOfCombo`、`nameOfCombo`、`measureNominal`、`parseLevels`、`defaultId`、範本 `toTemplate`／`fromTemplate`（`factors.test.ts`） |
 | `src/pages/Section3D/matrix.ts`、`overlay.ts` | plan v11：矩陣表／CSV／manifest 的純函式；疊圖的描輪廓快取、差異外框、A vs B 的版本對 diff（`overlay.test.ts`） |
 | `src/pages/Section3D/OpCard.tsx`、`FacePicker.tsx`、`RoundCard.tsx`、`opWords.ts`、`EditToolbar.tsx`、`handles3d.ts` | plan v10：預覽 → 套用的卡片、六面小方塊、圓頭面板、一句話、編輯工具列（瀏覽／3D 把手／2D 剖面／筆刷＋五顆操作按鈕）、3D 把手的純函式（`handles.test.ts`） |
-| `src/slice/round.ts` | 圓頭：每片的目標形狀 → 加／拿的格子、`roundOp`、`roundStats`、`roundOutline`（`round.test.ts`） |
+| `src/slice/round.ts` | 圓頭：每片的目標形狀 → 加／拿的格子、`roundBuild`（Op＋參考片統計一次算）、`roundOp`、`roundStats`、`roundOutline`（`round.test.ts`、`v14.test.ts`） |
 | `src/pages/Section3D/SliceEditor.tsx` | 2D 編輯的主切面：縮放、平移、換片、縮放列（1:1／8×／適合／對準選取）、自動放大到選取 |
 | `src/pages/Section3D/PositionBar.tsx` | 位置列（第幾片、套用到哪裡、「這一片沒有…跳到最近的一片」）與範圍控制 `ScopeControl`（右欄共用）、自動選切面方向 |
 | `src/pages/Section3D/views.lazy.tsx` | `View3D`／`SliceView`／`SliceEditor` 的 lazy 包裝：three.js 等載入檔案後才抓，歡迎頁不用等 |

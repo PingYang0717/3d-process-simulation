@@ -23,7 +23,7 @@ const MANUAL = '__manual';
 type SortKey = 'seq' | 'name' | 'changed' | `f:${string}`;
 const hhmm = (t?: number) => (t ? new Date(t).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
 
-export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: Editor; onOpen3D: (id: string) => void; onExport: (ids: string[]) => void; narrow: boolean; stem: string }) {
+export function ExperimentPage({ ed, onOpen3D, onOpenStructure, onExport, narrow, stem }: { ed: Editor; onOpen3D: (id: string) => void; onOpenStructure: () => void; onExport: (ids: string[]) => void; narrow: boolean; stem: string }) {
   const { modal } = App.useApp();
   const [hi, setHi] = useState<string | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -185,7 +185,7 @@ export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: E
   };
 
   // 抽屜自己有「設計」標題，面板裡就不再放一次
-  const design = <DesignPanel ed={ed} onMade={onMade} onOpen3D={onOpen3D} title={!narrow} />;
+  const design = <DesignPanel ed={ed} onMade={onMade} onOpen3D={onOpen3D} onOpenStructure={onOpenStructure} title={!narrow} />;
   const toolbar = (
     <div className="lab-toolbar">
       {narrow && (
@@ -193,6 +193,7 @@ export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: E
           設計
         </Button>
       )}
+      <span className="lt-title">結果</span>
       <Input size="small" allowClear prefix={<SearchOutlined />} placeholder="名字" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 140 }} aria-label="搜尋名字" />
       <Select
         size="small"
@@ -244,9 +245,7 @@ export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: E
         </Tooltip>
       )}
       <span className="grow" />
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        {checkedIds.length ? `已勾 ${checkedIds.length}` : `${visible.length} 個`}
-      </Text>
+      <span className={'lt-count' + (checkedIds.length ? ' on' : '')}>{checkedIds.length ? `已勾 ${checkedIds.length}` : `${visible.length} 個 split`}</span>
       <Tooltip title={checkedIds.length ? '並排或疊圖比較勾選的' : `沒勾＝最近一次設計的全部（上限 ${COMPARE_MAX}）`}>
         <Button size="small" type="primary" ghost disabled={!ed.splits.length} onClick={startCompare}>
           比較{checkedIds.length ? '勾選的' : ''}
@@ -296,13 +295,57 @@ export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: E
         ) : (
           <>
             {toolbar}
-            <div className="lab-legend">
-              縮圖：<span className="lg-line" />黑線＝原始輪廓 <span className="lg-edge" style={{ background: DIFF_EDGE_HEX }} />
-              藍邊＝改過 <span className="lg-edge" style={{ background: `rgb(${REMOVED_RGB.join(',')})` }} />
-              紅＝拿掉 · 點卡片＝高亮，雙擊或「在 3D 看」＝到編輯頁
-            </div>
+            {ed.splits.length > 0 && (
+              <div className="lab-legend">
+                <span className="lg-item">
+                  <span className="lg-line" />
+                  原始輪廓
+                </span>
+                <span className="lg-item">
+                  <span className="lg-edge" style={{ background: DIFF_EDGE_HEX }} />
+                  改過
+                </span>
+                <span className="lg-item">
+                  <span className="lg-edge" style={{ background: `rgb(${REMOVED_RGB.join(',')})` }} />
+                  拿掉
+                </span>
+                <span className="lg-sep" />
+                <span className="lg-tip">點卡片＝高亮 · 雙擊或「在 3D 看」＝到編輯頁 · Shift／Ctrl＋點＝勾選</span>
+              </div>
+            )}
             {!ed.splits.length ? (
-              <Empty className="lab-empty" description="還沒有 split：在左邊定義變數，或從編輯頁直接改一刀" />
+              <div className="lab-onboard">
+                <div className="ob-card">
+                  <div className="ob-kicker">還沒有 split</div>
+                  <h2>三步做一組實驗</h2>
+                  <ol className="ob-steps">
+                    <li>
+                      <span className="ob-n">1</span>
+                      <div>
+                        <b>選結構</b>
+                        <span>左邊 ① 選要改的那一塊（或在編輯頁點它）；預覽可以換視角、拖切片。</span>
+                      </div>
+                    </li>
+                    <li>
+                      <span className="ob-n">2</span>
+                      <div>
+                        <b>加變數、填要試的值</b>
+                        <span>選「要改什麼」（寬度、圓頭半徑…），值可以直接點著改；預覽會標出它改哪裡。</span>
+                      </div>
+                    </li>
+                    <li>
+                      <span className="ob-n">3</span>
+                      <div>
+                        <b>看組合，按產生</b>
+                        <span>每一列就是一個會產生的 split，狀態欄寫清楚能不能產生、為什麼。</span>
+                      </div>
+                    </li>
+                  </ol>
+                  <Text type="secondary" className="ob-foot">
+                    或者到編輯頁直接改一刀，也會出現在這裡。
+                  </Text>
+                </div>
+              </div>
             ) : view === 'table' ? (
               <div className="lab-table">
                 <MatrixTab ed={ed} fileOf={(sp) => `${stem}__${safeName(sp.name)}.vti`} ids={visible.map((s) => s.id)} onRow={setHi} highlight={hi} />

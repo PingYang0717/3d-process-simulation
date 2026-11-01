@@ -1,32 +1,21 @@
-// 實驗頁的設計區（plan v12 §5.4、§5.6；取代 v11 的「實驗」頁籤）：
-// 四個段落 ① 結構 → ② 變數 → ③ 組合 → ④ 產生，段落標題的數字就是步驟（做完打勾、做到的那一步實心）；每個變數一張卡
-// （一句話、水平 chips、預設按鈕）、組合表（試算走 Worker、無效的列先擋）、從哪裡開始、命名；④ 黏在底下，捲到哪都按得到。
+// 實驗頁的設計區（plan v12 §5.4、§5.6）：
+// ① 結構（下拉＋可換視角的預覽，預覽上標出每個變數會改的地方）→ ② 變數（一張卡一句話，操作可直接換、值可直接改）
+// → ③ 組合（三種方式各一句說明、組合表寫清楚每列狀態）→ ④ 產生（黏在底下）。
 // 產生時留在實驗頁、進度 k／N、可取消，完成後可「撤銷這次產生」。範本存在瀏覽器、可匯出／匯入 JSON。
 import { useMemo, useRef, useState } from 'react';
 import { App, Button, Dropdown, Input, Progress, Segmented, Typography } from 'antd';
-import { CheckOutlined, DownOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
+import { CheckOutlined, DownOutlined, FolderOpenOutlined } from '@ant-design/icons';
 import type { Vec3 } from '../../volume/volume';
-import {
-  type Design,
-  type DesignTemplate,
-  type Factor,
-  DEFAULT_NAME_TEMPLATE,
-  combosOf,
-  comboProblems,
-  fromTemplate,
-  nameOfCombo,
-  opsOfCombo,
-  presetLevels,
-  toTemplate,
-  validateLevels,
-} from '../../volume/factors';
+import { type Design, type DesignTemplate, type Factor, DEFAULT_NAME_TEMPLATE, combosOf, comboProblems, fromTemplate, nameOfCombo, opsOfCombo, toTemplate, validateLevels } from '../../volume/factors';
 import { usePersisted } from '../../ui/persist';
 import { download } from '../../ui/download';
 import type { Editor } from './editor';
-import { StructurePicker } from './StructurePicker';
-import { FactorCard, NewFactorForm } from './FactorCard';
+import { type Mark, StructurePicker } from './StructurePicker';
+import { AddFactorButton, FactorCard } from './FactorCard';
 import { type ComboRow, ComboTable } from './ComboTable';
 import { hiddenTable, palette } from './tables';
+import { CATEGORY } from './colors';
+import { whoText } from './opWords';
 
 const { Text } = Typography;
 
@@ -44,6 +33,12 @@ const isDraft = (v: unknown): v is Draft => !!v && typeof v === 'object' && Arra
 const isTemplates = (v: unknown): v is DesignTemplate[] => Array.isArray(v);
 
 type StepState = 'done' | 'now' | 'todo';
+
+const COMBINE_HINT: Record<Design['combine'], string> = {
+  ofat: '一次只動一個變數，其他維持現在的值：變數多時 split 最少',
+  full: '每個變數的每個值都互相搭配：看得到交互作用，但數量是相乘',
+  manual: '從全因子的清單裡勾你要的那幾個',
+};
 
 /** 一個段落：圓形步驟數字（做完 ✓、做到這步實心、還沒到空心）＋標題＋右邊一句摘要。 */
 function Sec({ n, title, state, meta, children }: { n: number; title: string; state: StepState; meta?: React.ReactNode; children: React.ReactNode }) {
@@ -69,12 +64,12 @@ const Row = ({ label, children }: { label: string; children: React.ReactNode }) 
   </div>
 );
 
-export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void; title?: boolean }) {
+export function DesignPanel({ ed, onMade, onOpen3D, onOpenStructure, title = true }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void; onOpenStructure: () => void; title?: boolean }) {
   const { message, modal } = App.useApp();
   const [draft, setDraft] = usePersisted<Draft>('designDraft2', EMPTY, isDraft);
   const [templates, setTemplates] = usePersisted<DesignTemplate[]>('factorTemplates', [], isTemplates);
-  const [adding, setAdding] = useState(false);
   const [face, setFace] = useState<Vec3 | null>(null);
+  const [hot, setHot] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const nm = ed.nmPerVoxel;
   const set = (p: Partial<Draft>) => setDraft((d) => ({ ...d, ...p }));
@@ -120,6 +115,7 @@ export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor
   const st = (i: number): StepState => (i < step ? 'done' : i === step ? 'now' : 'todo');
   const generating = !!ed.genProgress;
   const levelCounts = design.factors.map((f) => (design.levels[f.id] ?? []).length || 0);
+  const marks: Mark[] = draft.factors.map((f, k) => ({ f, color: CATEGORY[k % CATEGORY.length], hot: hot === f.id }));
 
   const updateFactor = (i: number, f: Factor, lv: number[]) => {
     const old = draft.factors[i];
@@ -201,17 +197,17 @@ export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor
         ? `${levelCounts.join(' × ') || 0} = ${combos.length} 個`
         : `勾了 ${combos.length} 個`;
   const firstName = rows.find((r) => r.picked)?.name;
+  const who = ed.sel.size ? whoText(ed.L, [...ed.sel], ed.matName) : null;
+  const summary = !who ? '先選一個結構' : !draft.factors.length ? `${who} · 還沒有變數` : `${who} · ${draft.factors.length} 個變數 · ${combos.length} 個 split`;
 
   return (
     <div className="design-panel">
       <header className="dp-head">
-        {title && <span className="dp-title">設計</span>}
         {title && (
-          <span className="dp-steps" aria-label={`第 ${step + 1} 步，共 4 步`}>
-            {[0, 1, 2, 3].map((i) => (
-              <i key={i} className={st(i)} />
-            ))}
-          </span>
+          <div className="dp-title-wrap">
+            <span className="dp-title">設計</span>
+            <span className="dp-summary">{summary}</span>
+          </div>
         )}
         <span className="grow" />
         <Dropdown
@@ -242,55 +238,37 @@ export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor
       </header>
 
       <Sec n={1} title="結構" state={st(0)} meta={ed.sel.size > 1 ? `${ed.sel.size} 個` : undefined}>
-        <StructurePicker ed={ed} face={face} />
+        <StructurePicker ed={ed} face={face} marks={marks} onOpen3D={onOpenStructure} />
       </Sec>
 
-      {(step >= 1 || draft.factors.length > 0) && (
-        <Sec n={2} title="變數" state={st(1)} meta={draft.factors.length ? `${draft.factors.length} 個` : undefined}>
-          {!draft.factors.length && !adding && (
-            <Text type="secondary" className="dp-hint">
-              一個變數＝要掃的一個量（寬度 L<sub>g</sub>、偏移、圓頭半徑…）。加了之後點預設水平，組合就出現。
-            </Text>
-          )}
-          {draft.factors.map((f, i) => (
-            <FactorCard
-              key={i}
-              ed={ed}
-              f={f}
-              k={i}
-              levels={draft.levels[f.id] ?? []}
-              problems={problems[f.id] ?? []}
-              taken={ids.filter((x) => x !== f.id)}
-              onChange={(nf, lv) => updateFactor(i, nf, lv)}
-              onRemove={() => set({ factors: draft.factors.filter((_, k) => k !== i) })}
-              onFace={setFace}
-            />
-          ))}
-          {dupId && (
-            <Text type="danger" className="dp-hint">
-              變數 id「{dupId}」重複；同一個設計裡要唯一
-            </Text>
-          )}
-          {adding ? (
-            <NewFactorForm
-              ed={ed}
-              taken={ids}
-              onFace={setFace}
-              onCancel={() => setAdding(false)}
-              onAdd={(f) => {
-                // 半徑標稱 0、缺陷大小：直接給預設 2、4、6 格（plan v12 §5.6）
-                const seed = (f.op === 'round' && Math.round(f.nominal) === 0) || (f.op === 'defect' && !f.param.startsWith('center')) ? presetLevels(f, nm)[0].values : [];
-                set({ factors: [...draft.factors, f], levels: { ...draft.levels, [f.id]: seed } });
-                setAdding(false);
-              }}
-            />
-          ) : (
-            <Button type="dashed" block icon={<PlusOutlined />} disabled={!ed.sel.size} onClick={() => setAdding(true)} className="dp-add">
-              {ed.sel.size ? '加一個變數' : '先在 ① 選結構，再加一個變數'}
-            </Button>
-          )}
-        </Sec>
-      )}
+      <Sec n={2} title="變數" state={st(1)} meta={draft.factors.length ? `${draft.factors.length} 個` : undefined}>
+        {!draft.factors.length && (
+          <Text type="secondary" className="dp-hint">
+            一個變數＝要掃的一個量（寬度、圓頭半徑、偏移…）。加了之後，上面的預覽會標出它改哪裡，下面會列出會產生的 split。
+          </Text>
+        )}
+        {draft.factors.map((f, i) => (
+          <FactorCard
+            key={i}
+            ed={ed}
+            f={f}
+            k={i}
+            levels={draft.levels[f.id] ?? []}
+            problems={problems[f.id] ?? []}
+            taken={ids.filter((x) => x !== f.id)}
+            onChange={(nf, lv) => updateFactor(i, nf, lv)}
+            onRemove={() => set({ factors: draft.factors.filter((_, k) => k !== i) })}
+            onFace={setFace}
+            onHot={setHot}
+          />
+        ))}
+        {dupId && (
+          <Text type="danger" className="dp-hint">
+            變數 id「{dupId}」重複；同一個設計裡要唯一
+          </Text>
+        )}
+        <AddFactorButton ed={ed} taken={ids} disabled={!ed.sel.size} onAdd={(f, lv) => set({ factors: [...draft.factors, f], levels: { ...draft.levels, [f.id]: lv } })} />
+      </Sec>
 
       {draft.factors.length > 0 && (
         <Sec n={3} title="組合" state={st(2)} meta={comboMeta}>
@@ -305,6 +283,9 @@ export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor
               { label: '手動勾選', value: 'manual' },
             ]}
           />
+          <Text type="secondary" className="dp-hint combine-hint">
+            {COMBINE_HINT[draft.combine]}
+          </Text>
           {rows.length > 0 ? (
             <ComboTable
               rows={rows}
@@ -319,7 +300,7 @@ export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor
             />
           ) : (
             <Text type="secondary" className="dp-hint">
-              還沒有組合：每個變數至少要有一個水平
+              還沒有組合：每個變數至少要有一個值
             </Text>
           )}
           <div className="dp-form">
@@ -376,7 +357,9 @@ export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor
           ) : (
             <Button
               type="primary"
+              size="large"
               block
+              className="dp-go"
               disabled={!design.factors.length || !combos.length || !!ed.busy || (fromAll && !canAll) || bad.length > 0 || !!dupId}
               onClick={generate}
             >

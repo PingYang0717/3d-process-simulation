@@ -24,7 +24,7 @@ import {
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { type Axis, type Vec3, directionName, hexToRgb, unionBBox } from '../../volume/volume';
+import { type Axis, type BBox, type Vec3, directionName, hexToRgb, unionBBox } from '../../volume/volume';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel } from '../../ui/Swatch';
@@ -219,11 +219,16 @@ export default function Section3DPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 「在 3D 看」回到編輯頁後要對準差異（View3D 掛載、網格換上之後）。 */
-  const pendingFocus = useRef(false);
+  /** 切到編輯頁後要對準什麼：'diff'＝目前 split 的差異外框、BBox＝某個結構（設計區的「在 3D 看」）。 */
+  const pendingFocus = useRef<false | 'diff' | BBox>(false);
   /** 實驗頁的「在 3D 看」（plan v12 §5.4、§10 D10）：設為目前（parked 先載入）→ 切到編輯頁 → 對準差異。 */
   const open3D = async (id: string) => {
     await ed.setActiveId(id);
-    pendingFocus.current = true;
+    pendingFocus.current = 'diff';
+    ed.setPage('edit');
+  };
+  const openStructure3D = () => {
+    pendingFocus.current = ed.selBox ?? 'diff';
     ed.setPage('edit');
   };
   useEffect(() => {
@@ -233,7 +238,8 @@ export default function Section3DPage() {
     // View3D 是 lazy 載入、剛掛載：等它的 handle 出現再對準
     const go = () => {
       const v = view.current;
-      const b = look.current.ed.diffBox;
+      const want = pendingFocus.current;
+      const b = want === 'diff' ? look.current.ed.diffBox : want || null;
       if (v && b) {
         pendingFocus.current = false;
         v.focusBox(b);
@@ -1451,7 +1457,7 @@ export default function Section3DPage() {
       </header>
       <div className="body">
         {ed.page === 'lab' ? (
-          <ExperimentPage ed={ed} onOpen3D={(id) => void open3D(id)} onExport={(ids) => confirmExportAll('vti', ids)} narrow={labNarrow} stem={stem} />
+          <ExperimentPage ed={ed} onOpen3D={(id) => void open3D(id)} onOpenStructure={openStructure3D} onExport={(ids) => confirmExportAll('vti', ids)} narrow={labNarrow} stem={stem} />
         ) : (
         <>
         {narrow ? (

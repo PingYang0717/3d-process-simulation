@@ -1,8 +1,8 @@
 // VTK ImageData（.vti）讀寫，不加套件。
 // 讀：CellData（沒有則 PointData）、8 種數值型別、ascii／inline base64／appended raw／appended base64、
-//     vtkZLibDataCompressor（header UInt32／UInt64，用 DecompressionStream 解）。
-// 寫：同 Extent／Spacing／Origin，UInt8 CellData，appended raw 不壓縮。
-import type { Volume } from './volume';
+//     vtkZLibDataCompressor（header UInt32／UInt64，用 DecompressionStream 解，一批 16 塊）。
+// 寫：同 Extent／Spacing／Origin，UInt8 CellData，appended raw 不壓縮；或和輸入同格式（只重壓改到的 block）。
+import type { BBox, Volume } from './volume';
 
 
 type Ctor = { new (buf: ArrayBufferLike, off: number, len: number): ArrayLike<number | bigint> };
@@ -49,6 +49,9 @@ const reader = (b: Uint8Array, hsize: number, le: boolean) => {
   return (at: number) => (hsize === 8 ? Number(dv.getBigUint64(at, le)) : dv.getUint32(at, le));
 };
 
+/** 一批同時開幾條 Compression／DecompressionStream（plan v15 C4、C1）。 */
+const STREAM_BATCH = 16;
+
 /** 一個 binary 區塊（header ＋ 資料）解成資料位元組。 */
 async function readBlock(b: Uint8Array, hsize: number, compressed: boolean, le: boolean) {
   const rd = reader(b, hsize, le);
@@ -56,15 +59,21 @@ async function readBlock(b: Uint8Array, hsize: number, compressed: boolean, le: 
   const nb = rd(0);
   const blockSize = rd(hsize);
   const lastSize = rd(2 * hsize);
-  const sizes = Array.from({ length: nb }, (_, i) => rd((3 + i) * hsize));
   const out = new Uint8Array(nb ? (nb - 1) * blockSize + (lastSize || blockSize) : 0);
   let at = (3 + nb) * hsize;
   let o = 0;
-  for (const s of sizes) {
-    const part = await inflate(b.subarray(at, at + s));
-    out.set(part, o);
-    o += part.length;
-    at += s;
+  // plan v15 C4：一批 16 塊一起 inflate（每塊各自一條 DecompressionStream），結果照順序放回
+  for (let k0 = 0; k0 < nb; k0 += STREAM_BATCH) {
+    const batch: Promise<Uint8Array>[] = [];
+    for (let k = k0; k < Math.min(nb, k0 + STREAM_BATCH); k++) {
+      const s = rd((3 + k) * hsize);
+      batch.push(inflate(b.subarray(at, at + s)));
+      at += s;
+    }
+    for (const part of await Promise.all(batch)) {
+      out.set(part, o);
+      o += part.length;
+    }
   }
   return out;
 }
@@ -106,9 +115,12 @@ function findBytes(hay: Uint8Array, needle: Uint8Array) {
 /**
  * ascii 資料（plan v9 P16）：逐字元掃描，不 split 成幾千萬個字串。純整數直接累加；
  * 有小數點、指數、nan 之類的那一個 token 才交給 Number()。和 split(/\s+/).map(Number) 結果相同。
+ * plan v15 C4：先當成 0～254 的整數直接寫 Uint8Array（材質編號陣列最常見，省 8 B／格）；遇到第一個不合的
+ * token（帶正負號、小數、超過 254、非數字）才把已經讀到的搬進 Float64Array 繼續。
  */
-export function parseAscii(body: string, N: number): Float64Array {
-  const out = new Float64Array(N);
+export function parseAscii(body: string, N: number): Float64Array | Uint8Array {
+  let u8: Uint8Array | null = new Uint8Array(N);
+  let f64: Float64Array | null = null;
   let n = 0;
   const L = body.length;
   let i = 0;
@@ -121,8 +133,10 @@ export function parseAscii(body: string, N: number): Float64Array {
     }
     const s = i;
     let neg = false;
+    let signed = false;
     if (c === 45 /* - */ || c === 43 /* + */) {
       neg = c === 45;
+      signed = true;
       i++;
     }
     let v = 0;
@@ -136,8 +150,19 @@ export function parseAscii(body: string, N: number): Float64Array {
       } else if (c === 32 || (c >= 9 && c <= 13)) break;
       else simple = false;
     }
-    out[n++] = simple && digits && digits < 16 ? (neg ? -v : v) : Number(body.slice(s, i));
+    const plain = simple && digits > 0 && digits < 16;
+    if (u8) {
+      if (plain && !signed && v <= 254) {
+        u8[n++] = v;
+        continue;
+      }
+      f64 = new Float64Array(N);
+      f64.set(u8.subarray(0, n));
+      u8 = null;
+    }
+    f64![n++] = plain ? (neg ? -v : v) : Number(body.slice(s, i));
   }
+  const out = f64 ?? u8!;
   if (n < N) return out.subarray(0, n);
   return out;
 }
@@ -244,9 +269,19 @@ export async function readValues(h: VtiHead, d: ArrDesc, count?: number): Promis
   const format = d.a.format ?? 'ascii';
   if (format === 'ascii') return parseAscii(d.body, count ?? (d.body.match(/\S+/g)?.length ?? 0));
   const data = await readBytes(h, d);
-  const aligned = data.byteOffset % T.size === 0 ? data : new Uint8Array(data);
+  let aligned = data.byteOffset % T.size === 0 ? data : new Uint8Array(data);
+  // big-endian 檔：typed array 一律是本機（little-endian）位元組序，先把每個元素的位元組反過來（複製一份）
+  if (!h.le && T.size > 1) aligned = swapBytes(aligned, T.size);
   const n = Math.floor(aligned.byteLength / T.size);
   return new T.ctor(aligned.buffer, aligned.byteOffset, count === undefined ? n : Math.min(count, n));
+}
+
+/** 每 size 個位元組反序（big-endian ↔ little-endian），回新陣列。 */
+function swapBytes(u: Uint8Array, size: number): Uint8Array {
+  const n = u.length - (u.length % size);
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i += size) for (let k = 0; k < size; k++) out[i + k] = u[i + size - 1 - k];
+  return out;
 }
 
 /** binary／appended 陣列解成資料位元組（已解壓）。 */
@@ -583,14 +618,15 @@ _`);
   return out;
 }
 
-// ---- 與輸入同格式匯出（plan v11 §4.0、§9 D15）----
+// ---- 與輸入同格式匯出（plan v11 §4.0、§9 D15；plan v15 C1：只重壓碰到的 block、整體回 parts）----
 
 const latin1Bytes = (s: string) => {
   const u = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i) & 255;
   return u;
 };
-const catBytes = (parts: Uint8Array[]) => {
+/** parts 接成一塊（匯出最後一次、或 zip 之前）。 */
+export const catBytes = (parts: Uint8Array[]) => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
   for (const p of parts) {
@@ -599,17 +635,70 @@ const catBytes = (parts: Uint8Array[]) => {
   }
   return out;
 };
-/** base64（分段，避免大陣列一次 String.fromCharCode 爆堆疊）。 */
-export function b64(u: Uint8Array) {
-  let out = '';
-  const STEP = 3 * 8192;
-  for (let i = 0; i < u.length; i += STEP) {
-    const part = u.subarray(i, Math.min(u.length, i + STEP));
-    let s = '';
-    for (let k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
-    out += btoa(s);
+
+/**
+ * parts 收集器：短的片段（改掉的幾個 token、header）抄進 64 KB 的暫存塊，長的（原檔 subarray、整個 block）直接引用；
+ * 幾百萬個改點才不會變成幾百萬個 Uint8Array view。
+ */
+class Parts {
+  private out: Uint8Array[] = [];
+  private buf: Uint8Array | null = null;
+  private used = 0;
+  constructor(private readonly small = 256, private readonly chunk = 65536) {}
+  push(p: Uint8Array) {
+    if (!p.length) return;
+    if (p.length >= this.small) {
+      this.flush();
+      this.out.push(p);
+      return;
+    }
+    if (this.buf && this.used + p.length > this.buf.length) this.flush();
+    if (!this.buf) this.buf = new Uint8Array(this.chunk);
+    this.buf.set(p, this.used);
+    this.used += p.length;
+  }
+  private flush() {
+    if (this.buf && this.used) this.out.push(this.buf.subarray(0, this.used));
+    this.buf = null;
+    this.used = 0;
+  }
+  done(): Uint8Array[] {
+    this.flush();
+    return this.out;
+  }
+}
+
+const B64_TABLE = new TextEncoder().encode('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/');
+/** base64 直接寫成 latin1 位元組（查表，不經 JS 字串；和 btoa 的輸出逐字元相同）。 */
+export function b64Bytes(u: Uint8Array): Uint8Array {
+  const n = u.length;
+  const out = new Uint8Array(4 * Math.ceil(n / 3));
+  const full = n - (n % 3);
+  let o = 0;
+  let i = 0;
+  for (; i < full; i += 3) {
+    const a = u[i];
+    const b = u[i + 1];
+    const c = u[i + 2];
+    out[o++] = B64_TABLE[a >> 2];
+    out[o++] = B64_TABLE[((a & 3) << 4) | (b >> 4)];
+    out[o++] = B64_TABLE[((b & 15) << 2) | (c >> 6)];
+    out[o++] = B64_TABLE[c & 63];
+  }
+  if (i < n) {
+    const a = u[i];
+    const two = i + 1 < n;
+    const b = two ? u[i + 1] : 0;
+    out[o++] = B64_TABLE[a >> 2];
+    out[o++] = B64_TABLE[((a & 3) << 4) | (b >> 4)];
+    out[o++] = two ? B64_TABLE[(b & 15) << 2] : 61;
+    out[o++] = 61;
   }
   return out;
+}
+/** base64 字串（測試與舊呼叫端用；內部都走 b64Bytes）。 */
+export function b64(u: Uint8Array) {
+  return new TextDecoder('latin1').decode(b64Bytes(u));
 }
 
 async function deflate(u: Uint8Array) {
@@ -621,6 +710,17 @@ async function deflate(u: Uint8Array) {
   return new Uint8Array(await new Response(cs.readable).arrayBuffer());
 }
 
+/** 一批 16 個同時做（Compression／DecompressionStream 各自獨立），結果照順序。 */
+async function inBatches<T>(n: number, job: (k: number) => Promise<T>): Promise<T[]> {
+  const out: T[] = [];
+  for (let k0 = 0; k0 < n; k0 += STREAM_BATCH) {
+    const batch: Promise<T>[] = [];
+    for (let k = k0; k < Math.min(n, k0 + STREAM_BATCH); k++) batch.push(job(k));
+    out.push(...(await Promise.all(batch)));
+  }
+  return out;
+}
+
 /** 整數寫進 header（UInt32／UInt64）。 */
 const putInts = (vals: number[], hsize: number, le: boolean) => {
   const out = new Uint8Array(vals.length * hsize);
@@ -629,17 +729,22 @@ const putInts = (vals: number[], hsize: number, le: boolean) => {
   return out;
 };
 
-/** 資料位元組 → 區塊（header＋資料）；壓縮時每 blockSize 一塊、各自 zlib。 */
-async function encodeBlock(data: Uint8Array, h: VtiHead, blockSize: number) {
-  if (!h.compressed) return { head: putInts([data.length], h.hsize, h.le), body: data };
-  const nb = data.length ? Math.ceil(data.length / blockSize) : 0;
-  const parts: Uint8Array[] = [];
-  for (let k = 0; k < nb; k++) parts.push(await deflate(data.subarray(k * blockSize, Math.min(data.length, (k + 1) * blockSize))));
-  const last = nb ? data.length - (nb - 1) * blockSize : 0;
-  return { head: putInts([nb, blockSize, last, ...parts.map((p) => p.length)], h.hsize, h.le), body: catBytes(parts) };
+/** 區塊：header 與資料 parts（資料可能是好幾段：沒碰到的 block 直接引用原檔）。 */
+interface Block {
+  head: Uint8Array;
+  bodyParts: Uint8Array[];
 }
-/** 區塊的文字形式（inline binary／appended base64）：壓縮時 header 與資料各自一串（VTK 慣例）。 */
-const blockText = (b: { head: Uint8Array; body: Uint8Array }, compressed: boolean) => (compressed ? b64(b.head) + b64(b.body) : b64(catBytes([b.head, b.body])));
+
+/** 資料位元組 → 區塊（header＋資料）；壓縮時每 blockSize 一塊、各自 zlib。整陣列路徑（patchBlocks 不適用時的退路）。 */
+async function encodeBlock(data: Uint8Array, h: VtiHead, blockSize: number): Promise<Block> {
+  if (!h.compressed) return { head: putInts([data.length], h.hsize, h.le), bodyParts: [data] };
+  const nb = data.length ? Math.ceil(data.length / blockSize) : 0;
+  const parts = await inBatches(nb, (k) => deflate(data.subarray(k * blockSize, Math.min(data.length, (k + 1) * blockSize))));
+  const last = nb ? data.length - (nb - 1) * blockSize : 0;
+  return { head: putInts([nb, blockSize, last, ...parts.map((p) => p.length)], h.hsize, h.le), bodyParts: parts };
+}
+/** 區塊的文字形式（inline binary／appended base64），latin1 位元組：壓縮時 header 與資料各自一串（VTK 慣例）。 */
+const blockText = (b: Block, compressed: boolean): Uint8Array[] => (compressed ? [b64Bytes(b.head), b64Bytes(catBytes(b.bodyParts))] : [b64Bytes(catBytes([b.head, ...b.bodyParts]))]);
 
 /** 原檔這個陣列壓縮時的 blockSize（沒壓縮或讀不到回 32768）。 */
 function blockSizeOf(h: VtiHead, d: ArrDesc): number {
@@ -655,6 +760,155 @@ function blockSizeOf(h: VtiHead, d: ArrDesc): number {
   return reader(head, h.hsize, h.le)(h.hsize) || 32768;
 }
 
+/** 原陣列的整個區塊（header＋資料，未解壓）：appended raw 直接是原檔的 subarray；base64／inline 先解碼。 */
+function origBlock(h: VtiHead, d: ArrDesc): Uint8Array {
+  const { bytes, hsize, compressed, le } = h;
+  if ((d.a.format ?? 'ascii') === 'binary') return b64Block(d.body, hsize, compressed, le);
+  const { enc, data } = appendedInfo(h);
+  const start = data + Number(d.a.offset ?? 0);
+  if (enc === 'raw') return bytes.subarray(start, start + blockLength(h, enc, start));
+  const end = bytes.indexOf(0x3c /* < */, start);
+  return b64Block(new TextDecoder('latin1').decode(bytes.subarray(start, end < 0 ? bytes.length : end)), hsize, compressed, le);
+}
+
+/** 把第 i 個元素的新值寫進 DataView 的 at（依型別與位元組序）。 */
+type Put = (dv: DataView, at: number, i: number) => void;
+function putter(dtype: string, val: (i: number) => number, le: boolean): Put {
+  switch (dtype) {
+    case 'UInt8':
+      return (dv, at, i) => dv.setUint8(at, val(i));
+    case 'Int8':
+      return (dv, at, i) => dv.setInt8(at, val(i));
+    case 'UInt16':
+      return (dv, at, i) => dv.setUint16(at, val(i), le);
+    case 'Int16':
+      return (dv, at, i) => dv.setInt16(at, val(i), le);
+    case 'UInt32':
+      return (dv, at, i) => dv.setUint32(at, val(i), le);
+    case 'Int32':
+      return (dv, at, i) => dv.setInt32(at, val(i), le);
+    case 'Float32':
+      return (dv, at, i) => dv.setFloat32(at, val(i), le);
+    case 'Float64':
+      return (dv, at, i) => dv.setFloat64(at, val(i), le);
+    case 'UInt64':
+      return (dv, at, i) => dv.setBigUint64(at, BigInt(val(i)), le);
+    case 'Int64':
+      return (dv, at, i) => dv.setBigInt64(at, BigInt(val(i)), le);
+    default:
+      throw new Error(`不支援的型別 ${dtype}`);
+  }
+}
+
+/** 區塊來源：原陣列（壓縮的每塊 inflate、未壓縮的 subarray）或全 0 的新陣列。 */
+interface BlockSource {
+  nb: number;
+  blockSize: number;
+  /** 最後一塊的明文長度（> 0）。 */
+  lastPlain: number;
+  /** header 裡 lastSize 欄位要寫的值（原陣列照抄；新陣列＝lastPlain）。 */
+  lastField: number;
+  /** 沒碰到的第 k 塊要輸出的位元組：壓縮時是壓縮位元組，否則明文。 */
+  keep(k: number): Uint8Array;
+  /** 第 k 塊的明文，可以直接改（新配置的）。 */
+  plain(k: number): Promise<Uint8Array>;
+}
+
+/**
+ * 只重做碰到的 block（plan v15 C1）：chg（遞增的元素索引）落在哪些 block，就只對那些 block 取明文→改→（壓縮時）deflate，
+ * 一批 16 塊；其他 block 原樣引用。header 只換碰到那幾塊的 size。
+ */
+async function rebuildBlocks(h: VtiHead, src: BlockSource, size: number, chg: Int32Array, put: Put, stats?: ExportStats): Promise<Block> {
+  const per = src.blockSize / size;
+  const touched = new Map<number, number[]>();
+  for (let j = 0; j < chg.length; j++) {
+    const i = chg[j];
+    const k = Math.floor(i / per);
+    if (k >= src.nb) continue;
+    const list = touched.get(k);
+    if (list) list.push(i);
+    else touched.set(k, [i]);
+  }
+  const keys = [...touched.keys()];
+  const redone = await inBatches(keys.length, async (j) => {
+    const k = keys[j];
+    const plain = await src.plain(k);
+    const dv = new DataView(plain.buffer, plain.byteOffset, plain.byteLength);
+    const base = k * per;
+    for (const i of touched.get(k)!) {
+      const at = (i - base) * size;
+      if (at + size <= plain.length) put(dv, at, i);
+    }
+    return h.compressed ? deflate(plain) : plain;
+  });
+  const fresh = new Map<number, Uint8Array>();
+  keys.forEach((k, j) => fresh.set(k, redone[j]));
+  if (stats) {
+    stats.blocks += src.nb;
+    stats.redone += keys.length;
+  }
+  const bodyParts: Uint8Array[] = [];
+  const sizes: number[] = [];
+  for (let k = 0; k < src.nb; k++) {
+    const b = fresh.get(k) ?? src.keep(k);
+    bodyParts.push(b);
+    sizes.push(b.length);
+  }
+  const head = h.compressed ? putInts([src.nb, src.blockSize, src.lastField, ...sizes], h.hsize, h.le) : putInts([(src.nb - 1) * src.blockSize + src.lastPlain], h.hsize, h.le);
+  return { head, bodyParts };
+}
+
+/** 原陣列只改 chg 那幾個元素。header 組合不支援（blockSize 不是元素大小的倍數、長度對不上）回 null，呼叫端走整陣列路徑。 */
+async function patchBlocks(h: VtiHead, d: ArrDesc, chg: Int32Array, put: Put, stats?: ExportStats): Promise<Block | null> {
+  const T = TYPES[d.a.type ?? 'Float32'];
+  if (!T) return null;
+  const size = T.size;
+  const block = origBlock(h, d);
+  const rd = reader(block, h.hsize, h.le);
+  if (!h.compressed) {
+    const total = rd(0);
+    const body = block.subarray(h.hsize, h.hsize + total);
+    if (body.length < total || !total) return null;
+    // 未壓縮也切成 32 KB 的虛擬 block：碰到的那幾塊複製，其他 subarray 原檔
+    const blockSize = 32768;
+    const nb = Math.ceil(total / blockSize);
+    const lastPlain = total - (nb - 1) * blockSize;
+    const range = (k: number) => [k * blockSize, Math.min(total, (k + 1) * blockSize)] as const;
+    return rebuildBlocks(h, { nb, blockSize, lastPlain, lastField: lastPlain, keep: (k) => body.subarray(...range(k)), plain: async (k) => body.slice(...range(k)) }, size, chg, put, stats);
+  }
+  const nb = rd(0);
+  const blockSize = rd(h.hsize);
+  const lastSize = rd(2 * h.hsize);
+  if (!nb || !blockSize || blockSize % size !== 0) return null;
+  const at: number[] = [];
+  const sizes: number[] = [];
+  let o = (3 + nb) * h.hsize;
+  for (let k = 0; k < nb; k++) {
+    const s = rd((3 + k) * h.hsize);
+    at.push(o);
+    sizes.push(s);
+    o += s;
+  }
+  if (o > block.length) return null;
+  const lastPlain = lastSize || blockSize;
+  return rebuildBlocks(h, { nb, blockSize, lastPlain, lastField: lastSize, keep: (k) => block.subarray(at[k], at[k] + sizes[k]), plain: (k) => inflate(block.subarray(at[k], at[k] + sizes[k])) }, size, chg, put, stats);
+}
+
+/** 新材質的比例陣列：全 0 只有 chg 裡的幾個點是 1。沒碰到的 block 全是 0 → 一份 deflate 過的全 0 block 重複引用。 */
+async function freshBlocks(h: VtiHead, dtype: string, N: number, blockSize: number, chg: Int32Array, put: Put, stats?: ExportStats): Promise<Block | null> {
+  const T = TYPES[dtype];
+  if (!T || blockSize % T.size !== 0) return null;
+  const total = N * T.size;
+  if (!total) return null;
+  const nb = Math.ceil(total / blockSize);
+  const lastPlain = total - (nb - 1) * blockSize;
+  const zeros = new Uint8Array(blockSize);
+  const zFull = h.compressed ? await deflate(zeros) : zeros;
+  const zLast = lastPlain === blockSize ? zFull : h.compressed ? await deflate(zeros.subarray(0, lastPlain)) : zeros.subarray(0, lastPlain);
+  const len = (k: number) => (k === nb - 1 ? lastPlain : blockSize);
+  return rebuildBlocks(h, { nb, blockSize, lastPlain, lastField: lastPlain, keep: (k) => (k === nb - 1 ? zLast : zFull), plain: async (k) => new Uint8Array(len(k)) }, T.size, chg, put, stats);
+}
+
 /** 開始標籤裡設一個屬性（沒有就加在最後）。 */
 function setAttr(tag: string, name: string, value: string) {
   const re = new RegExp(`(\\s${name}\\s*=\\s*")[^"]*(")`);
@@ -662,31 +916,72 @@ function setAttr(tag: string, name: string, value: string) {
   return tag.replace(/\s*(\/?>)$/, ` ${name}="${value}"$1`);
 }
 
-type Typed = Exclude<ReturnType<typeof makeTyped>, never>;
-function makeTyped(dtype: string, n: number) {
+/** 一串值寫成該型別的位元組（依 byte_order）。 */
+function typedBytes(dtype: string, vals: number[], le: boolean): Uint8Array {
   const T = TYPES[dtype] ?? TYPES.Float32;
-  const buf = new ArrayBuffer(n * T.size);
-  return new (T.ctor as unknown as { new (b: ArrayBuffer): ArrayLike<number | bigint> & { [i: number]: number | bigint; buffer: ArrayBuffer } })(buf);
+  const out = new Uint8Array(vals.length * T.size);
+  const put = putter(TYPES[dtype] ? dtype : 'Float32', (i) => vals[i], le);
+  const dv = new DataView(out.buffer);
+  for (let i = 0; i < vals.length; i++) put(dv, i * T.size, i);
+  return out;
 }
-const typedBytes = (t: Typed) => new Uint8Array(t.buffer);
-const isBigType = (dtype: string) => dtype === 'UInt64' || dtype === 'Int64';
 
-/** ascii 內文：只換 changed 的那幾個 token，其他字元原封不動。 */
-function rewriteAscii(body: string, changed: Uint8Array, value: (i: number) => string) {
-  const out: string[] = [];
+const ASCII_ONE = new Uint8Array([49]);
+const ASCII_ZERO = new Uint8Array([48]);
+/** "0 " × 65536：ascii 新材質陣列沒改到的那一長串 0 都是它的 subarray。 */
+let zeroRun: Uint8Array | null = null;
+const ZERO_RUN_N = 65536;
+
+/**
+ * ascii 內文：只換 chg（遞增）的那幾個 token，其他位元組直接引用原檔（xml 字串索引＝位元組索引，latin1）。
+ * 掃到最後一個改點就停，不必走完整個內文。
+ */
+function rewriteAscii(h: VtiHead, d: ArrDesc, chg: Int32Array, value: (i: number) => Uint8Array): Uint8Array[] {
+  const out = new Parts();
+  const base = d.tagEnd;
+  const body = d.body;
   const re = /\S+/g;
   let last = 0;
   let i = 0;
+  let j = 0;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(body))) {
-    if (i < changed.length && changed[i]) {
-      out.push(body.slice(last, m.index), value(i));
+  while (j < chg.length && (m = re.exec(body))) {
+    if (i === chg[j]) {
+      out.push(h.bytes.subarray(base + last, base + m.index));
+      out.push(value(i));
       last = m.index + m[0].length;
+      j++;
     }
     i++;
   }
-  out.push(body.slice(last));
-  return out.join('');
+  out.push(h.bytes.subarray(base + last, base + body.length));
+  return out.done();
+}
+
+/** ascii 新材質陣列：N 個 token 用單一空白隔開，只有 isOne 的點是 1。 */
+function freshAscii(N: number, chg: Int32Array, isOne: (i: number) => boolean): Uint8Array[] {
+  if (!zeroRun) zeroRun = new TextEncoder().encode('0 '.repeat(ZERO_RUN_N));
+  const out = new Parts();
+  const zeros = (n: number) => {
+    for (; n > 0; n -= ZERO_RUN_N) out.push(zeroRun!.subarray(0, 2 * Math.min(n, ZERO_RUN_N)));
+  };
+  let pos = 0;
+  const ONE_SP = new Uint8Array([49, 32]);
+  for (let j = 0; j < chg.length; j++) {
+    const i = chg[j];
+    if (i >= N || !isOne(i)) continue;
+    zeros(i - pos);
+    out.push(ONE_SP);
+    pos = i + 1;
+  }
+  zeros(N - pos);
+  const parts = out.done();
+  // 每個 token 後面都接了一個空白，最後一個去掉
+  if (parts.length) {
+    const l = parts[parts.length - 1];
+    parts[parts.length - 1] = l.subarray(0, l.length - 1);
+  }
+  return parts;
 }
 
 export interface ExportMaterial {
@@ -695,73 +990,134 @@ export interface ExportMaterial {
   color: string;
 }
 
+/** 只掃這個外框找改點（Worker 的 diff 外框；parked 用補丁的外框）。diff 有給就看它，否則比 data／origData。box 為 null＝沒有改點。 */
+export interface ExportHint {
+  diff?: Uint8Array;
+  box: BBox | null;
+  dims: { X: number; Y: number; Z: number };
+}
+
+/** 量測用：binary 陣列的 block 總數與重做的數目（bench／測試）。 */
+export interface ExportStats {
+  blocks: number;
+  redone: number;
+}
+
+export interface ExportOptions {
+  /** 強制走整陣列路徑（測試對照）。 */
+  whole?: boolean;
+  stats?: ExportStats;
+}
+
+/** 改到的格子（遞增的索引）。 */
+function changedCells(data: Uint8Array, origData: Uint8Array, hint?: ExportHint): Int32Array {
+  let chg = new Int32Array(1024);
+  let n = 0;
+  const push = (i: number) => {
+    if (n === chg.length) {
+      const g = new Int32Array(chg.length * 2);
+      g.set(chg);
+      chg = g;
+    }
+    chg[n++] = i;
+  };
+  if (!hint) {
+    for (let i = 0; i < data.length; i++) if (data[i] !== origData[i]) push(i);
+  } else if (hint.box) {
+    const { X, Y } = hint.dims;
+    const b = hint.box;
+    const diff = hint.diff;
+    for (let z = b.z0; z <= b.z1; z++)
+      for (let y = b.y0; y <= b.y1; y++) {
+        const row = (z * Y + y) * X;
+        if (diff) {
+          for (let i = row + b.x0, e = row + b.x1; i <= e; i++) if (diff[i]) push(i);
+        } else for (let i = row + b.x0, e = row + b.x1; i <= e; i++) if (data[i] !== origData[i]) push(i);
+      }
+  }
+  return chg.subarray(0, n);
+}
+
 /**
  * 寫 .vti，和輸入一模一樣（plan v11 §4.0）：XML 結構、Extent／Spacing／Origin、比例陣列的名稱與型別、FieldData、
  * 編碼與壓縮都照原檔。沒改到的點每個陣列 bit-identical（ascii 連文字都不動）；改到的點新材質的比例寫 1、其他 0（§9 D16）；
  * 新出現的材質補一個 material_{id} 陣列（同型別，未改點全 0），FieldData 有材質表時補一筆。
  * 一次只解一個比例陣列（§9 D18）。orig＝原檔位元組；data／origData＝這個 split 與原始的材質編號。
+ * plan v15 C1：壓縮的陣列只重壓碰到的 block（其他 block 的壓縮位元組就是原檔的 subarray）；整體回 parts，不先接成一塊。
  */
-export async function encodeVtiLike(orig: ArrayBuffer | Uint8Array, fractions: FractionArray[], data: Uint8Array, origData: Uint8Array, mats: ExportMaterial[]): Promise<Uint8Array> {
+export async function encodeVtiLikeParts(orig: ArrayBuffer | Uint8Array, fractions: FractionArray[], data: Uint8Array, origData: Uint8Array, mats: ExportMaterial[], hint?: ExportHint, opts: ExportOptions = {}): Promise<Uint8Array[]> {
   const h = parseHead(orig);
   const N = data.length;
-  const changed = new Uint8Array(N);
-  const chg: number[] = [];
-  for (let i = 0; i < N; i++)
-    if (data[i] !== origData[i]) {
-      changed[i] = 1;
-      chg.push(i);
-    }
+  const chg = changedCells(data, origData, hint);
+  const stats = opts.stats;
   const descOf = (name: string) => h.sections.PointData.find((d) => d.a.Name === name) ?? h.sections.CellData.find((d) => d.a.Name === name);
   const fr = fractions.map((f) => ({ f, d: descOf(f.name)! }));
   if (fr.some((x) => !x.d)) throw new Error('原檔裡找不到比例陣列，無法照原格式匯出');
   const known = new Set(fractions.map((f) => f.id));
-  const newIds = [...new Set(chg.map((i) => data[i]))].filter((id) => id !== 0 && !known.has(id)).sort((a, b) => a - b);
+  const idSet = new Set<number>();
+  for (let j = 0; j < chg.length; j++) idSet.add(data[chg[j]]);
+  const newIds = [...idSet].filter((id) => id !== 0 && !known.has(id)).sort((a, b) => a - b);
 
-  /** 每個要改的陣列：新內文（inline）或新區塊位元組／文字（appended）；attrs＝要改的屬性。 */
-  const edits = new Map<ArrDesc, { body?: string; block?: Uint8Array; attrs?: Record<string, string> }>();
+  /** 每個要改的陣列：新內文 parts（inline）或新區塊 parts（appended）；attrs＝要改的屬性。 */
+  const edits = new Map<ArrDesc, { body?: Uint8Array[]; block?: Uint8Array[]; attrs?: Record<string, string> }>();
   const { enc, data: appData } = h.appAt >= 0 ? appendedInfo(h) : { enc: 'raw', data: -1 };
-  /** 依原陣列的格式把新值寫成內文或 appended 區塊。 */
-  const encodeLike = async (d: ArrDesc, bytes: Uint8Array) => {
-    const format = d.a.format ?? 'ascii';
-    const b = await encodeBlock(bytes, h, blockSizeOf(h, d));
-    if (format === 'binary') return { body: blockText(b, h.compressed) };
-    return { block: enc === 'raw' ? catBytes([b.head, b.body]) : latin1Bytes(blockText(b, h.compressed)) };
+  /** 依原陣列的格式把區塊寫成內文或 appended 區塊。 */
+  const placeBlock = (d: ArrDesc, b: Block) => {
+    if ((d.a.format ?? 'ascii') === 'binary') return { body: blockText(b, h.compressed) };
+    return { block: enc === 'raw' ? [b.head, ...b.bodyParts] : blockText(b, h.compressed) };
   };
+  const encodeLike = async (d: ArrDesc, bytes: Uint8Array) => placeBlock(d, await encodeBlock(bytes, h, blockSizeOf(h, d)));
 
   // 1. 比例陣列：改到的點 1／0
   for (const { f, d } of fr) {
     if (!chg.length) break;
     const dtype = d.a.type ?? 'Float32';
     if ((d.a.format ?? 'ascii') === 'ascii') {
-      edits.set(d, { body: rewriteAscii(d.body, changed, (i) => (data[i] === f.id ? '1' : '0')) });
+      edits.set(d, { body: rewriteAscii(h, d, chg, (i) => (data[i] === f.id ? ASCII_ONE : ASCII_ZERO)) });
       continue;
     }
+    const put = putter(dtype, (i) => (data[i] === f.id ? 1 : 0), h.le);
+    const pb = opts.whole ? null : await patchBlocks(h, d, chg, put, stats);
+    if (pb) {
+      edits.set(d, placeBlock(d, pb));
+      continue;
+    }
+    // 退路：整陣列解開、改、重壓
     const raw = (await readBytes(h, d)).slice();
-    const T = TYPES[dtype];
-    const t = new (T.ctor as unknown as { new (b: ArrayBufferLike, o: number, n: number): { [i: number]: number | bigint } })(raw.buffer, 0, Math.floor(raw.length / T.size));
-    const big = isBigType(dtype);
-    for (const i of chg) t[i] = big ? BigInt(data[i] === f.id ? 1 : 0) : data[i] === f.id ? 1 : 0;
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    const size = TYPES[dtype]?.size ?? 4;
+    for (let j = 0; j < chg.length; j++) {
+      const at = chg[j] * size;
+      if (at + size <= raw.length) put(dv, at, chg[j]);
+    }
     edits.set(d, await encodeLike(d, raw));
   }
 
   // 2. 新材質：補比例陣列（同第一個比例陣列的型別與格式）
   const first = fr[0].d;
   const dtype0 = first.a.type ?? 'Float32';
-  const added: { name: string; tag: string; body?: string; block?: Uint8Array }[] = [];
+  const added: { name: string; tag: string; body?: Uint8Array[]; block?: Uint8Array[] }[] = [];
   for (const id of newIds) {
     const name = `material_${id}`;
     const fmt = first.a.format ?? 'ascii';
     const tagAttrs = `type="${dtype0}" Name="${name}" NumberOfComponents="1" format="${fmt}"`;
+    // 只有變成這個材質的點是 1，其他本來就是 0：只碰那幾個點所在的 block
+    const ones = chg.filter((i) => data[i] === id);
     if (fmt === 'ascii') {
-      const parts = new Array<string>(N);
-      for (let i = 0; i < N; i++) parts[i] = data[i] === id ? '1' : '0';
-      added.push({ name, tag: `<DataArray ${tagAttrs}>`, body: parts.join(' ') });
+      added.push({ name, tag: `<DataArray ${tagAttrs}>`, body: freshAscii(N, ones, () => true) });
       continue;
     }
-    const t = makeTyped(dtype0, N);
-    const big = isBigType(dtype0);
-    for (const i of chg) if (data[i] === id) (t as { [i: number]: number | bigint })[i] = big ? 1n : 1;
-    const e = await encodeLike(first, typedBytes(t));
+    const put = putter(dtype0, () => 1, h.le);
+    let e: ReturnType<typeof placeBlock>;
+    const fb = opts.whole ? null : await freshBlocks(h, dtype0, N, blockSizeOf(h, first), ones, put, stats);
+    if (fb) e = placeBlock(first, fb);
+    else {
+      const T = TYPES[dtype0] ?? TYPES.Float32;
+      const raw = new Uint8Array(N * T.size);
+      const dv = new DataView(raw.buffer);
+      for (let j = 0; j < ones.length; j++) put(dv, ones[j] * T.size, ones[j]);
+      e = await encodeLike(first, raw);
+    }
     added.push({ name, tag: fmt === 'binary' ? `<DataArray ${tagAttrs}>` : `<DataArray ${tagAttrs} offset="0"/>`, ...e });
   }
 
@@ -776,7 +1132,7 @@ export async function encodeVtiLike(orig: ArrayBuffer | Uint8Array, fractions: F
       if (fmt === 'ascii') {
         const trimmed = d.body.replace(/\s+$/, '');
         const ws = d.body.slice(trimmed.length);
-        edits.set(d, { body: `${trimmed} ${asciiAppend}${ws}`, attrs: attrsUp });
+        edits.set(d, { body: [latin1Bytes(`${trimmed} ${asciiAppend}${ws}`)], attrs: attrsUp });
         return;
       }
       const old = await readBytes(h, d);
@@ -784,9 +1140,15 @@ export async function encodeVtiLike(orig: ArrayBuffer | Uint8Array, fractions: F
     };
     if (codes) {
       const ct = codes.a.type ?? 'Int32';
-      const t = makeTyped(ct, newMats.length);
-      newMats.forEach((m, k) => ((t as { [i: number]: number | bigint })[k] = isBigType(ct) ? BigInt(m.id) : m.id));
-      await rewrite(codes, newMats.map((m) => m.id).join(' '), typedBytes(t));
+      await rewrite(
+        codes,
+        newMats.map((m) => m.id).join(' '),
+        typedBytes(
+          ct,
+          newMats.map((m) => m.id),
+          h.le,
+        ),
+      );
     }
     if (names) {
       const utf8 = (s: string) => unescape(encodeURIComponent(s));
@@ -808,41 +1170,51 @@ export async function encodeVtiLike(orig: ArrayBuffer | Uint8Array, fractions: F
           const rgb = [1, 3, 5].map((o) => parseInt(m.color.slice(o, o + 2), 16) || 0).map((v) => (unit01 ? v / 255 : v));
           vals.push(...rgb, ...Array(Math.max(0, nc - 3)).fill(unit01 ? 1 : 255));
         }
-        const t = makeTyped(ct, vals.length);
-        vals.forEach((v, k) => ((t as { [i: number]: number | bigint })[k] = isBigType(ct) ? BigInt(Math.round(v)) : isIntType(ct) ? Math.round(v) : v));
-        await rewrite(colors, vals.map((v) => (unit01 ? +v.toFixed(6) : Math.round(v))).join(' '), typedBytes(t));
+        await rewrite(
+          colors,
+          vals.map((v) => (unit01 ? +v.toFixed(6) : Math.round(v))).join(' '),
+          typedBytes(
+            ct,
+            vals.map((v) => (isIntType(ct) ? Math.round(v) : v)),
+            h.le,
+          ),
+        );
       }
     }
   }
 
-  // 4. appended 區重排：照原 offset 順序，沒改的區塊原封不動複製，改過的換新；新陣列接在最後
+  // 4. appended 區重排：照原 offset 順序，沒改的區塊原封不動引用，改過的換新；新陣列接在最後
   const all = [...h.sections.CellData, ...h.sections.PointData, ...h.sections.FieldData];
   const app = all.filter((d) => (d.a.format ?? 'ascii') === 'appended').sort((p, q) => Number(p.a.offset ?? 0) - Number(q.a.offset ?? 0));
   const blocks: Uint8Array[] = [];
   const offsetOf = new Map<ArrDesc, number>();
   let off = 0;
   let tailStart = -1;
+  const pushBlock = (parts: Uint8Array[]) => {
+    for (const p of parts) {
+      blocks.push(p);
+      off += p.length;
+    }
+  };
   for (const d of app) {
     const at = appData + Number(d.a.offset ?? 0);
     const len = blockLength(h, enc, at);
     tailStart = Math.max(tailStart, at + len);
-    const b = edits.get(d)?.block ?? h.bytes.subarray(at, at + len);
     offsetOf.set(d, off);
-    blocks.push(b);
-    off += b.length;
+    pushBlock(edits.get(d)?.block ?? [h.bytes.subarray(at, at + len)]);
   }
-  const addedTags = added.map((a) => {
+  const CLOSE = latin1Bytes('</DataArray>');
+  const addedParts = added.map((a): Uint8Array[] => {
     if (a.block) {
       const tag = a.tag.replace('offset="0"', `offset="${off}"`);
-      blocks.push(a.block);
-      off += a.block.length;
-      return tag;
+      pushBlock(a.block);
+      return [latin1Bytes(tag)];
     }
-    return `${a.tag}${a.body}</DataArray>`;
+    return [latin1Bytes(a.tag), ...(a.body ?? []), CLOSE];
   });
 
-  // 5. XML：由後往前換（位置才不會跑掉）
-  const reps: { s: number; e: number; text: string }[] = [];
+  // 5. XML 換成 parts：沒動的區段引用原檔位元組（xml 字串索引＝位元組索引），改過的陣列換新內容
+  const reps: { s: number; e: number; parts: Uint8Array[] }[] = [];
   for (const d of all) {
     const ed = edits.get(d);
     const newOff = offsetOf.get(d);
@@ -850,19 +1222,34 @@ export async function encodeVtiLike(orig: ArrayBuffer | Uint8Array, fractions: F
     let tag = h.xml.slice(d.start, d.tagEnd);
     if (newOff !== undefined) tag = setAttr(tag, 'offset', String(newOff));
     for (const [k, v] of Object.entries(ed?.attrs ?? {})) tag = setAttr(tag, k, v);
-    if (ed?.body !== undefined) reps.push({ s: d.start, e: d.end, text: `${tag}${ed.body}</DataArray>` });
-    else reps.push({ s: d.start, e: d.tagEnd, text: tag });
+    if (ed?.body !== undefined) reps.push({ s: d.start, e: d.end, parts: [latin1Bytes(tag), ...ed.body, CLOSE] });
+    else reps.push({ s: d.start, e: d.tagEnd, parts: [latin1Bytes(tag)] });
   }
-  if (addedTags.length) {
+  if (addedParts.length) {
     const lastFr = fr.reduce((p, q) => (q.d.end > p.d.end ? q : p)).d;
     const lineStart = h.xml.lastIndexOf('\n', lastFr.start) + 1;
     const indent = h.xml.slice(lineStart, lastFr.start).match(/^[ \t]*/)?.[0] ?? '';
-    reps.push({ s: lastFr.end, e: lastFr.end, text: addedTags.map((t) => `\n${indent}${t}`).join('') });
+    const parts: Uint8Array[] = [];
+    for (const ap of addedParts) parts.push(latin1Bytes(`\n${indent}`), ...ap);
+    reps.push({ s: lastFr.end, e: lastFr.end, parts });
   }
-  reps.sort((p, q) => q.s - p.s || q.e - p.e);
-  let xml = h.xml;
-  for (const r of reps) xml = xml.slice(0, r.s) + r.text + xml.slice(r.e);
-  if (h.appAt < 0) return latin1Bytes(xml);
-  const tail = tailStart >= 0 ? h.bytes.subarray(tailStart) : h.bytes.subarray(appData);
-  return catBytes([latin1Bytes(xml), h.bytes.subarray(h.appAt, appData), ...blocks, tail]);
+  reps.sort((p, q) => p.s - q.s || p.e - q.e);
+  const out = new Parts();
+  let pos = 0;
+  for (const r of reps) {
+    out.push(h.bytes.subarray(pos, r.s));
+    for (const p of r.parts) out.push(p);
+    pos = r.e;
+  }
+  out.push(h.bytes.subarray(pos, h.xml.length));
+  if (h.appAt < 0) return out.done();
+  out.push(h.bytes.subarray(h.appAt, appData));
+  for (const b of blocks) out.push(b);
+  out.push(tailStart >= 0 ? h.bytes.subarray(tailStart) : h.bytes.subarray(appData));
+  return out.done();
+}
+
+/** 同上，接成一塊（既有呼叫端）。 */
+export async function encodeVtiLike(orig: ArrayBuffer | Uint8Array, fractions: FractionArray[], data: Uint8Array, origData: Uint8Array, mats: ExportMaterial[], hint?: ExportHint, opts?: ExportOptions): Promise<Uint8Array> {
+  return catBytes(await encodeVtiLikeParts(orig, fractions, data, origData, mats, hint, opts));
 }

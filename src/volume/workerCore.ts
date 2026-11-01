@@ -9,7 +9,7 @@ import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
 import { type TracedHandle, ringCache } from '../slice/relative';
-import { type Step, applyStepInPlace, carryStepStats } from './patch';
+import { type Step, applyStepInPlace, carryStepStats, tightBox, unionBox } from './patch';
 import type { Report } from './kernel';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
 
@@ -31,8 +31,11 @@ export type Only = { comps: number[]; scope: Scope; box: BBox } | { mat: number 
 
 export const BASE_OWNER = 'base';
 
-/** 圖層要畫哪些格子：選取（comps＝結構編號；box＝它們的外框，只用來限制全量時算哪些 chunk）或某個材質。 */
-export type LayerFilter = { comps: number[]; scope: Scope; box: BBox } | { mat: number };
+/**
+ * 圖層要畫哪些格子：選取（comps＝結構編號；box＝它們的外框，只用來限制全量時算哪些 chunk）、某個材質，
+ * 或差異（plan v12 §5.2：和原始不同的格子，現在有材質畫材質色、被拿掉的畫紅；只算 diff 外框碰到的 chunk）。
+ */
+export type LayerFilter = { comps: number[]; scope: Scope; box: BBox } | { mat: number } | { diff: true };
 
 export interface Requests {
   /** 載入原始：存起來並標記結構；之前的狀態全部丟掉。回傳原始的體積帳（主執行緒不再自己數）。 */
@@ -64,11 +67,8 @@ export interface Requests {
     };
     res: MeshData;
   };
-  /** 差異模式：改過的體素（含被拿掉的，畫紅）一層、沒改的一層（半透明灰）。 */
-  diffMesh: {
-    req: { sid: number; hidden: Uint8Array; palette: Float32Array };
-    res: { changed: MeshData; ghost: MeshData };
-  };
+  /** 和原始不同的格子的外框（貼合；沒有不同回 null）。 */
+  diffBox: { req: { sid: number }; res: BBox | null };
   /** 保留給測試與保險；UI 每一步不再呼叫（主執行緒自己差量更新，§4.4）。 */
   diff: { req: { sid: number }; res: { mask: Uint8Array; count: number } };
   /** 一步操作：owner 的帳簿必須正好是版本 from；原地算（§4.3），沒改到時 head 不動。回傳補丁。 */
@@ -94,8 +94,8 @@ export interface Requests {
    * （選取看 labels，髒的範圍是 relabel 的 S；材質看體素，髒的是補丁外框），否則只算和 box 相交的 chunk。
    */
   layer: {
-    /** palette：有給就用材質原色（聚焦編輯的「選取實色」，plan v10 §4.5），沒給就整層 tint。 */
-    req: { sid: number; key: string; filter: LayerFilter; tint: [number, number, number]; inflate?: number; base?: number; palette?: Float32Array };
+    /** palette：有給就用材質原色（聚焦編輯的「選取實色」，plan v10 §4.5；差異層一定要給），沒給就整層 tint。hidden：差異層不畫的材質。 */
+    req: { sid: number; key: string; filter: LayerFilter; tint: [number, number, number]; inflate?: number; base?: number; palette?: Float32Array; hidden?: Uint8Array };
     res: { full: boolean; items: ChunkItem[] };
   };
   /**
@@ -116,6 +116,10 @@ export interface Book {
   diff: Uint8Array | null;
   diffCount: number;
   counts: Float64Array;
+  /** 和原始不同的格子一定在這個外框裡（每一步 union 補丁外框，寬鬆；plan v12 §5.2）。null＝沒有不同。 */
+  diffBox: BBox | null;
+  /** diffBox 已經收緊過（貼合）。 */
+  tight: boolean;
 }
 
 let dims = { X: 1, Y: 1, Z: 1 };
@@ -162,8 +166,35 @@ function countAll(data: Uint8Array) {
 }
 function copyBook(b: Book): Book {
   const N = b.data.length;
-  return { data: b.data.slice(), labels: b.labels.slice(), diff: b.diff ? b.diff.slice() : new Uint8Array(N), diffCount: b.diffCount, counts: b.counts.slice() };
+  return {
+    data: b.data.slice(),
+    labels: b.labels.slice(),
+    diff: b.diff ? b.diff.slice() : new Uint8Array(N),
+    diffCount: b.diffCount,
+    counts: b.counts.slice(),
+    diffBox: b.diffBox ? { ...b.diffBox } : null,
+    tight: b.tight,
+  };
 }
+/** 貼合的 diff 外框（plan v12 §5.2）：在寬鬆的 union 裡掃一次 diff 收緊，快取到下一步。O(外框)。 */
+export function diffBoxOf(b: Book): BBox | null {
+  if (!b.diff || !b.diffCount) {
+    b.diffBox = null;
+    b.tight = true;
+    return null;
+  }
+  if (!b.tight) {
+    b.diffBox = tightBox(dims, b.diff, b.diffBox);
+    b.tight = true;
+  }
+  return b.diffBox;
+}
+/** 一步補丁之後：diff 外框 union 補丁外框（寬鬆；復原也 union）。 */
+const growDiffBox = (b: Book, step: Step) => {
+  if (!step.data) return;
+  b.diffBox = unionBox(b.diffBox, step.data.box);
+  b.tight = false;
+};
 const ctxOf = (matNames: Record<number, string>, keyCounter: number) => {
   let seq = keyCounter;
   return {
@@ -174,12 +205,17 @@ const ctxOf = (matNames: Record<number, string>, keyCounter: number) => {
 /** 原地套一個 Op 到 owner 的帳簿，順手更新 diff 與體積帳。 */
 function applyTo(b: Book, comps: Comp[], op: Op, ctx: ReturnType<typeof ctxOf>['ctx']) {
   const r = applyOpInPlace({ vol: volOf(b), L: { labels: b.labels, comps } }, op, ctx);
-  if (r.step.data) b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd');
+  if (r.step.data) {
+    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd');
+    growDiffBox(b, r.step);
+  }
   return r;
 }
 
 /** 差異模式裡「原本有、現在是空氣」的體素代碼（材質編號只到 254）。 */
-const REMOVED = 255;
+export const REMOVED = 255;
+/** 被拿掉的紅（和 2D 切面的 REMOVED_RGB #ff4d4f 同色）。 */
+const REMOVED_RGB: [number, number, number] = [1, 77 / 255, 79 / 255];
 
 const emptyMesh = (): MeshData => ({ positions: new Float32Array(0), normals: new Float32Array(0), colors: new Float32Array(0), quads: 0 });
 
@@ -232,7 +268,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     dims = { X: vol.X, Y: vol.Y, Z: vol.Z };
     const { labels, raw } = labelComponents(vol);
     const counts = countAll(vol.data);
-    books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts });
+    books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, diffBox: null, tight: true });
     heads.set(BASE_OWNER, sid);
     origSid = sid;
     // 主執行緒要一份原始的 labels（一次）
@@ -261,7 +297,8 @@ export const handlers: { [K in Kind]: Handler<K> } = {
         diff[i] = 1;
         diffCount++;
       }
-    books.set(owner, { data: vol.data, labels, diff, diffCount, counts: countAll(vol.data) });
+    const all: BBox = { x0: 0, x1: dims.X - 1, y0: 0, y1: dims.Y - 1, z0: 0, z1: dims.Z - 1 };
+    books.set(owner, { data: vol.data, labels, diff, diffCount, counts: countAll(vol.data), diffBox: diffCount ? all : null, tight: !diffCount });
     heads.set(owner, sid);
     return [null, []];
   },
@@ -296,6 +333,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     const b = bookAt(owner, from);
     applyStepInPlace(dims, b.data, b.labels, step, dir);
     b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, step, dir);
+    growDiffBox(b, step);
     heads.set(owner, to);
     parents.set(to, { from, box: step.data?.box ?? null, labelBox: step.labels?.box ?? step.data?.box ?? null });
     return [null, []];
@@ -387,26 +425,10 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     });
     return [m, [m.positions.buffer, m.normals.buffer, m.colors.buffer]];
   },
-  diffMesh: ({ sid, hidden, palette }) => {
-    const { vol } = stateOf(sid);
-    const o = origBook().data;
-    const { X, Y, Z, data } = vol;
-    const N = X * Y * Z;
-    const d = diffMaskOf(sid);
-    const changed = new Uint16Array(N);
-    const ghost = new Uint16Array(N);
-    for (let i = 0; i < N; i++) {
-      const m = data[i];
-      if (d?.[i]) {
-        if (m && !hidden[m]) changed[i] = m;
-        else if (!m && o[i] && !hidden[o[i]]) changed[i] = REMOVED;
-      } else if (m && !hidden[m]) ghost[i] = 1;
-    }
-    const color = (code: number): [number, number, number] =>
-      code === REMOVED ? [0.96, 0.3, 0.3] : [palette[code * 3], palette[code * 3 + 1], palette[code * 3 + 2]];
-    const a = greedyMesh(X, Y, Z, changed, color);
-    const b = greedyMesh(X, Y, Z, ghost, () => [0.72, 0.74, 0.78]);
-    return [{ changed: a, ghost: b }, [a.positions.buffer, a.normals.buffer, a.colors.buffer, b.positions.buffer, b.normals.buffer, b.colors.buffer]];
+  diffBox: ({ sid }) => {
+    const b = stateOf(sid).book;
+    const box = diffBoxOf(b);
+    return [box ? { ...box } : null, []];
   },
   diff: ({ sid }) => {
     const b = stateOf(sid).book;
@@ -414,14 +436,30 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: b.diffCount }, [mask.buffer]];
   },
   count: ({ sid }) => [Array.from(stateOf(sid).book.counts), []],
-  layer: ({ sid, filter, tint, inflate, base, palette }) => {
-    const { vol, labels } = stateOf(sid);
+  layer: ({ sid, filter, tint, inflate, base, palette, hidden }) => {
+    const { vol, labels, book } = stateOf(sid);
     const g = gridOf(vol);
     const data = vol.data;
     let code: (i: number) => number;
     let box: BBox | null;
     let sel = false;
-    if ('mat' in filter) {
+    let isDiff = false;
+    if ('diff' in filter) {
+      // 差異層（plan v12 §5.2）：只看 diff 外框碰到的 chunk；現在有材質＝材質色、被拿掉的＝紅
+      isDiff = true;
+      const d = book.diff && book.diffCount ? book.diff : null;
+      const o = origBook().data;
+      const hid = hidden ?? new Uint8Array(256);
+      code = d
+        ? (i) => {
+            if (!d[i]) return 0;
+            const m = data[i];
+            if (m) return hid[m] ? 0 : m;
+            return o[i] && !hid[o[i]] ? REMOVED : 0;
+          }
+        : () => 0;
+      box = diffBoxOf(book);
+    } else if ('mat' in filter) {
       const mat = filter.mat;
       code = (i) => (data[i] === mat ? 1 : 0);
       box = null;
@@ -453,10 +491,11 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       const d = sel ? par.labelBox : par.box;
       ks = d ? chunksTouching(vol, g, d) : [];
     } else {
-      if (!sel) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
+      if (!sel && !isDiff) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
       ks = box ? chunksTouching(vol, g, box) : [];
     }
-    const color = (c: number): [number, number, number] => (palette ? [palette[c * 3], palette[c * 3 + 1], palette[c * 3 + 2]] : tint);
+    const color = (c: number): [number, number, number] =>
+      c === REMOVED && isDiff ? REMOVED_RGB : palette ? [palette[c * 3], palette[c * 3 + 1], palette[c * 3 + 2]] : tint;
     const items: ChunkItem[] = [];
     for (const k of ks) {
       const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);

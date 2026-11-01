@@ -131,3 +131,39 @@ export function carryStepStats(dims: Dims, data: Uint8Array, orig: Uint8Array, d
 
 /** 補丁佔多少位元組（復原堆疊的記憶體估算）。 */
 export const stepBytes = (s: Step) => (s.data ? s.data.before.length * 2 : 0) + (s.labels ? s.labels.before.length * 8 : 0);
+
+/** 兩個外框的聯集（null＝空）。 */
+export function unionBox(a: BBox | null, b: BBox | null): BBox | null {
+  if (!a) return b ? { ...b } : null;
+  if (!b) return a;
+  return { x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1), z0: Math.min(a.z0, b.z0), z1: Math.max(a.z1, b.z1) };
+}
+
+/** 在 box 裡掃 diff（非 0）收緊成貼合的外框（plan v12 §5.2）；一格都沒有回傳 null。O(box)。 */
+export function tightBox(dims: Dims, diff: Uint8Array, box: BBox | null): BBox | null {
+  if (!box) return null;
+  let x0 = Infinity;
+  let x1 = -1;
+  let y0 = Infinity;
+  let y1 = -1;
+  let z0 = Infinity;
+  let z1 = -1;
+  for (let z = box.z0; z <= box.z1; z++)
+    for (let y = box.y0; y <= box.y1; y++) {
+      const row = (z * dims.Y + y) * dims.X;
+      let any = false;
+      for (let x = box.x0; x <= box.x1; x++)
+        if (diff[row + x]) {
+          any = true;
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+        }
+      if (any) {
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        if (z < z0) z0 = z;
+        if (z > z1) z1 = z;
+      }
+    }
+  return x1 < 0 ? null : { x0, x1, y0, y1, z0, z1 };
+}

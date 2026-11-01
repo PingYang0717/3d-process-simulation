@@ -139,8 +139,9 @@ interface Ctx {
    * 增量更新時沒動到的 chunk 的 Mesh 在多組之間共用；釋放前確認沒有任何一組或目前畫的還在用（disposeOrphans）。
    */
   partsCache: Map<string, Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>>;
-  ghostMesh: Mesh<BufferGeometry, MeshLambertMaterial>;
-  changedEdges: LineSegments<BufferGeometry, LineBasicMaterial>;
+  /** 差異模式（plan v12 §5.2）：改到的實色層與深藍邊，只有 diff 外框碰到的 chunk。「沒改」＝主網格換半透明灰材質。 */
+  diffFill: Layer<Mesh>;
+  diffEdges: Layer<LineSegments>;
   /** 選取層、空洞層、空洞的紅邊：和主網格同一套 chunk（§4.6）。 */
   selFill: Layer<Mesh>;
   voidMesh: Layer<Mesh>;
@@ -197,22 +198,6 @@ const toGeometry = (m: MeshData) => {
   g.computeBoundingSphere();
   return g;
 };
-/** 最近幾個主網格（依狀態、隱藏、標紅、配色）：復原、看原始、切 split 時不必重算。 */
-const meshCache = new Map<string, unknown>();
-const MESH_CACHE_SIZE = 6;
-const cached = async <T,>(key: string, make: () => Promise<T>): Promise<T> => {
-  const hit = meshCache.get(key);
-  if (hit) {
-    meshCache.delete(key);
-    meshCache.set(key, hit);
-    return hit as T;
-  }
-  const m = await make();
-  meshCache.set(key, m);
-  if (meshCache.size > MESH_CACHE_SIZE) meshCache.delete(meshCache.keys().next().value!);
-  return m;
-};
-
 const boxEdges = (b: BBox) => new EdgesGeometry(new BoxGeometry(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1));
 const axisOf = (d: Vec3) => (d[0] ? 0 : d[1] ? 1 : 2);
 const AXIS_RGB: Record<Axis, string> = { x: '#e5484d', y: '#30a46c', z: '#3e63dd' };
@@ -248,6 +233,9 @@ interface Layer<T extends Mesh | LineSegments> {
   material: ThreeMaterial;
   order: number;
 }
+/** 差異模式「沒改」的半透明灰（主網格原地換材質，plan v12 §5.2）。 */
+const GHOST_HEX = 0xb8bcc7;
+const GHOST_OPACITY = 0.38;
 /** 描邊（EdgesGeometry，O(n log n)）的 quad 數上限：超過就不描（差異模式紅邊、空洞紅邊）。 */
 const EDGE_QUADS_MAX = 60000;
 /** 主網格快取幾組（切 B、切 split、復原時不必再跟 Worker 要）。 */
@@ -719,14 +707,6 @@ export function View3D({
     scene.add(partGroup);
     const previewMesh = voxelSpace(new Mesh(new BufferGeometry(), new MeshLambertMaterial(mainParams)));
     previewMesh.visible = false;
-    const ghostMesh = voxelSpace(
-      new Mesh(new BufferGeometry(), new MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.38, depthWrite: false, side: DoubleSide })),
-      1,
-    );
-    ghostMesh.raycast = lazyRaycast;
-    // 差異模式：改過的部分描深藍邊（紅留給「被拿掉的」），和半透明的「沒改」分開
-    const changedEdges = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: DIFF_EDGE_HEX })), 2);
-    changedEdges.visible = false;
     const layerOf = <T extends Mesh | LineSegments>(material: ThreeMaterial, order: number): Layer<T> => {
       const group = new Group();
       group.scale.set(1, -1, 1);
@@ -737,11 +717,14 @@ export function View3D({
     };
     const selFill = layerOf<Mesh>(withHole(new MeshLambertMaterial({ color: 0x1677ff, transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide }), hole), 2);
     const voidMesh = layerOf<Mesh>(new MeshBasicMaterial({ color: 0x262626, transparent: true, opacity: 0.8, depthTest: false, side: DoubleSide }), 3);
+    // 差異模式：改過的部分實色（材質色／拿掉的紅）＋深藍邊（紅留給「被拿掉的」）
+    const diffFill = layerOf<Mesh>(withHole(new MeshLambertMaterial({ vertexColors: true, side: DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }), hole), 1);
+    const diffEdges = layerOf<LineSegments>(new LineBasicMaterial({ color: DIFF_EDGE_HEX }), 2);
     const voidEdges = layerOf<LineSegments>(new LineBasicMaterial({ color: 0xff7875, depthTest: false, transparent: true, opacity: 0.75 }), 4);
     const ring = voxelSpace(new LineLoop(new BufferGeometry(), new LineBasicMaterial({ color: BRUSH_COLOR, depthTest: false, linewidth: 2 })), 5);
     // 法線箭頭：往外＝長、往內＝縮，按下前就知道會往哪推
     const arrow = voxelSpace(new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: BRUSH_COLOR, depthTest: false })), 5);
-    ghostMesh.visible = ring.visible = arrow.visible = false;
+    ring.visible = arrow.visible = false;
     const selBox = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0x1677ff }));
     selBox.visible = false;
     scene.add(selBox);
@@ -845,7 +828,7 @@ export function View3D({
     const handleGroup = new Group();
     scene.add(handleGroup);
     handleGroupRef.current = handleGroup;
-    ctxRef.current = { renderer, scene, camera, controls, mesh, parts, partGroup, shown: null, partsCache, ghostMesh, changedEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
+    ctxRef.current = { renderer, scene, camera, controls, mesh, parts, partGroup, shown: null, partsCache, diffFill, diffEdges, selFill, voidMesh, voidEdges, selBox, hoverBox, previewMesh, hole, ghost, ghostFill, ring, arrow, cross, cap, capEdges };
     // 按下要在 OrbitControls（掛在 canvas 上）之前決定是不是筆刷：capture 階段先跑，筆刷就先把 controls 關掉，
     // OrbitControls 連這一下都不會記到。之前是 React 的 onPointerDown 事後才關，OrbitControls 已經記了一個指標、
     // 又因為指標被我們捕捉而收不到放開，之後滾輪縮放就一直沒反應（視角像被鎖住）。
@@ -1025,14 +1008,15 @@ export function View3D({
       capRef.current = null;
       // 快取裡、不在場景上的 chunk
       for (const m of partsCache.values()) for (const p of m.values()) p.geometry.dispose();
-      for (const l of [selFill, voidMesh, voidEdges]) l.material.dispose();
+      for (const l of [selFill, voidMesh, voidEdges, diffFill, diffEdges]) l.material.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);
       ctxRef.current = null;
     };
   }, [vol.X, vol.Y, vol.Z]);
 
-  // 主網格（Worker greedy mesh，切 chunk）：一步之後只換改到的 chunk（§8.4）；差異模式另外要一層半透明的「沒改」。
+  // 主網格（Worker greedy mesh，切 chunk）：一步之後只換改到的 chunk（§8.4）。
+  // 差異模式（plan v12 §5.2）不再另外要整個模型的 ghost：主網格同一組 chunk、只換材質（下面的材質 effect），改到的實色層另外畫。
   // 只採用最新一次請求的結果
   const meshSeq = useRef(0);
   useEffect(() => {
@@ -1040,62 +1024,47 @@ export function View3D({
     if (!c) return;
     const seq = ++meshSeq.current;
     setMeshing(true);
-    const look = [[...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
-    const req =
-      mode === 'diff'
-        ? cached(`diff|${sidOf(state)}|${look}`, () => call('diffMesh', { sid: sidOf(state), hidden: hiddenTable(hidden), palette: palette(materials) })).then((r) => {
-            if (seq !== meshSeq.current || !ctxRef.current) return;
-            const changed = new Map([[-1, newPart(c, r.changed)]]);
-            showParts(c, changed, null, false);
-            hidePreview(c);
-            const g = toGeometry(r.ghost);
-            c.ghostMesh.geometry.dispose();
-            c.ghostMesh.geometry = g;
-            c.ghostMesh.visible = true;
-            // 改動很大時描邊太貴（EdgesGeometry 是 O(n log n)），就只靠實色
-            c.changedEdges.geometry.dispose();
-            const part = c.parts.get(-1);
-            c.changedEdges.geometry = part && r.changed.quads < EDGE_QUADS_MAX ? new EdgesGeometry(part.geometry, 1) : new BufferGeometry();
-            c.changedEdges.visible = true;
-          })
-        : (() => {
-            const key = look;
-            const sid = sidOf(state);
-            const done = (n: number, full: boolean) => {
-              // 量測用（scripts/e2e/perf.cjs）：最近一次換上正式網格的時間與換了幾個 chunk
-              (window as unknown as { __meshAt?: { t: number; n: number; full: boolean } }).__meshAt = { t: performance.now(), n, full };
-              // 正式網格到了，預覽收掉
-              hidePreview(c);
-              c.ghostMesh.visible = false;
-              c.changedEdges.visible = false;
-            };
-            // 快取裡有（看原始、切 split、復原）：直接換上，不必跟 Worker 要
-            const hit = c.partsCache.get(`${sid}|${key}`);
-            if (hit) {
-              showParts(c, hit, { sid, key }, true);
-              done(0, false);
-              return Promise.resolve();
-            }
-            const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
-            return call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: false, palette: palette(materials), base }).then((r) => {
-              if (seq !== meshSeq.current || !ctxRef.current) return;
-              showParts(c, nextParts(c, r.full ? null : c.parts, r.items), { sid, key }, true);
-              done(r.items.length, r.full);
-            });
-          })();
+    const key = [[...hidden].sort().join(','), materials.map((m) => m.color).join('')].join('|');
+    const sid = sidOf(state);
+    const done = (n: number, full: boolean) => {
+      // 量測用（scripts/e2e/perf.cjs）：最近一次換上正式網格的時間與換了幾個 chunk
+      (window as unknown as { __meshAt?: { t: number; n: number; full: boolean } }).__meshAt = { t: performance.now(), n, full };
+      // 正式網格到了，預覽收掉
+      hidePreview(c);
+    };
+    let req: Promise<void>;
+    // 快取裡有（看原始、切 split、復原）：直接換上，不必跟 Worker 要
+    const hit = c.partsCache.get(`${sid}|${key}`);
+    if (hit) {
+      showParts(c, hit, { sid, key }, true);
+      done(0, false);
+      req = Promise.resolve();
+    } else {
+      const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
+      req = call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: false, palette: palette(materials), base }).then((r) => {
+        if (seq !== meshSeq.current || !ctxRef.current) return;
+        showParts(c, nextParts(c, r.full ? null : c.parts, r.items), { sid, key }, true);
+        done(r.items.length, r.full);
+      });
+    }
     req.then(() => (setMeshing(false), kick())).catch(() => setMeshing(false));
-  }, [state, materials, hidden, mode]);
+  }, [state, materials, hidden]);
 
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
     // 聚焦編輯：其他結構淡到 0.18（選取另外由選取層畫實色）；材質半透明是獨立的顯示選項
+    // 差異模式（plan v12 §5.2）：主網格原地換成半透明灰（「沒改」），geometry 一個位元組都不動
     const dim = dimOthers && mode !== 'orig';
+    const ghost = mode === 'diff';
     for (const mat of [c.mesh.material, c.previewMesh.material]) {
-      const op = dim && mat === c.mesh.material ? 0.18 : translucent ? 0.3 : 1;
+      const main = mat === c.mesh.material;
+      const op = ghost && main ? GHOST_OPACITY : dim && main ? 0.18 : translucent ? 0.3 : 1;
       mat.transparent = op < 1;
       mat.opacity = op;
       mat.depthWrite = op === 1;
+      mat.vertexColors = !(ghost && main);
+      mat.color.setHex(ghost && main ? GHOST_HEX : 0xffffff);
       mat.needsUpdate = true;
     }
     const sm = c.selFill.material as MeshLambertMaterial;
@@ -1107,6 +1076,45 @@ export function View3D({
     sm.needsUpdate = true;
     kick();
   }, [translucent, dimOthers, mode]);
+
+  // 差異層（plan v12 §5.2）：只對 diff 外框碰到的 chunk 做實色層與深藍邊；一步之後只重算改到的 chunk
+  const diffSeq = useRef(0);
+  useEffect(() => {
+    const c = ctxRef.current;
+    if (!c) return;
+    const seq = ++diffSeq.current;
+    const F = c.diffFill;
+    const E = c.diffEdges;
+    if (mode !== 'diff') {
+      F.group.visible = E.group.visible = false;
+      return;
+    }
+    const sid = sidOf(state);
+    const key = `diff|${[...hidden].sort().join(',')}|${materials.map((m) => m.color).join('')}`;
+    const base = F.shown?.key === key ? F.shown.sid : undefined;
+    if (base === undefined) F.group.visible = E.group.visible = false;
+    const t0 = performance.now();
+    call('layer', { sid, key, filter: { diff: true }, tint: [1, 0, 0], base, palette: palette(materials), hidden: hiddenTable(hidden) })
+      .then((r) => {
+        if (seq !== diffSeq.current || !ctxRef.current) return;
+        setLayer(F, r.items.map((it) => ({ k: it.k, geometry: it.m.quads ? toGeometry(it.m) : null })), r.full, (g) => new Mesh(g, F.material));
+        F.shown = { sid, key };
+        // 深藍邊：每個改到的 chunk 一份；總 quads 太多就不描（EdgesGeometry 是 O(n log n)）
+        let quads = 0;
+        for (const p of F.parts.values()) quads += p.geometry.attributes.position.count / 6;
+        if (quads > EDGE_QUADS_MAX) clearLayer(E);
+        else {
+          const ks = r.full || !E.shown ? [...F.parts.keys()] : r.items.map((it) => it.k);
+          setLayer(E, ks.map((k) => ({ k, geometry: F.parts.has(k) ? new EdgesGeometry(F.parts.get(k)!.geometry, 1) : null })), r.full || !E.shown, (g) => new LineSegments(g, E.material));
+          E.shown = F.shown;
+        }
+        F.group.visible = E.group.visible = true;
+        // 量測用（m12.cjs）：按 D 到差異層換上的時間、改到的 chunk 數
+        if (import.meta.env.DEV) (window as unknown as { __diffAt?: { ms: number; chunks: number; full: boolean } }).__diffAt = { ms: performance.now() - t0, chunks: F.parts.size, full: r.full };
+        kick();
+      })
+      .catch(() => {}); // 過期的版本：等新的 state 再畫
+  }, [state, hidden, materials, mode]);
 
   // 格子點雲（§8.3）：每個要加／拿的格子一個點（綠＝會加、紅＝會拿），半透明、不寫深度。
   // 用 Points 而不是一格一個方塊：一格一個頂點，幾萬格每幀重畫也便宜。物件與材質一直留著，只換位置。
@@ -1370,8 +1378,8 @@ export function View3D({
     if (!c) return;
     const plane = clipPlane(clip);
     const planes = plane ? [plane] : [];
-    for (const o of [c.mesh, c.previewMesh, c.ghostMesh]) o.material.clippingPlanes = planes;
-    for (const l of [c.selFill, c.voidMesh, c.voidEdges]) l.material.clippingPlanes = planes;
+    for (const o of [c.mesh, c.previewMesh]) o.material.clippingPlanes = planes;
+    for (const l of [c.selFill, c.voidMesh, c.voidEdges, c.diffFill, c.diffEdges]) l.material.clippingPlanes = planes;
     // 背面只有剖開時看得到（從剖口看進去）：沒剖面時只畫正面，GPU 少一半 fragment（plan v9 P17）
     for (const m of [c.mesh.material, c.previewMesh.material]) {
       const side = clip ? DoubleSide : FrontSide;
@@ -1469,12 +1477,11 @@ export function View3D({
     ray.setFromCamera(ndc, c.camera);
     return ray;
   };
-  /** 可點選的網格：差異模式連半透明的「沒改」也算。 */
+  /** 可點選的網格：主網格（差異模式時它就是半透明的「沒改」）。 */
   const pickables = () => {
     const c = ctxRef.current!;
     const out: Mesh[] = [];
     for (const p of c.parts.values()) out.push(p);
-    if (c.ghostMesh.visible && c.ghostMesh.geometry.attributes.position) out.push(c.ghostMesh);
     return out;
   };
   /** 一個三角形命中 → 它貼著的實心體素與外法線（面朝相機那一側是空的）。 */

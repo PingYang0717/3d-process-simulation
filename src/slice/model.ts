@@ -592,6 +592,8 @@ export class ModelStore {
       const snap = this.entity(`${id}@${version}`);
       if (snap && !m?.pending) {
         m = restore(snap.m);
+        // 經指標還原時實體是別的版本的：版本號要接到要的這一版，否則下一次 get 又會再還原一份新的
+        m.baseVersion = version;
         // 還原出來的就是那份實體：之後沒改就能用指標
         this.keptAt.set(m, { key: snap.key, rev: m.rev });
       } else if (m && !touched && !m.pending && !settled && m.baseVersion >= 0) {

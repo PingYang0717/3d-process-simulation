@@ -6,14 +6,15 @@ import type { Op } from '../../volume/ops';
 import { type Scope, axisIndex, axisLen, planeAxes, to3D } from '../../volume/scope';
 import { type Ring, type XY, boundaryLoops, traceRings } from '../../slice/trace';
 import { editRing } from '../../slice/raster';
-import { type Handle, type HandleKind, dragDisp, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
+import { type Handle, type HandleKind, dragDisp, gestureKey, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
 import { type DragArg, type NodeDrag, dragDispFloat, isAxisCorner, isSingle, resolveNodeDrag, selfIntersects, snapAmount } from '../../slice/snap';
 import { type ModelStore, type VId, insertNode, locate, removeHandle, ringsOf, sliceOfKey, vidOf } from '../../slice/model';
 import { type ModelHost, commitGesture, opOfGesture, sliceContext } from './handleOps';
 import { type SlicePreview, SlicePreviewLayer } from './SlicePreviewLayer';
-import { type SelectMode, selectModeOf } from './editor';
+import { type LastStep, type SelectMode, selectModeOf } from './editor';
 import { drawSlice } from './views';
 import { typingIn, usePersisted } from '../../ui/persist';
+import { useSliceRev } from './useSliceRev';
 
 /**
  * 選到的把手（節點／邊）：右欄數值輸入、方向鍵用。vid＝幾何層的頂點 id（節點＝那個頂點，邊＝段的起點），
@@ -26,6 +27,8 @@ export interface GeoOpts {
   models: ModelStore;
   version: number;
   stepSeq: number;
+  /** 最近一步（plan v15 A4）：它的外框沒碰到這一片就不重描、不驗證；省略＝每步都當成碰到。 */
+  lastStep?: LastStep | null;
   /** 輪廓畫幾何線（預設）或 v7 的階梯。 */
   outline: 'geometry' | 'stairs';
   /** 拖拉中跟手、放開才吸附（預設）或邊拖邊吸附（v7）。 */
@@ -168,8 +171,8 @@ export function SliceEditor({
   onCommit?: (op: Op) => void;
   /** 拖動中：即時預覽（null = 收掉）。 */
   onLive?: (op: Op | null) => void;
-  /** 上一步被擋住的格子（整個陣列的 index），這一片的標紅。 */
-  blocked?: number[] | null;
+  /** 上一步被擋住的格子（整個陣列的 index；Worker 摘要回來的 Int32Array 直接用），這一片的標紅。 */
+  blocked?: ArrayLike<number> | null;
   handle?: PickedHandle | null;
   setHandle?: (h: PickedHandle | null) => void;
   onDragState?: (dragging: boolean) => void;
@@ -193,11 +196,17 @@ export function SliceEditor({
   /** 幾何層在這個元件裡被改了（加／刪節點、放開）：重新取環。 */
   const [geomRev, setGeomRev] = useState(0);
   const bump = () => setGeomRev((n) => n + 1);
+  /**
+   * 這一片的版次（plan v15 A4）：每一步 L 都會換身分，但只有最近一步的外框碰到這一片時 rev 才 +1。
+   * 下面以 L 當 deps 的 memo 改看 rev（memo 真的重算時 closure 裡的 L、vol 就是這次 render 的），沒碰到就沿用上一次的結果；
+   * touched 傳給 ModelStore.get（false＝不驗證、只把版本號接上）。沒給 lastStep（沒有幾何層的用法）就每步都算碰到。
+   */
+  const { rev, touched } = useSliceRev(L, axis, at, geo?.lastStep);
   // 幾何層（§6）：這一片、這個版本的幾何；Worker 回來時驗證，對不上的結構重描（節點 id 保留）
   const got = useMemo(
-    () => (L && geo && selKeys?.length ? geo.models.get(L, vol, axis, at, selKeys, geo.version, geo.stepSeq) : null),
+    () => (L && geo && selKeys?.length ? geo.models.get(L, vol, axis, at, selKeys, geo.version, geo.stepSeq, touched) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [L, keysTag, axis, at, geo?.version, geo?.stepSeq, geomRev],
+    [rev, keysTag, axis, at, geo?.version, geo?.stepSeq, geomRev],
   );
   const model = got?.model ?? null;
   const rings = useMemo(
@@ -214,25 +223,34 @@ export function SliceEditor({
       const sl = sliceOfKey(L, vol, axis, at, key);
       return sl ? boundaryLoops((u, v) => u >= sl.u0 && v >= sl.v0 && u <= sl.u1 && v <= sl.v1 && sl.inside(u, v), sl.u0, sl.v0, sl.u1, sl.v1) : [];
     });
+    // 沒碰到這一片的步驟不重描（rev 不動；plan v15 A4）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [L, keysTag, axis, at]);
+  }, [rev, keysTag, axis, at]);
+  /** key → comps 的索引（plan v15 B7：hitTest 每個 inside 查表，不 findIndex）。 */
+  const compIdx = useMemo(() => new Map((L?.comps ?? []).map((c, i) => [c.key, i] as const)), [L]);
   const insideKey = useCallback(
     (key: string, u: number, v: number) => {
       if (!L) return false;
-      const k = L.comps.findIndex((c) => c.key === key);
+      const k = compIdx.get(key);
       const [ua, va] = planeAxes(axis);
       const dims = [vol.X, vol.Y, vol.Z];
-      if (k < 0 || u < 0 || v < 0 || u >= dims[ua] || v >= dims[va]) return false;
+      if (k === undefined || u < 0 || v < 0 || u >= dims[ua] || v >= dims[va]) return false;
       const p = to3D(axis, u, v, at);
       return L.labels[(p[2] * vol.Y + p[1]) * vol.X + p[0]] === k;
     },
-    [L, axis, at, vol],
+    [L, compIdx, axis, at, vol],
   );
+  // L、vol 改看 rev（A4）：沒碰到這一片的步驟沿用上一份（area 已是 lazy，只有「對應」配對才算）
   const sctx = useMemo(
     () => (L && gesture ? { ...sliceContext(L, vol, axis, at, selKeys ?? [], gesture, rings), model: model ?? undefined } : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [L, vol, axis, at, rings, model, gesture?.scope, gesture?.follow, gesture?.backfill, gesture?.nm],
+    [rev, axis, at, rings, model, gesture?.scope, gesture?.follow, gesture?.backfill, gesture?.nm],
   );
+  // sctx 換了（版本、選取、環變了）：上一幀的 Op 不能再沿用
+  const lastKey = useRef('');
+  useEffect(() => {
+    lastKey.current = '';
+  }, [sctx]);
   /** 放開＝一步：幾何層先更新（不等 Worker），再送 Op。 */
   const commitOp = (h: Handle, delta: XY, shift: DragArg, op: Op) => {
     if (host && sctx) {
@@ -489,15 +507,51 @@ export function SliceEditor({
     const cross = !!(selfIntersects(edited) ?? selfIntersects(geom));
     return { d: pathOf(stairs ? edited : geom), cross };
   };
-  /** 一幀（§7.2）：Op（＝snap 後的格子，給第二層預覽與 3D）＋浮點 ghost＋提示文字。 */
+  /** 上一幀算出來的 Op（plan v15 B3）：gestureKey 相同＝取整後的位移相同＝Op 位元組相同，不再算、也不再送預覽。 */
+  const lastRes = useRef<{ op: Op | null; missed: string[] }>({ op: null, missed: [] });
+  /** 沒在拖時 pointermove 只記最新位置（plan v15 B7）；同一個 rAF 做 hitTest＋setHover。 */
+  const latestHover = useRef<{ x: number; y: number } | null>(null);
+  /** 滑過（一幀最多一次）：按著（平移、還沒超過 4px 的把手）不更新把手；按在空白處只更新格子座標。 */
+  const hoverTick = () => {
+    const hv = latestHover.current;
+    if (!hv) return;
+    latestHover.current = null;
+    const pr = press.current;
+    if (pr?.pan || pr?.hit) return;
+    if (!pr) {
+      const h = hitAt(hv.x, hv.y);
+      // 把手沒變就不 set（同一個節點／邊上移動不重 render）
+      setHover((p) => (sameHandle(p, h) ? p : h));
+      if (hostRef.current) hostRef.current.style.cursor = space.current ? 'grab' : cursorFor(h);
+    }
+    const uv = uvAt(hv.x, hv.y);
+    showHoverUV(uv);
+    onHover?.(uv ? toVoxel(uv[0], uv[1]) : null);
+  };
+  /** 一幀（§7.2）：Op（＝snap 後的格子，給第二層預覽與 3D）＋浮點 ghost＋提示文字；沒在拖就處理滑過。 */
   const tick = () => {
     raf.current = 0;
     const pr = press.current;
     const mv = latestMove.current;
-    if (!pr?.hit || !pr.dragging || !mv) return;
+    if (!pr?.hit || !pr.dragging || !mv) {
+      hoverTick();
+      return;
+    }
     const z = xfRef.current!.zoom;
     const delta: XY = [(mv.x - pr.x) / z, (mv.y - pr.y) / z];
-    const { op, missed } = opFor(pr.hit, delta, mv.shift);
+    // 同一個 Op 只算一次（B3）：key 空字串（環不見了）就不去重。ghost 與提示文字照常用浮點 delta
+    const key = sctx ? `${mirror ? 1 : 0}${freeform ? 1 : 0}|${gestureKey(sctx.rings, pr.hit, delta, mv.shift)}` : '';
+    let res = lastRes.current;
+    if (import.meta.env.DEV) (window as unknown as { __ticks?: number }).__ticks = ((window as unknown as { __ticks?: number }).__ticks ?? 0) + 1;
+    if (!key || key !== lastKey.current) {
+      res = opFor(pr.hit, delta, mv.shift);
+      lastKey.current = key;
+      lastRes.current = res;
+      if (import.meta.env.DEV) (window as unknown as { __ops?: number }).__ops = ((window as unknown as { __ops?: number }).__ops ?? 0) + 1;
+      // 只在 Op 變了才送第 1 級／Worker 預覽（index.tsx 的 onLive）
+      onLive?.(res.op);
+    }
+    const { op, missed } = res;
     dragRef.current = { h: pr.hit, delta, shift: mv.shift, op, missed };
     const gd = ghostD(pr.hit, delta, mv.shift);
     const gp = ghostRef.current;
@@ -516,10 +570,10 @@ export function SliceEditor({
       t.style.top = `${mv.y - host.top + 16}px`;
       t.style.display = '';
     }
-    onLive?.(op);
   };
   const cancelDrag = () => {
     press.current = null;
+    lastKey.current = '';
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = 0;
     dragRef.current = null;
@@ -685,7 +739,8 @@ export function SliceEditor({
     const a = axisIndex(axis);
     const [ua, va] = planeAxes(axis);
     const out: XY[] = [];
-    for (const i of blocked) {
+    for (let j = 0; j < blocked.length; j++) {
+      const i = blocked[j];
       const x = i % vol.X;
       const y = ((i - x) / vol.X) % vol.Y;
       const z = (i - x - y * vol.X) / (vol.X * vol.Y);
@@ -775,19 +830,14 @@ export function SliceEditor({
           if (!raf.current) raf.current = requestAnimationFrame(tick);
           return;
         }
-        if (!pr) {
-          const h = hitAt(e.clientX, e.clientY);
-          // 把手沒變就不 set（同一個節點／邊上移動不重 render）
-          setHover((p) => (sameHandle(p, h) ? p : h));
-          e.currentTarget.style.cursor = space.current ? 'grab' : cursorFor(h);
-        }
-        const uv = uvAt(e.clientX, e.clientY);
-        showHoverUV(uv);
-        onHover?.(uv ? toVoxel(uv[0], uv[1]) : null);
+        // 滑過：只記位置，同一個 rAF 做 hitTest＋setHover（plan v15 B7）
+        latestHover.current = { x: e.clientX, y: e.clientY };
+        if (!raf.current) raf.current = requestAnimationFrame(tick);
       }}
       onPointerUp={(e) => {
         const pr = press.current;
         press.current = null;
+        lastKey.current = '';
         e.currentTarget.style.cursor = space.current ? 'grab' : '';
         if (pr?.pan && pr.button === 2 && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < CLICK_PX) {
           // 右鍵沒拖＝選單
@@ -803,6 +853,7 @@ export function SliceEditor({
           if (raf.current) cancelAnimationFrame(raf.current);
           tick();
           press.current = null;
+          lastKey.current = '';
           const d = dragRef.current;
           dragRef.current = null;
           if (tipRef.current) tipRef.current.style.display = 'none';
@@ -833,6 +884,7 @@ export function SliceEditor({
         if (uv) onPick(toVoxel(uv[0], uv[1]), selectModeOf(e));
       }}
       onPointerLeave={() => {
+        latestHover.current = null;
         showHoverUV(null);
         setHover(null);
         onHover?.(null);

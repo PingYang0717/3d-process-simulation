@@ -146,10 +146,9 @@ export interface Split {
   blocked?: number;
 }
 
-/** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。cells 轉成 number[]（≤ BLOCKED_CAP 個）給 SliceEditor 現有的 blocked 讀法。 */
-export interface StepReport extends Omit<OpReport, 'cells'> {
+/** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。cells（Int32Array，≤ BLOCKED_CAP 個）直接給 SliceEditor 的 blocked。 */
+export interface StepReport extends OpReport {
   op: Op;
-  cells: number[];
 }
 /** 最近一步（plan v15 A1／A4／D2）：seq 每一步 +1（含復原／重做）、box＝stepTouch、owner＝哪個 split 的帳簿。 */
 export interface LastStep {
@@ -483,6 +482,7 @@ export function useEditor() {
   const splitSeq = useRef(1);
   /** 2D 編輯的幾何層（plan v8 §6）：每片一份、每個版本留快照；所有拖拉、數值輸入、方向鍵都改它。 */
   const models = useRef(new ModelStore()).current;
+  if (import.meta.env.DEV) (window as unknown as { __models?: ModelStore }).__models = models;
   /** 已經算完的步數（不論有沒有改到）：幾何層靠它知道「放開的那一步回來了」。 */
   const [stepSeq, setStepSeq] = useState(0);
   /** 2D 編輯的設定（plan v8 §5.4）：輪廓畫幾何線或階梯；拖拉中跟手（放開才吸附）或邊拖邊吸附。 */
@@ -498,6 +498,16 @@ export function useEditor() {
   const cur = active ? active.cur : orig;
   const vol = cur.vol;
   const L = cur.L;
+  // 幾何快照只留回得去的版本（plan v15 D2）：每個 split 的 cur／hist／future 的版本號，加上原始的
+  useEffect(() => {
+    const live = new Set<number>([sidOf(orig)]);
+    for (const s of splits) {
+      live.add(sidOf(s.cur));
+      for (const h of s.hist) live.add(h.version);
+      for (const f of s.future) live.add(f.version);
+    }
+    models.prune(live);
+  }, [splits, orig, models]);
   const hist = active?.hist ?? [];
   const future = active?.future ?? [];
 
@@ -704,8 +714,8 @@ export function useEditor() {
       if (fresh) dropOwners([sp.id]);
       if (!r) return;
     }
-    // 報告已在 Worker 摘要（plan v15 C7）；cells 轉 number[] 給 SliceEditor 現有的讀法
-    const rep: StepReport & { changed: number } = { ...r.report, cells: Array.from(r.report.cells), op, changed: changedCount(r.step) };
+    // 報告已在 Worker 摘要（plan v15 C7）：cells 是 Int32Array，SliceEditor 直接讀
+    const rep: StepReport & { changed: number } = { ...r.report, op, changed: changedCount(r.step) };
     setReport(rep);
     if (!r.next) {
       setLast({ text: `${headText(op, from)} · 沒有改到任何體素${rep.total.blocked ? `（${blockedText(rep)}）` : ''}`, at: Date.now() });

@@ -544,7 +544,7 @@ e2e（`scripts/e2e/m15.cjs`，需 `npm run dev`）：
 
 ## 10. 決策記錄
 
-- **D4（補洞永遠搬最後一個 comp）不做。** 壓緊 comps 陣列時要搬的 comp 集合是固定的（index ≥ 壓緊後長度的那些），選不了；唯一的根治是允許空位（墓碑），但 `L.comps[l]` 的索引語意遍佈 editor、UI、Worker、manifest、補丁的 `comps`（約 20 個檔案）。觸發條件（一步合併或刪掉整個結構）比一般 push 少得多；`bench.ts step` 印 move bytes 當監測，若實測每步平均 > 10 MB 再開一個計畫。
+- **D4（補洞永遠搬最後一個 comp）不做（2026-11-01 使用者同意）。** 壓緊 comps 陣列時要搬的 comp 集合是固定的（index ≥ 壓緊後長度的那些），選不了；唯一的根治是允許空位（墓碑），但 `L.comps[l]` 的索引語意遍佈 editor、UI、Worker、manifest、補丁的 `comps`（約 20 個檔案）。觸發條件（一步合併或刪掉整個結構）比一般 push 少得多；`bench.ts step` 印 move bytes 當監測，若實測每步平均 > 10 MB 再開一個計畫。
 - **BVH 不搬進 Worker。** `MeshBVH.serialize` 要連 `index` 一起送、主執行緒 `deserialize` 仍要配置；有預算的懶建＋由近到遠拾取已經把「一次付清」拆散。留作選配。
 - **MSAA 不動態切。** `WebGLRenderer` 的 `antialias` 建立後不能改；用 pixelRatio 控制 fill cost 就夠（16 → 9／4 sample）。
 - **ZIP64 只在需要時寫。** 小 zip 位元組要和現在相同（既有 e2e 與使用者腳本可能比對）；> 4 GiB 或 > 65,535 個檔才加 ZIP64 記錄。

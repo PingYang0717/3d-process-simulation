@@ -2,7 +2,7 @@
 // 預覽可以換視角（自動／XY／XZ／YZ）、沿法線拖切片，上面用每個變數的顏色標出它會動到的地方
 // （CD＝雙箭頭、長／縮＝那一面＋箭頭、圓頭＝兩個角、保形＝外圈虛線、缺陷＝那一塊…），
 // 所以看得出來「這個變數到底改哪裡」；「在 3D 看」切到編輯頁並對準這個結構。
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, Segmented, Select, Slider, Tooltip, Typography } from 'antd';
 import { EyeOutlined } from '@ant-design/icons';
 import { type Axis, type BBox, type Vec3, hexToRgb, unionBBox } from '../../volume/volume';
@@ -10,6 +10,8 @@ import type { Factor } from '../../volume/factors';
 import type { Editor } from './editor';
 import { slabOf } from './slabs';
 import { autoAxis, structThumbRGBA, thumbCrop, thumbScale } from './thumbs';
+import { usePersisted } from '../../ui/persist';
+import { Resizer } from '../../ui/Resizer';
 
 const { Text } = Typography;
 const AXN: Record<Axis, string> = { z: 'XY', y: 'XZ', x: 'YZ' };
@@ -209,9 +211,26 @@ function drawMarks(g: CanvasRenderingContext2D, W: number, H: number, axis: Axis
   return out;
 }
 
-export function StructPreview({ ed, keys, face, marks, onOpen3D, maxW = 372, maxH = 204 }: { ed: Editor; keys: string[]; face?: Vec3 | null; marks: Mark[]; onOpen3D?: () => void; maxW?: number; maxH?: number }) {
+/** 預覽舞台高度的範圍（px）；拖底下那條線改，記在 localStorage。 */
+const STAGE_MIN = 140;
+const STAGE_MAX = 560;
+
+export function StructPreview({ ed, keys, face, marks, onOpen3D }: { ed: Editor; keys: string[]; face?: Vec3 | null; marks: Mark[]; onOpen3D?: () => void }) {
   const img = useRef<HTMLCanvasElement>(null);
   const over = useRef<HTMLCanvasElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
+  const [stageH, setStageH] = usePersisted('labPreviewH', 220, (v): v is number => typeof v === 'number' && v >= STAGE_MIN && v <= STAGE_MAX);
+  // 舞台的內寬：欄寬拖了就跟著變（ResizeObserver）
+  const [stageW, setStageW] = useState(372);
+  useLayoutEffect(() => {
+    const el = stage.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setStageW(Math.max(80, Math.floor(e.contentRect.width))));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [keys.length > 0]);
+  const maxW = stageW;
+  const maxH = stageH - 16;
   const [axisMode, setAxisMode] = useState<'auto' | Axis>('auto');
   const [atBy, setAtBy] = useState<Partial<Record<Axis, number>>>({});
   const [notes, setNotes] = useState<string[]>([]);
@@ -278,12 +297,13 @@ export function StructPreview({ ed, keys, face, marks, onOpen3D, maxW = 372, max
           </Tooltip>
         )}
       </div>
-      <div className="sp-stage">
+      <div className="sp-stage" ref={stage} style={{ height: stageH }}>
         <div className="sp-canvas">
           <canvas ref={img} aria-label="結構截面" />
           <canvas ref={over} className="sp-over" aria-hidden />
         </div>
       </div>
+      <Resizer horizontal label="預覽高度" value={stageH} min={STAGE_MIN} max={STAGE_MAX} onDrag={(dy) => setStageH((h) => Math.max(STAGE_MIN, Math.min(STAGE_MAX, h + dy)))} />
       <div className="sp-slice">
         <span className="sp-slice-label">
           切片 {axis} = <b>{at}</b>

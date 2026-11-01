@@ -72,6 +72,7 @@ import type { MeshData } from '../../volume/volume';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceEditor, SliceView, View3D } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
+import { Resizer } from '../../ui/Resizer';
 import { Inspector, matOf } from './Inspector';
 import { ChangesTab } from './ChangesTab';
 import { buildManifest } from './matrix';
@@ -97,42 +98,6 @@ function useMedia(query: string) {
 }
 
 /** 左右欄寬度的分隔線：滑鼠拖，或 Tab 到它用左右鍵（一次 16px，Shift 48px）。 */
-function Resizer({ onDrag, label, value, min, max }: { onDrag: (dx: number) => void; label: string; value: number; min: number; max: number }) {
-  return (
-    <div
-      className="resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label={label}
-      aria-valuenow={value}
-      aria-valuemin={min}
-      aria-valuemax={max}
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-        e.preventDefault();
-        onDrag((e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 48 : 16));
-      }}
-      onPointerDown={(e) => {
-        e.preventDefault();
-        const el = e.currentTarget;
-        el.setPointerCapture(e.pointerId);
-        let x = e.clientX;
-        const move = (ev: PointerEvent) => {
-          onDrag(ev.clientX - x);
-          x = ev.clientX;
-        };
-        const up = () => {
-          el.removeEventListener('pointermove', move);
-          el.removeEventListener('pointerup', up);
-        };
-        el.addEventListener('pointermove', move);
-        el.addEventListener('pointerup', up);
-      }}
-    />
-  );
-}
-
 const voxelCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : `${(n / 1e3).toFixed(0)} K`);
 
 /**

@@ -15,10 +15,14 @@ import { MatrixTab, safeName } from './MatrixTab';
 import { AXIS_NAME, CompareView } from './CompareView';
 import { autoAxis, longestAxisOf, unionBoxes } from './thumbs';
 import { usePersisted } from '../../ui/persist';
+import { Resizer } from '../../ui/Resizer';
 import { DIFF_EDGE_HEX, REMOVED_RGB } from './drawSlice';
 
 const { Text } = Typography;
 const COMPARE_MAX = 12;
+/** 設計欄寬度的範圍（px）；拖中間那條線改，記在 localStorage。 */
+const DESIGN_MIN = 360;
+const DESIGN_MAX = 760;
 const MANUAL = '__manual';
 type SortKey = 'seq' | 'name' | 'changed' | `f:${string}`;
 const hhmm = (t?: number) => (t ? new Date(t).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
@@ -39,6 +43,7 @@ export function ExperimentPage({ ed, onOpen3D, onOpenStructure, onExport, narrow
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [scrollTo, setScrollTo] = useState<{ id: string; nonce: number } | null>(null);
   const [designHidden, setDesignHidden] = useState(false);
+  const [designW, setDesignW] = usePersisted('labDesignW', 440, (v): v is number => typeof v === 'number' && v >= DESIGN_MIN && v <= DESIGN_MAX);
   const [drawer, setDrawer] = useState(false);
   const [renaming, setRenaming] = useState<Split | null>(null);
   const [newName, setNewName] = useState('');
@@ -270,13 +275,14 @@ export function ExperimentPage({ ed, onOpen3D, onOpenStructure, onExport, narrow
           {design}
         </Drawer>
       ) : (
-        <aside className={'lab-design' + (designHidden ? ' collapsed' : '')}>
+        <aside className={'lab-design' + (designHidden ? ' collapsed' : '')} style={designHidden ? undefined : { width: designW }}>
           <Tooltip title={designHidden ? '展開設計區' : '收合設計區'} placement="right">
             <Button type="text" size="small" className="lab-collapse" icon={designHidden ? <RightOutlined /> : <LeftOutlined />} onClick={() => setDesignHidden(!designHidden)} aria-label={designHidden ? '展開設計區' : '收合設計區'} />
           </Tooltip>
           {!designHidden && <div className="lab-design-body">{design}</div>}
         </aside>
       )}
+      {!narrow && !designHidden && <Resizer label="設計欄寬度" value={designW} min={DESIGN_MIN} max={DESIGN_MAX} onDrag={(dx) => setDesignW((w) => Math.max(DESIGN_MIN, Math.min(DESIGN_MAX, w + dx)))} />}
       <section className="lab-results">
         {comparing ? (
           <>

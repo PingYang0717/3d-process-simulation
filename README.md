@@ -49,6 +49,8 @@ npm run build      # 型別檢查 + 打包
 
 **比較（plan v11 §4.4；v12 搬進實驗頁）**：「並排看」可選基準（原始或任一 split，A vs B；3D 差異模式與「改了哪些」仍對原始），卡片自動放大到所有 split 在這一片的差異外框；「疊圖」把每個 split 的輪廓畫在同一張切面（基準黑線、各 split 不同色），圖例點名字切 split、點色塊隱藏、滑過加粗。並排與疊圖的切面由 `slabOf` 做（parked split 不必載入：原始那一片＋補丁）。表格檢視（原「矩陣」頁籤）一列一個 split、一欄一個變數，加 W／H／D、改動、被擋、tags，可排序、隱藏欄、勾選匯出、匯出 CSV（和 manifest 同源）。
 
+**設定抽屜（plan v15）**：「Split 與記憶體」多一個「復原記憶體上限」（64 MB／256 MB／1 GB，預設 256 MB）：每個 split 的復原堆疊最多佔這麼多（另外仍最多 50 步），超過就從最早的一步開始釋放並提示「最早的 N 步已不能復原」——×1 基板整個搬一格每筆 ≈ 5 MB、×2 ≈ 40 MB、×3 ≈ 137 MB，以前 50 步全留會到 6.8 GB。「顯示」多一個「畫質」：3D 靜止時每 CSS px 畫幾個點，標準 1.5（和 2 肉眼難辨、填色成本約一半）／高 2；轉視角、拖把手時一律 1。
+
 **收斂（plan v11 §4.10）**：設定 → 進階「自由形變」預設關：2D 節點只有矩形角抓得到、Shift／Alt 不改拖法；打開後和 v10 相同，產生的剖面 Op 描述前加「自由形變：」。「筆刷」頁籤也收進進階。換材質清單先列合理的（VOID、原始材質、同類材質），材質類別依名稱猜（Si／Poly→半導體、SiO₂／SiN／HfO₂→介電、TiN／W／Cu→金屬），左欄可改。
 
 **即時預覽**：每一步（卡片的預覽與套用、把手、方向鍵、筆刷）送 Worker 之前，主執行緒先把這一步會動到的小塊裁下來（選取外框 ∩ 筆刷範圍，沿法線多留 |n|＋襯層），用同一組純函式算一次並 greedy mesh，主網格同一範圍用 shader 挖掉、疊上這塊小網格，切面與剖面貼圖也蓋上同一份結果；Worker 的正式網格到了就收掉。裁切範圍內逐體素和正式結果相同（`preview.test.ts`）。範圍超過 600 萬 voxels（例如整個基板）就不預覽、只畫橘色塊；拖拉中的即時預覽上限 40 萬。
@@ -71,9 +73,9 @@ npm run build      # 型別檢查 + 打包
 | `src/volume/ops.ts` | `Op`（push／translate／material／level，都帶 `scope`）、`upgradeOp`（舊 zRange → scope）、`applyOp`／`replay`／`opText`／`sweepOps`（純函式，主執行緒與 Worker 共用） |
 | `src/volume/scope.ts` | `Scope`（軸＋起止）、`scopeBox`／`clipBox`／`inScope`／`clampScope`／`fullScope` |
 | `src/volume/preview.ts` | `previewBox`／`previewOp`：一步操作會動到的裁切範圍與範圍內的結果（即時預覽用，主執行緒） |
-| `src/volume/vti.ts` | `decodeVti`（各種編碼、zlib 用 `DecompressionStream`）、`encodeVti`（UInt8 CellData、appended raw） |
+| `src/volume/vti.ts` | `decodeVti`（各種編碼、zlib 用 `DecompressionStream`；plan v15 起在 Worker 跑）、`encodeVti`（UInt8 CellData、appended raw）、`encodeVtiLike`（同格式寫回；`patchBlocks` 只重壓改到的 block） |
 | `src/volume/workerCore.ts`、`worker.ts`、`client.ts` | Worker 本體（每個 split 一本帳簿：load／fork／put／drop／apply／derive／replay／chunks／layer／preview／diffMesh；diff、count 留給測試）、Worker 入口與主執行緒的 `call()`；主執行緒只送版本號、owner 與小資料。`client.ts` 看到 `globalThis.__WORKER_SRC__` 就用 Blob 建 Worker（單檔 prototype 用） |
-| `src/volume/zip.ts` | `zipStore`（CRC32，store only） |
+| `src/volume/zip.ts` | `ZipWriter`（store only、一個 entry 一個 entry 寫進 sink、需要時 ZIP64）、`zipStore`（一次收齊的包裝，位元組和以前相同）、`crc32`（`zip.test.ts`） |
 | `src/pages/Section3D/editor.ts` | `useEditor`（async）：splits、選取、範圍（`scope`／`scopeMode`／`editAxis`）、聚焦編輯（`focus`）與自動放大設定、commit → Worker、undo／redo（每 split 50 步或 256 MB，設定可調）、busy、diff／ledger、鍵盤、`loadVolume(vol, meta)` |
 | `src/pages/Section3D/views.tsx` | `View3D`（Worker greedy mesh、選取層沿法線外推、差異模式兩層、三軸剖面＋剖口貼圖、命中、筆刷圈與拖拉預覽、即時預覽網格＋主網格挖洞 shader、視角預設、座標軸、即時變色 `recolor`）、`drawSlice`、`SliceView`。按下用 capture 階段的原生事件判斷筆刷，OrbitControls 才不會記到一個收不到放開的指標 |
 | `scripts/build-proto.mjs` | `node scripts/build-proto.mjs out.html`：esbuild 打成單一 .html（Worker 內嵌） |
@@ -88,7 +90,7 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/SliceEditor.tsx` | 2D 編輯的主切面：縮放、平移、換片、縮放列（1:1／8×／適合／對準選取）、自動放大到選取 |
 | `src/pages/Section3D/PositionBar.tsx` | 位置列（第幾片、套用到哪裡、「這一片沒有…跳到最近的一片」）與範圍控制 `ScopeControl`（右欄共用）、自動選切面方向 |
 | `src/pages/Section3D/views.lazy.tsx` | `View3D`／`SliceView`／`SliceEditor` 的 lazy 包裝：three.js 等載入檔案後才抓，歡迎頁不用等 |
-| `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`m9.cjs`、`m10.cjs`、`m11.cjs`、`m12.cjs`、`m14.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
+| `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`m9.cjs`、`m10.cjs`、`m11.cjs`、`m12.cjs`、`m14.cjs`、`m15.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task、`--v15` 印 plan v15 的基線段落；`m15.cjs` 是 plan v15 §7 的 10 段驗收（`--only=1,3` 跳段）；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
 | `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、手勢 → Op）、`snap.ts`（拖法：浮點 ghost 與放開時的整數位移）、`model.ts`（持久幾何層：建立、位移、驗證、重描保留 id、每版本快照）、`relative.ts`、`mirror.ts` |
 | `src/pages/Section3D/SlicePreviewLayer.tsx` | 主切面的預覽層（只重畫預覽那一塊，拖拉中淡綠／淡紅） |
 | `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算（`applyOpInPlace` 原地）、補丁（`applyStepInPlace`、`carryStepStats`）、chunk 網格、profile Op、一步的報告 |
@@ -114,7 +116,7 @@ plan v9（`docs/plan-v9-performance.md`）之後：
 - **選取層不閃爍**：選取層頂點沿法線外推 0.03 voxel、不寫深度，主網格開 polygonOffset；相機 near 依陣列大小設。
 - **換材質即時**：點下去先在主執行緒把現有網格裡屬於選取體素的三角形改色，Worker 的正式網格之後覆蓋（主網格快取同時作廢）。
 
-量法：`npx vite-node scripts/bench.ts [step|mem|drag|draw] [scale ...]`、`node scripts/e2e/perf.cjs <url> <scale>`（端到端，需要 `npm run dev`）。雲端容器、Node 22、headless Chromium 軟體 WebGL（單位 ms，有雜訊）：
+量法：`npx vite-node scripts/bench.ts [step|mem|drag|draw] [scale ...]`、`node scripts/e2e/perf.cjs <url> <scale>`（端到端，需要 `npm run dev`；plan v15 的驗收是 `node scripts/e2e/m15.cjs`）。雲端容器、Node 22、headless Chromium 軟體 WebGL（單位 ms，有雜訊）：
 
 | 項目 | v8 | v9 |
 | --- | --- | --- |
@@ -155,10 +157,29 @@ plan v14（`docs/plan-v14-round-scope-cloud-reset.md`）：`npx vite-node script
 
 沒達到 plan v14 §4 的：×3 Poly-Si 1 拖拉時 3D 仍沒有即時預覽（外框 432×129×75），要做到需要另外的方法（例如只算靠近角的那幾排、或分 chunk 漸進），留給之後的計畫。
 
+plan v15（`docs/plan-v15-performance-holes.md`，補「每一步都付、每個滑鼠事件、載入匯出、只長不縮的記憶體」四類洞）：`npx vite-node scripts/bench.ts step|mem|drag2|export|decode|overlay|thumbs|layer [scale ...]`、`node scripts/e2e/perf.cjs <url> 2 --v15`（只印）、`node scripts/e2e/m15.cjs`（驗收，§7 的 10 段，每段印數字）。「改前」是 M15.0 的基線（plan §11.2）、「改後」是 `m15.cjs` 在同一台的實測（×2 headless、軟體 WebGL、單次），bench 量的那幾列（relabel 快照、Worker apply、decode、縮圖…）見 plan v15 §11.2：
+
+| 項目（×2 headless） | 改前（v14） | 改後（v15） |
+| --- | --- | --- |
+| 選到基板後每一步 `selMask`＋`affMask` | 每步整個重建 19.5 ms、配 30 MB 新陣列 | 原地只補這一步碰到的外框：poly 長 1 每步 0.2～0.8 ms、整個基板搬一格 15～23 ms（∝ touch 4.3 M 格）；陣列身分不變、不配新陣列 |
+| 每步 `diffBox`（touch 撐到整個 X×Z 之後） | 10.3 ms（掃整個 touch） | 0.0～0.2 ms（軸統計 O(X＋Y＋Z)） |
+| 換 cursor 20 次（聚焦編輯） | `layer` 20 次、整頁 render 80、50 個 long task | `layer` 0、把手重建 0、StructureList 0、Section3DPage commit 20（Inspector 仍 20：`CARD_USES` 含 cursor） |
+| 拖左欄寬 60 個 pointermove | 整頁 render 240、3D 重畫 120 幀、153 個 long task | Section3DPage commit 0、整頁 render 2（只有那一欄的 live value）；3D 重畫 120 幀 |
+| 2D 拖基板頂邊 60 步：算 Op 的次數 | 每幀 1.0 次（其中位元組相同的重算 79～89%） | 5 次／60 個 pointermove（0.08；tick 44 次）、Worker preview 0、long task 0 |
+| 一步後立刻 hover 10 次 | hover handler 裡同步建 BVH：20 個 long task（最長 112～159）、每次 63～126 ms | 事件裡同步建 0 棵（8 ms 預算）、90 棵由閒置排程補建；每次 13～100 ms（含軟體繪圖） |
+| 開 X-ray：`layer {mat: VOID}` | 整陣列 closure 掃描 ≈ 147 ms＋mesh；頁面往返 145 ms | 只看 voidBox ∩ touch：bench 全量 110 ms（幾乎都是 mesh 20 個 chunk）、頁面穩態往返 86 ms |
+| 上傳 ×2 比例陣列 .vti（8 個 Float32 zlib） | 主執行緒解碼：7 個 long task（最長 373）、heap 尖峰 +337 MB | 解碼與結構分析在 Worker：期間 0 個 long task；heap +87 MB（N×(1＋4) ＝ 75）、尖峰 +104；原檔只在 Worker 一份 |
+| 同格式匯出一個 split（改 3.2 萬格） | Worker 4,189 ms、重壓 15,360／15,360 塊 | 82～86 ms、重壓 80／15,360 塊（碰到的 10 塊 × 8 個陣列）；其餘 15,350 塊連壓縮位元組都 === 原檔 |
+| 匯出 20 個 split 的 zip（vti1，300 MB） | 全部湊在記憶體：heap 尖峰 +600、RSS 尖峰 +840 MB | 串流寫入、CRC 在 Worker：主執行緒活著的 heap 尖峰 +31 MB（≤ 1 個 split 15 MB ＋ 32）、2.8～5 s；Node 解回來 21 個檔 CRC 全對 |
+| 實驗頁 200 個 split 疊圖，legend 滑過 60 次 | 每次重算 lines（bench 200 條 10.2 ms／次） | 0 ms、整頁 render 2、只有 Legend 自己 render；OverlayView 自己 render 時 lines memo 命中 |
+| 復原堆疊：×1 基板 translate | 50 步全留（×1 253 MB、×3 6.8 GB） | ≤ 上限（預設 256 MB；調成 64 MB 時 13 步只留 12 筆、60.9 MB，並提示） |
+
+沒達到 plan v15 §3 的：換 cursor 時 Inspector 仍 commit 一次（它的 `uses` 含 `cursor`，RoundCard 要讀）；VOID layer 從頁面只量得到含 mesh 的往返（Worker 端的掃描時間看 `bench.ts layer void`）；其餘見 plan v15 §11.3。
+
 ## 匯出
 
-- 目前 split：`原檔__split名.vti`——輸入是比例陣列＋FieldData 時和輸入一模一樣（同 XML 結構、陣列名稱與型別、編碼與壓縮；未改點 bit-identical、改點新材質 1／其他 0），否則同 Extent／Spacing／Origin 的 UInt8 CellData；「單一編號 .vti」與 `.npy` 也可選
-- 全部：`原檔__splits.zip`，表格檢視勾選的（或實驗頁「匯出勾選的」）split 各一個檔（編碼在 Worker 裡、一個一個來，parked 的不必載入）＋ `manifest.json`（source、format、input（原檔是哪種格式）、materials（id／name／color／kind／source）、shape、dtype、spacing、origin、nmPerVoxel、designs（factors、levels、combine、nameTemplate）、baseline、每個 split 的檔名、改動體素數、被擋、designId、levels、tags、ops 與白話描述）。實驗表：`pd.DataFrame([{**s['levels'], 'file': s['file']} for s in m['splits']])`
+- 目前 split：`原檔__split名.vti`——輸入是比例陣列＋FieldData 時和輸入一模一樣（同 XML 結構、陣列名稱與型別、編碼與壓縮；未改點 bit-identical、改點新材質 1／其他 0），否則同 Extent／Spacing／Origin 的 UInt8 CellData；「單一編號 .vti」與 `.npy` 也可選。plan v15：上傳時解碼（zlib、base64、ascii 都在 Worker，`vtiInspect`／`vtiDecode`／`npyDecode`）與結構分析都在 Worker，主執行緒只拿到編號陣列，原檔只留 Worker 一份（同格式匯出要用）；同格式匯出只重壓改到的 32 KB block（`patchBlocks`：改到的格子落在哪幾塊就只解壓、改值、再壓那幾塊），其他 block 連壓縮位元組都和原檔相同，×2 改 3 萬格從 4.2 s 變 0.1 s
+- 全部：`原檔__splits.zip`，表格檢視勾選的（或實驗頁「匯出勾選的」）split 各一個檔（編碼在 Worker 裡、一個一個來，parked 的不必載入；plan v15：**串流寫入**——Chromium 有 `showSaveFilePicker` 時先問存到哪、每個 split 編碼完就寫進檔案，主執行緒同時只留一個 split 的位元組（×2 20 個 split 300 MB 的 zip，heap 尖峰從 +600 MB 變 +31 MB）；其他瀏覽器收成 Blob 再下載。CRC-32 由 Worker 隨位元組一起回、主執行緒不再掃；任一檔 ≥ 4 GiB 或 ≥ 65,535 個檔才寫 **ZIP64** 記錄，否則位元組和以前的 `zipStore` 完全相同）＋ `manifest.json`（source、format、input（原檔是哪種格式）、materials（id／name／color／kind／source）、shape、dtype、spacing、origin、nmPerVoxel、designs（factors、levels、combine、nameTemplate）、baseline、每個 split 的檔名、改動體素數、被擋、designId、levels、tags、ops 與白話描述）。實驗表：`pd.DataFrame([{**s['levels'], 'file': s['file']} for s in m['splits']])`
 
 ```python
 import json, zipfile, io

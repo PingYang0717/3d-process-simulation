@@ -13,7 +13,11 @@ const scale = Number(argv[1] || 2);
 const shots = argv[2] || null;
 /** --v15：只跑 plan v15 M15.0 那一段（舊段落的卡片／抓節點流程在不同版面可能要調）。 */
 const v15Only = process.argv.includes('--v15');
-/** --only=1,2,…：v15 段只跑這幾節（編號見下方註解）。 */
+/**
+ * --only=1,2,…：v15 段只跑這幾節。這裡的編號是量測時的順序，和 plan §7 e2e 的編號不同：
+ * 1 拖欄寬（§7 的 3）、2 換 cursor（§7 的 2）、3 一步後 hover（§7 的 5，--only=5 也跑）、4 2D 拖基板（§7 的 4）、6 上傳、7 匯出、8 實驗頁、9 X-ray（和 §7 相同）；
+ * §7 的 1（選基板連做 5 步）與 10（復原堆疊）只在驗收版 m15.cjs。
+ */
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean).map(Number);
 const want = (n) => !only.length || only.includes(n);
 
@@ -422,8 +426,9 @@ function synthVtiFile(scale) {
       );
     }
 
-    // 3. 一步後立刻 hover 10 次（B4）：碰到的 chunk 是沒 BVH 的新 geometry，hover handler 裡同步建 MeshBVH
-    if (want(3)) {
+    // 3. 一步後立刻 hover 10 次（B4）：碰到的 chunk 是沒 BVH 的新 geometry，hover handler 裡同步建 MeshBVH。
+    //    這段在 plan §7 的 e2e 編號是 5（M15.7：--only=5 也跑這段；驗收版在 m15.cjs 第 5 段）
+    if (want(3) || want(5)) {
       await page.evaluate(() => window.__ed.push([0, -1, 0], 1));
       await idle();
       const pane = await page.locator('.pane-3d').first().boundingBox();

@@ -1,9 +1,10 @@
 // 實驗頁的設計區（plan v12 §5.4、§5.6；取代 v11 的「實驗」頁籤）：
-// 步驟列 ① 選結構 → ② 加變數 → ③ 看組合 → ④ 產生；每個變數一張卡（一句話、水平 chips、預設按鈕）、組合表（試算走 Worker、
-// 無效的列先擋）、從哪裡開始、命名；產生時留在實驗頁、進度 k／N、可取消，完成後可「撤銷這次產生」。範本存在瀏覽器、可匯出／匯入 JSON。
+// 四個段落 ① 結構 → ② 變數 → ③ 組合 → ④ 產生，段落標題的數字就是步驟（做完打勾、做到的那一步實心）；每個變數一張卡
+// （一句話、水平 chips、預設按鈕）、組合表（試算走 Worker、無效的列先擋）、從哪裡開始、命名；④ 黏在底下，捲到哪都按得到。
+// 產生時留在實驗頁、進度 k／N、可取消，完成後可「撤銷這次產生」。範本存在瀏覽器、可匯出／匯入 JSON。
 import { useMemo, useRef, useState } from 'react';
-import { App, Button, Dropdown, Flex, Input, Progress, Segmented, Typography } from 'antd';
-import { DownOutlined, PlusOutlined } from '@ant-design/icons';
+import { App, Button, Dropdown, Input, Progress, Segmented, Typography } from 'antd';
+import { CheckOutlined, DownOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
 import type { Vec3 } from '../../volume/volume';
 import {
   type Design,
@@ -42,22 +43,33 @@ const EMPTY: Draft = { factors: [], levels: {}, combine: 'full', from: 'base', n
 const isDraft = (v: unknown): v is Draft => !!v && typeof v === 'object' && Array.isArray((v as Draft).factors) && typeof (v as Draft).levels === 'object';
 const isTemplates = (v: unknown): v is DesignTemplate[] => Array.isArray(v);
 
-/** 步驟列：做到哪一步亮到哪一步。 */
-function Steps({ at }: { at: number }) {
-  const names = ['選結構', '加變數', '看組合', '產生'];
+type StepState = 'done' | 'now' | 'todo';
+
+/** 一個段落：圓形步驟數字（做完 ✓、做到這步實心、還沒到空心）＋標題＋右邊一句摘要。 */
+function Sec({ n, title, state, meta, children }: { n: number; title: string; state: StepState; meta?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <ol className="lab-steps" aria-label="步驟">
-      {names.map((n, i) => (
-        <li key={n} className={i < at ? 'done' : i === at ? 'now' : ''} aria-current={i === at ? 'step' : undefined}>
-          <span className="lab-step-n">{'①②③④'[i]}</span>
-          {n}
-        </li>
-      ))}
-    </ol>
+    <section className={`lab-sec ${state}`} aria-current={state === 'now' ? 'step' : undefined}>
+      <header className="lab-sec-head">
+        <span className="lab-sec-n" aria-hidden>
+          {state === 'done' ? <CheckOutlined /> : n}
+        </span>
+        <h3>{title}</h3>
+        {meta !== undefined && meta !== '' && <span className="lab-sec-meta">{meta}</span>}
+      </header>
+      <div className="lab-sec-body">{children}</div>
+    </section>
   );
 }
 
-export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void }) {
+/** 標籤在左的一列（從哪裡開始、命名）。 */
+const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
+  <div className="dp-row">
+    <span className="dp-row-label">{label}</span>
+    <div className="dp-row-body">{children}</div>
+  </div>
+);
+
+export function DesignPanel({ ed, onMade, onOpen3D, title = true }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void; title?: boolean }) {
   const { message, modal } = App.useApp();
   const [draft, setDraft] = usePersisted<Draft>('designDraft2', EMPTY, isDraft);
   const [templates, setTemplates] = usePersisted<DesignTemplate[]>('factorTemplates', [], isTemplates);
@@ -105,7 +117,9 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
   const fromAll = draft.from === 'all';
   const canAll = combos.length === 1 && ed.splits.length > 0;
   const step = !ed.sel.size && !draft.factors.length ? 0 : !draft.factors.length ? 1 : !combos.length ? 2 : 3;
+  const st = (i: number): StepState => (i < step ? 'done' : i === step ? 'now' : 'todo');
   const generating = !!ed.genProgress;
+  const levelCounts = design.factors.map((f) => (design.levels[f.id] ?? []).length || 0);
 
   const updateFactor = (i: number, f: Factor, lv: number[]) => {
     const old = draft.factors[i];
@@ -180,13 +194,29 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
     }
   };
 
+  const comboMeta =
+    draft.combine === 'ofat'
+      ? `逐一掃描 · ${combos.length} 個`
+      : draft.combine === 'full'
+        ? `${levelCounts.join(' × ') || 0} = ${combos.length} 個`
+        : `勾了 ${combos.length} 個`;
+  const firstName = rows.find((r) => r.picked)?.name;
+
   return (
-    <Flex vertical gap={14} className="design-panel">
-      <Flex align="center" gap={8}>
-        <Steps at={step} />
+    <div className="design-panel">
+      <header className="dp-head">
+        {title && <span className="dp-title">設計</span>}
+        {title && (
+          <span className="dp-steps" aria-label={`第 ${step + 1} 步，共 4 步`}>
+            {[0, 1, 2, 3].map((i) => (
+              <i key={i} className={st(i)} />
+            ))}
+          </span>
+        )}
         <span className="grow" />
         <Dropdown
           trigger={['click']}
+          placement="bottomRight"
           menu={{
             items: [
               { key: 'save', label: '存成範本…', disabled: !design.factors.length, onClick: saveTemplate },
@@ -204,24 +234,22 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
             ],
           }}
         >
-          <Button size="small">
-            範本 <DownOutlined style={{ fontSize: 10 }} />
+          <Button size="small" type="text" icon={<FolderOpenOutlined />} className="dp-tpl">
+            範本 <DownOutlined className="dp-caret" />
           </Button>
         </Dropdown>
         <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} />
-      </Flex>
+      </header>
 
-      <section className="lab-sec">
-        <h3>① 結構</h3>
+      <Sec n={1} title="結構" state={st(0)} meta={ed.sel.size > 1 ? `${ed.sel.size} 個` : undefined}>
         <StructurePicker ed={ed} face={face} />
-      </section>
+      </Sec>
 
       {(step >= 1 || draft.factors.length > 0) && (
-        <section className="lab-sec">
-          <h3>② 變數</h3>
+        <Sec n={2} title="變數" state={st(1)} meta={draft.factors.length ? `${draft.factors.length} 個` : undefined}>
           {!draft.factors.length && !adding && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              變數＝要掃的一個量（例如閘極寬度 L<sub>g</sub>、偏移、圓頭半徑）。加一個，點下面的預設水平就會出現組合。
+            <Text type="secondary" className="dp-hint">
+              一個變數＝要掃的一個量（寬度 L<sub>g</sub>、偏移、圓頭半徑…）。加了之後點預設水平，組合就出現。
             </Text>
           )}
           {draft.factors.map((f, i) => (
@@ -238,7 +266,11 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
               onFace={setFace}
             />
           ))}
-          {dupId && <Text type="danger">變數 id「{dupId}」重複；同一個設計裡要唯一</Text>}
+          {dupId && (
+            <Text type="danger" className="dp-hint">
+              變數 id「{dupId}」重複；同一個設計裡要唯一
+            </Text>
+          )}
           {adding ? (
             <NewFactorForm
               ed={ed}
@@ -253,16 +285,15 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
               }}
             />
           ) : (
-            <Button icon={<PlusOutlined />} disabled={!ed.sel.size} onClick={() => setAdding(true)}>
-              {ed.sel.size ? '加一個變數（用上面選的結構）' : '先在 ① 選結構'}
+            <Button type="dashed" block icon={<PlusOutlined />} disabled={!ed.sel.size} onClick={() => setAdding(true)} className="dp-add">
+              {ed.sel.size ? '加一個變數' : '先在 ① 選結構，再加一個變數'}
             </Button>
           )}
-        </section>
+        </Sec>
       )}
 
       {draft.factors.length > 0 && (
-        <section className="lab-sec">
-          <h3>③ 組合</h3>
+        <Sec n={3} title="組合" state={st(2)} meta={comboMeta}>
           <Segmented
             block
             size="small"
@@ -274,13 +305,6 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
               { label: '手動勾選', value: 'manual' },
             ]}
           />
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {draft.combine === 'ofat'
-              ? `每個變數各自掃，其他維持標稱：${combos.length} 個 split`
-              : draft.combine === 'full'
-                ? `${design.factors.map((f) => (design.levels[f.id] ?? []).length || 0).join(' × ') || 0} = ${combos.length} 個 split`
-                : `勾了 ${combos.length} 個組合（在表裡勾）`}
-          </Text>
           {rows.length > 0 ? (
             <ComboTable
               rows={rows}
@@ -294,53 +318,61 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
               palette={palette(ed.materials)}
             />
           ) : (
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" className="dp-hint">
               還沒有組合：每個變數至少要有一個水平
             </Text>
           )}
-          <Flex align="center" gap={8} wrap="wrap">
-            <span style={{ fontSize: 12, color: 'var(--c-text-2)' }}>從哪裡開始</span>
-            <Segmented
-              size="small"
-              value={draft.from}
-              onChange={(v) => set({ from: v as Design['from'] })}
-              options={[
-                { label: '原始', value: 'base' },
-                { label: '接在目前 split 之後', value: 'active', disabled: !ed.active },
-                { label: '套用到所有 split', value: 'all', disabled: !canAll },
-              ]}
-            />
-          </Flex>
-          {draft.from === 'active' && ed.active && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              每個新 split＝{ed.active.name} 的 {ed.active.ops.length} 步＋這個組合。
-            </Text>
-          )}
-          {fromAll && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              不產生新 split：對每個現有 split 各加一步（例如全部加同一個 void）；只有一個組合時可用。
-            </Text>
-          )}
-          <Flex align="center" gap={8}>
-            <span style={{ fontSize: 12, whiteSpace: 'nowrap', color: 'var(--c-text-2)' }}>命名</span>
-            <Input size="small" value={draft.nameTemplate} onChange={(e) => set({ nameTemplate: e.target.value })} placeholder={DEFAULT_NAME_TEMPLATE} aria-label="命名樣板" />
-          </Flex>
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            第一個會叫「{rows.find((r) => r.picked)?.name ?? '—'}」· 可用 {'{id}'}、{'{name}'}、{'{value}'}、{'{unit}'}、{'{n}'}
-          </Text>
-        </section>
+          <div className="dp-form">
+            <Row label="起點">
+              <Segmented
+                size="small"
+                value={draft.from}
+                onChange={(v) => set({ from: v as Design['from'] })}
+                options={[
+                  { label: '原始', value: 'base' },
+                  { label: '接在目前 split 後', value: 'active', disabled: !ed.active },
+                  { label: '套用到所有', value: 'all', disabled: !canAll },
+                ]}
+              />
+              {draft.from === 'active' && ed.active && (
+                <Text type="secondary" className="dp-hint">
+                  每個新 split＝{ed.active.name} 的 {ed.active.ops.length} 步＋這個組合
+                </Text>
+              )}
+              {fromAll && (
+                <Text type="secondary" className="dp-hint">
+                  不產生新 split：對每個現有 split 各加一步（只有一個組合時可用）
+                </Text>
+              )}
+            </Row>
+            <Row label="命名">
+              <Input size="small" value={draft.nameTemplate} onChange={(e) => set({ nameTemplate: e.target.value })} placeholder={DEFAULT_NAME_TEMPLATE} aria-label="命名樣板" className="dp-mono" />
+              <Text type="secondary" className="dp-hint">
+                {firstName ? `第一個會叫「${firstName}」` : '—'} · 可用 <code>{'{id}'}</code> <code>{'{name}'}</code> <code>{'{value}'}</code> <code>{'{unit}'}</code> <code>{'{n}'}</code>
+              </Text>
+            </Row>
+          </div>
+        </Sec>
       )}
 
       {draft.factors.length > 0 && (
-        <section className="lab-sec">
-          <h3>④ 產生</h3>
+        <footer className={`dp-foot ${st(3)}`}>
+          <div className="lab-sec-head">
+            <span className="lab-sec-n" aria-hidden>
+              4
+            </span>
+            <h3>產生</h3>
+            <span className="lab-sec-meta">
+              {fromAll ? '套用到現有 split' : draft.from === 'active' ? `接在 ${ed.active?.name ?? '目前'} 之後` : '從原始開始'} · 1 格 = {nm} nm
+            </span>
+          </div>
           {generating ? (
-            <Flex vertical gap={6}>
+            <div className="dp-gen">
               <Progress percent={Math.round(((ed.genProgress!.done + 1) / ed.genProgress!.total) * 100)} size="small" format={() => `${ed.genProgress!.done + 1}／${ed.genProgress!.total}`} />
               <Button size="small" onClick={ed.cancelDesign}>
                 取消（已產生的留著）
               </Button>
-            </Flex>
+            </div>
           ) : (
             <Button
               type="primary"
@@ -351,11 +383,8 @@ export function DesignPanel({ ed, onMade, onOpen3D }: { ed: Editor; onMade: (ids
               {fromAll ? `套用到 ${ed.splits.length} 個 split` : bad.length ? `有 ${bad.length} 個組合無效` : `產生 ${combos.length} 個 split`}
             </Button>
           )}
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            每個組合用 Op 重播產生（Op 是唯一真相）；產生後留在這一頁，結果在右邊。1 格 = {nm} nm。
-          </Text>
-        </section>
+        </footer>
       )}
-    </Flex>
+    </div>
   );
 }

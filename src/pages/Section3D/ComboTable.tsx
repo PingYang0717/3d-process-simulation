@@ -2,7 +2,7 @@
 // 等於標稱的列標「對照組」；無效的列標紅並寫原因。手動勾選＝這張表的核取方塊。
 // 試算不在主執行緒：送 Worker 的 preview（mesh: false），一次一個、排隊、逐列填，改了變數就取消還沒算的。
 import { useEffect, useRef, useState } from 'react';
-import { Checkbox, Tag, Tooltip, Typography } from 'antd';
+import { Checkbox, Tooltip, Typography } from 'antd';
 import { LoadingOutlined } from '@ant-design/icons';
 import type { EditState, Op } from '../../volume/ops';
 import { type Design, type Factor, levelsSig } from '../../volume/factors';
@@ -156,9 +156,7 @@ export function ComboTable({
                     </Text>
                   </Tooltip>
                 ) : r.control ? (
-                  <Tag bordered={false} style={{ fontSize: 11, marginInlineEnd: 0 }}>
-                    對照組（不改動）
-                  </Tag>
+                  <span className="cc-tag">對照組</span>
                 ) : (
                   ''
                 )}

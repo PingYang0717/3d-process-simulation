@@ -126,7 +126,7 @@ const info = (msg) => console.log('· ' + msg);
   await page.keyboard.press('Control+2');
   await page.locator('.lab').waitFor();
   ok((await page.locator('.lab-empty').count()) === 1, '§2 空狀態：結果區說明怎麼開始');
-  ok((await page.locator('.lab-steps li.now').innerText()).includes('選結構'), '§2 步驟列停在 ① 選結構');
+  ok((await page.locator('.lab-sec.now h3').innerText()).includes('結構'), '§2 步驟停在 ① 結構（段落標題的數字實心）');
   await page.locator('.struct-pick .ant-select').click();
   await page.keyboard.type('Poly-Si 2');
   await page.keyboard.press('Enter');

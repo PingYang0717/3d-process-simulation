@@ -184,7 +184,8 @@ export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: E
     if (narrow) setDrawer(false);
   };
 
-  const design = <DesignPanel ed={ed} onMade={onMade} onOpen3D={onOpen3D} />;
+  // 抽屜自己有「設計」標題，面板裡就不再放一次
+  const design = <DesignPanel ed={ed} onMade={onMade} onOpen3D={onOpen3D} title={!narrow} />;
   const toolbar = (
     <div className="lab-toolbar">
       {narrow && (
@@ -266,7 +267,7 @@ export function ExperimentPage({ ed, onOpen3D, onExport, narrow, stem }: { ed: E
   return (
     <div className="lab">
       {narrow ? (
-        <Drawer placement="left" open={drawer} onClose={() => setDrawer(false)} width={Math.min(420, window.innerWidth - 40)} title="設計" styles={{ body: { padding: 16 } }}>
+        <Drawer placement="left" open={drawer} onClose={() => setDrawer(false)} width={Math.min(420, window.innerWidth - 40)} title="設計" styles={{ body: { padding: '12px 16px 0' } }}>
           {design}
         </Drawer>
       ) : (

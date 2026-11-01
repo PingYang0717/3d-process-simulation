@@ -7,7 +7,7 @@ import type { Op } from '../../volume/ops';
 import { type SplitPatch, type SplitStats, busiestSlice, patchSliceCounts, slabOfArrays, slabOfPatch } from '../../splits/lifecycle';
 import { contourOf } from './overlay';
 import { DIFF_EDGE_RGB, REMOVED_RGB } from './drawSlice';
-import { LOOP_RGB, autoAxis, longestAxisOf, thumbAt, thumbCrop, thumbRGBA, unionBoxes } from './thumbs';
+import { LOOP_RGB, autoAxis, longestAxisOf, structThumbRGBA, thumbAt, thumbCrop, thumbRGBA, unionBoxes } from './thumbs';
 
 const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
 const rgb = new Map<number, Vec3>(MATERIALS.map((m) => [m.id, hexToRgb(m.color)]));
@@ -51,5 +51,41 @@ describe('縮圖（plan v12 §5.5）', () => {
     // 差異描邊：改過的深藍邊或拿掉的紅（這一片是被搬走的那一側＝紅）
     expect(count(a.data, DIFF_EDGE_RGB) + count(a.data, REMOVED_RGB)).toBeGreaterThan(0);
     expect(count(a.data, LOOP_RGB)).toBeGreaterThan(0);
+  });
+});
+
+describe('結構縮圖（設計區 ①）', () => {
+  const origLabels = (handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } })[0] as { labels: Int32Array }).labels;
+  const p2 = comp('Poly-Si 2');
+  const on = new Set(base.L.comps.flatMap((c, i) => (c.key === p2.key ? [i] : [])));
+  it('三個軸都把結構本身塗成選取藍（像素 ↔ 格子用明寫的 (x, y, z) 對照；YZ 那一片的格子 index 是 z*Y + y）', () => {
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const at = thumbAt(axis, null, p2.bbox, vol);
+      const slab = slabOfArrays(vol, vol.data, origLabels, base.L.comps, vol.data, axis, at);
+      const crop = thumbCrop(axis, [p2.bbox], vol, 6);
+      const img = structThumbRGBA(slab, crop, rgb, new Set(), on, p2.bbox, null, 120);
+      expect(Math.max(img.W, img.H)).toBeLessThanOrEqual(120);
+      // 預期：每個縮圖像素回推到切面 (u, v)，再用假 Volume 的 (x, y, z) 算 index
+      const s = Math.min(8, 120 / Math.max(crop.u1 - crop.u0 + 1, crop.v1 - crop.v0 + 1));
+      const { X, Y } = slab.vol;
+      const idx = (x: number, y: number, z: number) => (z * Y + y) * X + x;
+      const b2 = rgb.get(p2.mat)!;
+      const blue: Vec3 = [(b2[0] + 22) >> 1, (b2[1] + 119) >> 1, (b2[2] + 255) >> 1];
+      let want = 0;
+      let mismatch = 0;
+      for (let py = 0; py < img.H; py++)
+        for (let px = 0; px < img.W; px++) {
+          const u = crop.u0 + Math.min(crop.u1 - crop.u0, Math.floor(px / s));
+          const v = crop.v0 + Math.min(crop.v1 - crop.v0, Math.floor(py / s));
+          const i = axis === 'z' ? idx(u, v, 0) : axis === 'y' ? idx(u, 0, v) : idx(0, v, u);
+          const sel = on.has(slab.L.labels[i]);
+          const o = (py * img.W + px) * 4;
+          const isBlue = img.data[o] === blue[0] && img.data[o + 1] === blue[1] && img.data[o + 2] === blue[2];
+          if (sel) want++;
+          if (sel !== isBlue) mismatch++;
+        }
+      expect(want).toBeGreaterThan(0);
+      expect(mismatch).toBe(0);
+    }
   });
 });

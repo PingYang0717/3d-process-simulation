@@ -1,23 +1,26 @@
 // 實驗頁設計區第 1 步（plan v12 §5.4）：選結構。目前的選取（和編輯頁同步）；沒有就在這裡選（依材質分組、列名字與大小）。
-// 旁邊一張 120 px 的縮圖：結構最長軸的切面、結構用選取藍、其他淡掉；六面小方塊滑過時那條邊亮橘色。
-import { useEffect, useMemo, useRef } from 'react';
+// 旁邊一張縮圖：和結果卡片同一種切法（垂直於結構最長軸的截面，例如 fin 看 XY 截面），結構用選取藍、其他淡掉；
+// 六面小方塊滑過時那條邊亮橘色；下面寫「XY · z=191」。
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Typography } from 'antd';
-import { type Vec3, hexToRgb, unionBBox } from '../../volume/volume';
+import { type Axis, type Vec3, hexToRgb, unionBBox } from '../../volume/volume';
 import type { Editor } from './editor';
 import { slabOf } from './slabs';
-import { longestAxisOf, structThumbRGBA, thumbAt, thumbCrop } from './thumbs';
+import { autoAxis, structThumbRGBA, thumbAt, thumbCrop } from './thumbs';
 
 const { Text } = Typography;
+const AXN: Record<Axis, string> = { z: 'XY', y: 'XZ', x: 'YZ' };
 
-export function StructThumb({ ed, keys, face, size = 120 }: { ed: Editor; keys: string[]; face?: Vec3 | null; size?: number }) {
+export function StructThumb({ ed, keys, face, size = 112 }: { ed: Editor; keys: string[]; face?: Vec3 | null; size?: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const [caption, setCaption] = useState('');
   const L = ed.L;
   const box = useMemo(() => unionBBox(L.comps.filter((c) => keys.includes(c.key))), [L, keys]);
   const rgb = useMemo(() => new Map(ed.materials.map((m) => [m.id, hexToRgb(m.color)])), [ed.materials]);
   useEffect(() => {
     const cv = ref.current;
     if (!cv || !box) return;
-    const axis = longestAxisOf(box);
+    const axis = autoAxis(box) ?? 'z';
     const at = thumbAt(axis, null, box, ed.vol);
     const slab = slabOf(ed.orig, ed.active, axis, at);
     const on = new Set(L.comps.flatMap((c, i) => (keys.includes(c.key) ? [i] : [])));
@@ -25,9 +28,16 @@ export function StructThumb({ ed, keys, face, size = 120 }: { ed: Editor; keys: 
     cv.width = img.W;
     cv.height = img.H;
     cv.getContext('2d')!.putImageData(new ImageData(img.data, img.W, img.H), 0, 0);
+    setCaption(`${AXN[axis]} · ${axis}=${at}`);
   }, [box, rgb, ed.hidden, face, ed.orig, ed.active, ed.vol, L, keys, size]);
-  if (!box) return <div className="struct-thumb empty" style={{ width: size, height: size * 0.75 }} />;
-  return <canvas ref={ref} className="struct-thumb" style={{ maxWidth: size, maxHeight: size, imageRendering: 'pixelated' }} aria-label="結構縮圖" />;
+  return (
+    <figure className={'struct-thumb' + (box ? '' : ' empty')} style={{ width: size }}>
+      <div className="struct-thumb-img" style={{ height: size }}>
+        {box ? <canvas ref={ref} aria-label="結構縮圖" /> : <span>還沒選</span>}
+      </div>
+      <figcaption>{box ? caption : '截面'}</figcaption>
+    </figure>
+  );
 }
 
 export function StructurePicker({ ed, face }: { ed: Editor; face?: Vec3 | null }) {
@@ -49,6 +59,8 @@ export function StructurePicker({ ed, face }: { ed: Editor; face?: Vec3 | null }
         }),
       }));
   }, [ed.comps, ed.hidden, ed.matName]);
+  const picked = keys.map((k) => ed.comps.find((c) => c.key === k)).filter((c) => !!c);
+  const dims = picked.length === 1 ? picked[0].bbox : null;
   return (
     <div className="struct-pick">
       <div className="struct-pick-left">
@@ -73,8 +85,12 @@ export function StructurePicker({ ed, face }: { ed: Editor; face?: Vec3 | null }
           optionFilterProp="label"
           aria-label="結構"
         />
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {keys.length ? '和編輯頁的選取同步；Shift 多選的結構會一起改' : '依材質分組；選了會和編輯頁的選取同步'}
+        <Text type="secondary" className="dp-hint">
+          {dims
+            ? `${dims.x1 - dims.x0 + 1} × ${dims.y1 - dims.y0 + 1} × ${dims.z1 - dims.z0 + 1} 格 · ${picked[0].count.toLocaleString()} 格 · 和編輯頁的選取同步`
+            : keys.length
+              ? `${keys.length} 個結構會一起改 · 和編輯頁的選取同步`
+              : '依材質分組；Shift 可多選，和編輯頁的選取同步'}
         </Text>
       </div>
       <StructThumb ed={ed} keys={keys} face={face} />

@@ -164,15 +164,18 @@ export function structThumbRGBA(
   const H = Math.max(1, Math.round(CH * s));
   const out = new Uint8ClampedArray(W * H * 4);
   const lab = slab.L.labels;
+  // 切面像素是 (u, v) 列優先；slab 是法線軸長 1 的假 Volume，YZ（法線 x）那一片的格子 index 是 z*Y + y＝u*Y + v，不是 v*W + u
+  const { X: SX, Y: SY } = slab.vol;
+  const vi = slab.axis === 'x' ? (u: number, v: number) => u * SY + v : (u: number, v: number) => v * SX + u;
   for (let y = 0; y < H; y++) {
     const v = crop.v0 + Math.min(CH - 1, Math.floor(y / s));
     for (let x = 0; x < W; x++) {
       const u = crop.u0 + Math.min(CW - 1, Math.floor(x / s));
-      const i = v * full.W + u;
+      const p4 = (v * full.W + u) * 4;
       const o = (y * W + x) * 4;
-      const sel = on.has(lab[i]);
+      const sel = on.has(lab[vi(u, v)]);
       for (let c = 0; c < 3; c++) {
-        const p = full.data[i * 4 + c];
+        const p = full.data[p4 + c];
         out[o + c] = sel ? (p + [22, 119, 255][c]) >> 1 : Math.round(p * 0.35 + 255 * 0.65);
       }
       out[o + 3] = 255;

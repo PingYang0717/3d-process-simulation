@@ -1,11 +1,11 @@
-// 實驗頁的變數（plan v12 §5.4 第 2 點）：新增表單（選操作 → 固定欄位）與變數卡（一句話、名稱、水平 chips、設定 ▾）。
+// 實驗頁的變數（plan v12 §5.4 第 2 點）：新增表單（選操作 → 固定欄位）與變數卡（色帶、名稱＋id、一句話、水平 chips、設定 ▾）。
 import { useMemo, useState } from 'react';
 import { Alert, Button, Checkbox, Collapse, Flex, Input, InputNumber, Segmented, Select, Slider, Tooltip, Typography } from 'antd';
 import { DeleteOutlined, InfoCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { type Vec3, VOID, kindOf } from '../../volume/volume';
 import { type Factor, type FactorOp, type Problem, defaultId, makeFactor, measureNominal } from '../../volume/factors';
 import type { Editor } from './editor';
-import { OP_HELP, OP_LABEL, factorWords } from './opWords';
+import { OP_HELP, OP_LABEL, factorWords, whoText } from './opWords';
 import { FacePicker } from './FacePicker';
 import { roundFrame } from './RoundCard';
 import { LevelsEditor } from './LevelsEditor';
@@ -104,6 +104,9 @@ export function NewFactorForm({ ed, taken, onAdd, onCancel, onFace }: { ed: Edit
   const face = (v: Vec3, set: (d: Vec3) => void) => <FacePicker value={v} onChange={set} onHover={onFace} size={72} />;
   return (
     <Flex vertical gap={8} className="factor-new">
+      <div className="fn-title">
+        新變數 <Text type="secondary">· {whoText(ed.L, keys, ed.matName)}</Text>
+      </div>
       {row(
         '操作',
         <Select
@@ -205,7 +208,7 @@ export function NewFactorForm({ ed, taken, onAdd, onCancel, onFace }: { ed: Edit
   );
 }
 
-/** 一個變數一張卡：色點 · 一句話 · 名稱（id 灰字，點才改）· 水平 chips · 設定 ▾。 */
+/** 一個變數一張卡：左邊一條色帶 · 名稱（粗體，直接改）＋ id 灰字 · 一句話 · 水平 chips ＋ 預設 · 設定 ▾。動作鍵滑過才浮出。 */
 export function FactorCard({
   ed,
   f,
@@ -259,36 +262,14 @@ export function FactorCard({
   const rest = Object.entries(t)
     .filter(([key]) => !['axis', 'anchor', 'dir', 'face', 'policy', 'scope', 'gesture'].includes(key))
     .map(([key, v]) => `${key} = ${JSON.stringify(v)}`);
+  const id = f.id || defaultId(ed.L, f.keys, f.op, f.template, ed.matName);
   return (
-    <div className={'factor-card' + (missing ? ' warn' : '')}>
-      <Flex align="flex-start" gap={8}>
-        <span className="factor-dot" style={{ background: CATEGORY[k % CATEGORY.length], marginTop: 6 }} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="factor-words">
-            <b>{w.who}</b> {w.what}
-            {w.now && <Text type="secondary"> · {w.now}</Text>}
-            <Tooltip title={OP_HELP[f.op]}>
-              <InfoCircleOutlined style={{ marginLeft: 6, color: 'var(--c-text-3)', fontSize: 12 }} />
-            </Tooltip>
-          </div>
-          {missing && (
-            <Text type="warning" style={{ fontSize: 12 }}>
-              對不到結構（範本裡的結構不在這個模型），請刪掉重加
-            </Text>
-          )}
-        </div>
-        {!['translate', 'taper'].includes(f.op) && !missing && (
-          <Tooltip title="重新量標稱（用目前的 split）">
-            <Button size="small" type="text" icon={<ReloadOutlined />} onClick={() => onChange({ ...f, nominal: measureNominal(ed.L, ed.vol, f) }, levels)} aria-label="重新量標稱" />
-          </Tooltip>
-        )}
-        <Tooltip title="刪掉這個變數">
-          <Button size="small" type="text" icon={<DeleteOutlined />} onClick={onRemove} aria-label="刪掉變數" />
-        </Tooltip>
-      </Flex>
-      <Flex align="center" gap={6} style={{ margin: '6px 0' }}>
+    <div className={'factor-card' + (missing ? ' warn' : '')} style={{ '--fc': CATEGORY[k % CATEGORY.length] } as React.CSSProperties}>
+      <div className="fc-head">
         <Input
           size="small"
+          variant="borderless"
+          className="fc-name"
           value={f.name}
           onChange={(e) => {
             const name = e.target.value;
@@ -296,9 +277,8 @@ export function FactorCard({
             const auto = name.replace(/[^A-Za-z0-9_\-.]/g, '');
             onChange({ ...f, name, ...(!editId && auto ? { id: taken.includes(auto) && auto !== f.id ? f.id : auto } : {}) }, levels);
           }}
-          placeholder="名稱（例：L_g）"
+          placeholder="變數名稱（例：L_g）"
           aria-label="變數名稱"
-          style={{ flex: 1 }}
         />
         {editId ? (
           <Input
@@ -309,16 +289,40 @@ export function FactorCard({
             onBlur={() => setEditId(false)}
             onPressEnter={() => setEditId(false)}
             style={{ width: 120 }}
+            className="dp-mono"
             aria-label="變數 id"
           />
         ) : (
           <Tooltip title="檔名、CSV 與命名樣板用的 id（ASCII）；點一下改">
-            <Text type="secondary" className="factor-id" onClick={() => setEditId(true)}>
-              id: {f.id || defaultId(ed.L, f.keys, f.op, f.template, ed.matName)}
-            </Text>
+            <button type="button" className="factor-id" onClick={() => setEditId(true)}>
+              {id}
+            </button>
           </Tooltip>
         )}
-      </Flex>
+        <span className="fc-acts">
+          {!['translate', 'taper'].includes(f.op) && !missing && (
+            <Tooltip title="重新量標稱（用目前的 split）">
+              <Button size="small" type="text" icon={<ReloadOutlined />} onClick={() => onChange({ ...f, nominal: measureNominal(ed.L, ed.vol, f) }, levels)} aria-label="重新量標稱" />
+            </Tooltip>
+          )}
+          <Tooltip title="刪掉這個變數">
+            <Button size="small" type="text" icon={<DeleteOutlined />} onClick={onRemove} aria-label="刪掉變數" />
+          </Tooltip>
+        </span>
+      </div>
+      <div className="fc-desc">
+        <b>{w.who}</b>
+        <span>{w.what}</span>
+        {w.now && <span className="fc-now">{w.now}</span>}
+        <Tooltip title={OP_HELP[f.op]}>
+          <InfoCircleOutlined className="fc-info" />
+        </Tooltip>
+      </div>
+      {missing && (
+        <Text type="warning" className="dp-hint">
+          對不到結構（範本裡的結構不在這個模型），請刪掉重加
+        </Text>
+      )}
       <LevelsEditor f={f} levels={levels} problems={problems} nm={nm} onChange={(lv, nf) => onChange(nf ?? f, lv)} />
       {(settings.length > 0 || rest.length > 0) && (
         <Collapse
@@ -328,7 +332,7 @@ export function FactorCard({
           items={[
             {
               key: 's',
-              label: <span style={{ fontSize: 12 }}>設定</span>,
+              label: <span className="fc-settings-label">設定</span>,
               children: (
                 <Flex vertical gap={6}>
                   {settings.map((el, i) => (

@@ -25,8 +25,8 @@ import {
   UploadOutlined,
 } from '@ant-design/icons';
 import { type Axis, type BBox, type Vec3, directionName, hexToRgb, unionBBox } from '../../volume/volume';
-import { zipStore } from '../../volume/zip';
-import { download } from '../../ui/download';
+import { ZipWriter, crc32 } from '../../volume/zip';
+import { download, openSaveSink, type SaveSink } from '../../ui/download';
 import { MatLabel } from '../../ui/Swatch';
 import { type Op, type SelectMode, type Split, changedOf, slicesWith, useEditor } from './editor';
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
@@ -39,7 +39,7 @@ import { axisIndex, clipBox } from '../../volume/scope';
 import { type Preview, boxVoxels, previewBox, previewOp } from '../../volume/preview';
 import { newReport } from '../../volume/kernel';
 import { globalIndex } from '../../volume/patch';
-import { previewIn, sidOf } from '../../volume/client';
+import { type ExportBytes, previewIn, sidOf } from '../../volume/client';
 import { hiddenTable, palette } from './tables';
 import { type LiveValue, useLive, useLiveValue } from '../../ui/liveValue';
 
@@ -600,9 +600,10 @@ export default function Section3DPage() {
   const stem = (ed.meta.name ?? 'tcad').replace(/\.(npy|vti)$/i, '');
   const spacing = ed.meta.spacing ?? [ed.nmPerVoxel, ed.nmPerVoxel, ed.nmPerVoxel];
   const origin = ed.meta.origin ?? [0, 0, 0];
-  const like = !!(ed.meta.raw && ed.meta.fractions);
-  /** 編碼在 Worker 裡做（plan v12 §5.3）：live 用帳簿、parked 用補丁，一個一個來。 */
-  const encode = (s: Split | null, fmt: Fmt): Promise<Uint8Array> =>
+  // 原檔在 Worker（plan v15 C4）：主執行緒只知道「有」
+  const like = !!(ed.meta.hasRaw && ed.meta.fractions);
+  /** 編碼在 Worker 裡做（plan v12 §5.3）：live 用帳簿、parked 用補丁，一個一個來；回來的位元組附 crc（plan v15 C2）。 */
+  const encode = (s: Split | null, fmt: Fmt): Promise<ExportBytes> =>
     ed.exportBytes(s, { format: fmt, spacing, origin, arrayName: ed.meta.arrayName && !like ? ed.meta.arrayName : 'material' });
   const exportOne = (fmt: Fmt = 'vti') => {
     const name = ed.isBase || !ed.active ? `${stem}.${ext(fmt)}` : `${stem}__${safeName(ed.active.name)}.${ext(fmt)}`;
@@ -611,10 +612,15 @@ export default function Section3DPage() {
       .then((saved) => message.success(`已匯出 ${saved}`))
       .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
   };
-  /** 全部匯出前先列出會打包哪些 split（名稱、步數、檔名），確認了才寫檔。 */
+  /** 每格幾個位元組（plan v15 C2 的大小預估）：同格式＝每個比例陣列一個值；單一編號／npy＝1。 */
+  const bytesPerVoxel = (fmt: Fmt) => (fmt === 'vti' && like ? (ed.meta.fractions ?? []).reduce((n, f) => n + (/64$/.test(f.dtype) ? 8 : /16$/.test(f.dtype) ? 2 : /8$/.test(f.dtype) ? 1 : 4), 0) : 1);
+  const GiB = 2 ** 30;
+  /** 全部匯出前先列出會打包哪些 split（名稱、步數、檔名）與大小預估，確認了才寫檔；存檔目標在使用者手勢裡開（showSaveFilePicker 要）。 */
   const confirmExportAll = (fmt: Fmt = 'vti', only?: string[]) => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
     const chosen = ed.splits.filter((s) => (only ? only.includes(s.id) : !ed.exportOff.has(s.id)));
+    const estimate = chosen.length * ed.vol.data.length * bytesPerVoxel(fmt);
+    const sizeText = estimate >= GiB ? `${(estimate / GiB).toFixed(1)} GB` : `${Math.max(1, Math.round(estimate / 2 ** 20))} MB`;
     modal.confirm({
       title: `打包 ${chosen.length} 個 split 成 zip（.${ext(fmt)}${fmt === 'vti1' ? '，單一編號' : ''}）`,
       icon: <DownloadOutlined style={{ color: 'var(--c-primary)' }} />,
@@ -637,25 +643,43 @@ export default function Section3DPage() {
             </Flex>
           ))}
           <Text type="secondary" style={{ fontSize: 12, marginTop: 6 }}>
-            另附 manifest.json（材質名稱與顏色、每個 split 的步驟）；shape、spacing、origin 都和原始相同。
+            另附 manifest.json（材質名稱與顏色、每個 split 的步驟）；shape、spacing、origin 都和原始相同。未壓縮約 {sizeText}（實際大小依原檔壓縮而定）。
           </Text>
+          {estimate > 2 * GiB && (
+            <Text type="warning" style={{ fontSize: 12 }}>
+              超過 2 GB：zip 會用 ZIP64 寫出、邊產生邊寫檔（Chromium 會先問存到哪）；其他瀏覽器要在記憶體裡湊齊整個檔，可能存不下來——可以先少勾幾個 split。
+            </Text>
+          )}
         </Flex>
       ),
-      onOk: () => exportAll(fmt, only),
+      onOk: async () => {
+        // 在使用者手勢裡先開存檔目標（Chromium 的 showSaveFilePicker），之後再慢慢寫；取消就什麼都不做
+        let sink: SaveSink;
+        try {
+          sink = await openSaveSink(`${stem}__splits.zip`, 'application/zip');
+        } catch (e) {
+          if ((e as { code?: string })?.code === 'declined') return;
+          message.error('匯出失敗');
+          return;
+        }
+        void exportAll(fmt, only, sink);
+      },
     });
   };
-  const exportAll = async (fmt: Fmt = 'vti', only?: string[]) => {
+  /** 串流打包（plan v15 C2）：每個 split 編碼完就寫進 zip（Worker 回的 crc），主執行緒同時最多留一個 split 的位元組；manifest 最後。 */
+  const exportAll = async (fmt: Fmt, only: string[] | undefined, sink: SaveSink) => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
-    const files: { name: string; data: Uint8Array }[] = [];
     const chosen = ed.splits.filter((s) => (only ? only.includes(s.id) : !ed.exportOff.has(s.id)));
+    const w = new ZipWriter((p) => sink.write(p));
     try {
       for (let k = 0; k < chosen.length; k++) {
         message.open({ key: 'export', type: 'loading', duration: 0, content: `匯出中 ${k + 1}／${chosen.length}：${chosen[k].name}` });
-        files.push({ name: fileOf(chosen[k]), data: await encode(chosen[k], fmt) });
+        const bytes = await encode(chosen[k], fmt);
+        await w.add(fileOf(chosen[k]), bytes.length, bytes.crc, [bytes]);
       }
-      message.destroy('export');
     } catch (e) {
       message.destroy('export');
+      await sink.abort().catch(() => {});
       message.error(`匯出失敗：${(e as Error)?.message ?? e}`);
       return;
     }
@@ -673,11 +697,18 @@ export default function Section3DPage() {
       fileOf,
       opText: (op) => ed.opText(op, ed.orig.L),
     });
-    files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
-    const name = `${stem}__splits.zip`;
-    download(zipStore(files), name, 'application/zip')
-      .then((saved) => message.success(`已匯出 ${saved}`))
-      .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
+    try {
+      const m = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
+      await w.add('manifest.json', m.length, crc32(m), [m]);
+      await w.finish();
+      const saved = await sink.close();
+      message.destroy('export');
+      message.success(`已匯出 ${saved}`);
+    } catch (e) {
+      message.destroy('export');
+      await sink.abort().catch(() => {});
+      if ((e as { code?: string })?.code !== 'declined') message.error('匯出失敗');
+    }
   };
 
   // ---- 右鍵選單：選取相關；聚焦編輯中點在結構上多編輯項（plan v10 §4.5） ----

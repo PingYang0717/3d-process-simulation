@@ -2,6 +2,7 @@
 import type { Kind, Requests } from './worker';
 import type { EditState } from './ops';
 import type { Step } from './patch';
+import type { ExportStats } from './vti';
 
 let worker: Worker | null = null;
 let seq = 0;
@@ -217,16 +218,42 @@ export function applyParkedIn(req: Requests['applyParked']['req']) {
   return call('applyParked', req);
 }
 
-/** 匯出要的原檔（載入時送一次；Worker 留一份）。 */
-export function exportMetaIn(raw: ArrayBuffer | null, fractions: Requests['exportMeta']['req']['fractions']) {
-  return call('exportMeta', { raw: raw ? raw.slice(0) : null, fractions });
+// ---- 載入與匯出（plan v15 C2～C4：解碼在 Worker、原檔只留 Worker 一份、匯出帶 crc） ----
+
+/** 上傳的 .vti 只看標頭：buf transfer 給 Worker（呼叫之後主執行緒的 buf 已空），Worker 留著等 decodeVtiIn 或 dropVtiIn。 */
+export function inspectVtiIn(buf: ArrayBuffer) {
+  return call('vtiInspect', { buf }, [buf]);
 }
 
+/** 對剛 inspect 的 .vti 解碼；keepRaw 且有比例陣列時原檔留在 Worker 當匯出用（之後 exportMetaIn 只要送 fractions）。 */
+export function decodeVtiIn(req: Requests['vtiDecode']['req']) {
+  return call('vtiDecode', req);
+}
+
+/** 使用者取消：釋放 Worker 裡的原檔。 */
+export function dropVtiIn() {
+  return call('vtiDrop', {}).catch(() => {});
+}
+
+/** .npy 也在 Worker 解（buf transfer）。 */
+export function decodeNpyIn(buf: ArrayBuffer) {
+  return call('npyDecode', { buf }, [buf]);
+}
+
+/** 匯出要的比例陣列（載入時送一次）；原檔已在 Worker（decodeVtiIn keepRaw）。null＝沒有同格式匯出，Worker 把原檔也放掉。 */
+export function exportMetaIn(fractions: Requests['exportMeta']['req']['fractions']) {
+  return call('exportMeta', { fractions });
+}
+
+/** 匯出結果：位元組本身，附 Worker 算好的 CRC-32（zip 用）與同格式匯出的 block 統計。 */
+export type ExportBytes = Uint8Array & { crc: number; stats?: ExportStats };
+
 /** 匯出一個狀態：live 的帳簿（state）或 parked 的補丁；都沒有＝原始。 */
-export function exportIn(src: { state?: EditState; patch?: Requests['export']['req']['patch'] }, req: Omit<Requests['export']['req'], 'owner' | 'patch'>) {
+export async function exportIn(src: { state?: EditState; patch?: Requests['export']['req']['patch'] }, req: Omit<Requests['export']['req'], 'owner' | 'patch'>): Promise<ExportBytes> {
+  let r: Requests['export']['res'];
   if (src.state && ownerOf(src.state) !== 'base') {
     ensure(src.state);
-    return call('export', { ...req, owner: ownerOf(src.state) });
-  }
-  return call('export', { ...req, ...(src.patch ? { patch: src.patch } : {}) });
+    r = await call('export', { ...req, owner: ownerOf(src.state) });
+  } else r = await call('export', { ...req, ...(src.patch ? { patch: src.patch } : {}) });
+  return Object.assign(r.bytes, { crc: r.crc, ...(r.stats ? { stats: r.stats } : {}) });
 }

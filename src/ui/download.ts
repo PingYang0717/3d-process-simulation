@@ -77,11 +77,12 @@ export interface SaveSink {
  */
 export async function openSaveSink(filename: string, type = 'application/octet-stream', opts: { picker?: boolean } = {}): Promise<SaveSink> {
   const blobSink = (): SaveSink => {
-    const parts: Uint8Array[] = [];
+    // 每段立刻包成 Blob：瀏覽器把它放到 JS heap 外（Chromium 的 blob 儲存，大了會落地），主執行緒同時只留一個 split 的位元組
+    const parts: Blob[] = [];
     return {
       kind: 'blob',
-      write: async (p) => void parts.push(p),
-      close: () => download(parts, filename, type),
+      write: async (p) => void parts.push(new Blob([p])),
+      close: () => download(new Blob(parts, { type }), filename, type),
       abort: async () => void parts.splice(0),
     };
   };

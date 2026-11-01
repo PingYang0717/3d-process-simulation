@@ -167,8 +167,8 @@ export interface Meta {
   arrayName?: string;
   arrays?: string[];
   unit?: 'nm' | 'um';
-  /** .vti 原檔位元組：照原格式匯出時重新解碼比例陣列（plan v11 §4.0、§9 D18）。 */
-  raw?: ArrayBuffer;
+  /** .vti 原檔在 Worker 裡（plan v15 C4：主執行緒不留第二份）：照原格式匯出時重新解碼比例陣列（plan v11 §4.0、§9 D18）。 */
+  hasRaw?: boolean;
   /** PointData 比例陣列（陣列名 → 材質編號）；有它才能照原格式匯出。 */
   fractions?: FractionArray[];
   /** 材質名稱與顏色從哪來：FieldData 或自動（「材質 n」）。 */
@@ -1412,8 +1412,8 @@ export function useEditor() {
       void compsIn(BASE_ID, comps).catch(() => {});
       histWarned.current = false;
       setLastStep(null);
-      // 匯出照原格式要的原檔（Worker 留一份；plan v12 §5.3 匯出搬進 Worker）
-      void exportMetaIn(m.raw && m.fractions ? m.raw : null, m.raw && m.fractions ? m.fractions : null).catch(() => {});
+      // 匯出照原格式要的比例陣列（原檔已在 Worker，plan v15 C4）；沒有就連原檔一起放掉
+      void exportMetaIn(m.hasRaw && m.fractions ? m.fractions : null).catch(() => {});
       lru.current = [];
       genSeq.current = 1;
       models.clear();

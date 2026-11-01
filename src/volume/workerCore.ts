@@ -14,8 +14,9 @@ import { type OpReport, summarize } from './report';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
 import { type SplitPatch, type SplitStats, applyPatch, extractPatch, patchStats, stepTouch } from '../splits/lifecycle';
 import { pasteArr, cropArr, globalIndex } from './patch';
-import { type ExportMaterial, type FractionArray, encodeVti, encodeVtiLike } from './vti';
-import { encodeNpy } from './volume';
+import { type DecodeOptions, type ExportHint, type ExportMaterial, type ExportStats, type FractionArray, type VtiInfo, type VtiInspect, decodeVti, encodeVti, encodeVtiLike, inspectVti } from './vti';
+import { decodeNpy, encodeNpy } from './volume';
+import { crc32 } from './zip';
 
 /** 一步的結果裡要 transfer 回主執行緒的陣列。 */
 const stepBuffers = (st: Step): Transferable[] => {
@@ -91,13 +92,30 @@ export interface Requests {
     req: { patch: SplitPatch; ops: Op[]; matNames: Record<number, string>; keyCounter: number };
     res: { patch: SplitPatch; stats: SplitStats; keyCounter: number; reports: OpReport[]; changed: number[] };
   };
-  /** 匯出要的原檔（比例陣列照原格式寫回，plan v11 §4.0）：載入時送一次，Worker 留著。 */
-  exportMeta: { req: { raw: ArrayBuffer | null; fractions: FractionArray[] | null }; res: null };
-  /** 匯出一個 split（plan v12 §5.3）：live 給 owner（直接用它的帳簿），parked 給 patch（scratch 上貼補丁）；編碼在 Worker 裡做。 */
+  /**
+   * 匯出要的比例陣列（照原格式寫回，plan v11 §4.0）：載入時送一次。原檔本身在 vtiDecode keepRaw 時就留在 Worker（plan v15 C3）；
+   * raw 是舊呼叫端（測試、bench）直接帶原檔用的，省略＝沿用 Worker 手上那份。fractions 為 null＝沒有同格式匯出，原檔一併釋放。
+   */
+  exportMeta: { req: { raw?: ArrayBuffer | null; fractions: FractionArray[] | null }; res: null };
+  /**
+   * 匯出一個 split（plan v12 §5.3）：live 給 owner（直接用它的帳簿），parked 給 patch；編碼在 Worker 裡做。
+   * crc：zip 用的 CRC-32，主執行緒不再算（plan v15 C2）；stats：同格式匯出時 block 總數與重壓數（bench／e2e 看）。
+   */
   export: {
     req: { owner?: string; patch?: SplitPatch; format: 'vti' | 'vti1' | 'npy'; spacing: number[]; origin: number[]; arrayName: string; materials: ExportMaterial[] };
-    res: Uint8Array;
+    res: { bytes: Uint8Array; crc: number; stats?: ExportStats };
   };
+  /** 上傳的 .vti 只看標頭（plan v15 C3）：buf 由主執行緒 transfer 過來、留在 Worker（pendingRaw）等 vtiDecode 或 vtiDrop。 */
+  vtiInspect: { req: { buf: ArrayBuffer }; res: VtiInspect };
+  /**
+   * 對 pendingRaw 解碼（plan v15 C3＋C4）：vol.data transfer 回主執行緒；keepRaw 且有比例陣列時原檔直接變成匯出用的那份
+   * （主執行緒不再留一份），否則釋放。
+   */
+  vtiDecode: { req: DecodeOptions & { keepRaw: boolean }; res: { vol: Volume; info: VtiInfo; valueMap: Map<number, number> } };
+  /** 使用者在確認框取消：釋放 pendingRaw。 */
+  vtiDrop: { req: Record<string, never>; res: null };
+  /** .npy 也在 Worker 解（plan v15 C3）。 */
+  npyDecode: { req: { buf: ArrayBuffer }; res: { vol: Volume } };
   /** 保留給測試與保險；UI 每一步不再呼叫（主執行緒自己差量更新，§4.4）。 */
   diff: { req: { sid: number }; res: { mask: Uint8Array; count: number } };
   /** 一步操作：owner 的帳簿必須正好是版本 from；原地算（§4.3），沒改到時 head 不動。回傳補丁與已摘要的報告（plan v15 C7：cells 有上限）。 */
@@ -174,7 +192,7 @@ let previewSid = -1;
 export const previewStats = rings.stats;
 
 /** 測試用：看 Worker 的內部狀態。 */
-export const inspect = () => ({ books, heads, parents, origSid, compsOf, origVoidBox });
+export const inspect = () => ({ books, heads, parents, origSid, compsOf, origVoidBox, pendingRaw, exportRaw, exportFractions });
 
 const origBook = () => books.get(BASE_OWNER)!;
 const volOf = (b: Book): Volume => ({ X: dims.X, Y: dims.Y, Z: dims.Z, data: b.data });
@@ -299,9 +317,16 @@ function patchOf(b: Book, comps: Comp[]): { patch: SplitPatch; stats: SplitStats
   return { patch, stats: { changed: b.diffCount, diffBox: diffBoxOf(b), counts: b.counts.slice() } };
 }
 const patchTransfer = (p: SplitPatch, st?: SplitStats): Transferable[] => [p.data.buffer, p.labels.buffer, ...(st ? [st.counts.buffer] : [])];
-/** 匯出用的原檔。 */
+/** 匯出用的原檔（plan v15 C4：全程只有 Worker 這一份）與比例陣列。 */
 let exportRaw: ArrayBuffer | null = null;
 let exportFractions: FractionArray[] | null = null;
+/** 上傳中的 .vti（vtiInspect 收到、等使用者確認）：vtiDecode 用掉或 vtiDrop 釋放。 */
+let pendingRaw: ArrayBuffer | null = null;
+/**
+ * parked split 匯出用的重複使用陣列（plan v15 §5.5：parked 不再每次 slice 一份原始）：和 scratch 一樣只把上一次貼過的範圍
+ * 從原始貼回來。export 是非同步的（壓縮期間其他請求照常處理），所以不能借用 scratch；busy 時（兩個匯出重疊）退回複製。
+ */
+let exportBuf: { data: Uint8Array; touch: BBox | null; busy: boolean } | null = null;
 const ctxOf = (matNames: Record<number, string>, keyCounter: number) => {
   let seq = keyCounter;
   return {
@@ -380,6 +405,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     origVoidBox = voidBox;
     books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, axes: newAxes(dims), touch: null });
     scratch = null;
+    exportBuf = null;
     heads.set(BASE_OWNER, sid);
     origSid = sid;
     // 主執行緒要一份原始的 labels（一次）
@@ -526,13 +552,28 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ ...out, keyCounter: seq(), reports, changed }, [...patchTransfer(out.patch, out.stats), ...reports.map((r) => r.cells.buffer)]];
   },
   exportMeta: ({ raw, fractions }) => {
-    exportRaw = raw;
+    if (raw !== undefined) exportRaw = raw;
+    if (!fractions) exportRaw = null;
     exportFractions = fractions;
     return [null, []];
   },
   export: (() => {
-    throw new Error('export 是非同步的，請用 handleAsync');
+    throw new Error('export 是非同步的，請用 handleAny');
   }) as never,
+  vtiInspect: (() => {
+    throw new Error('vtiInspect 是非同步的，請用 handleAny');
+  }) as never,
+  vtiDecode: (() => {
+    throw new Error('vtiDecode 是非同步的，請用 handleAny');
+  }) as never,
+  vtiDrop: () => {
+    pendingRaw = null;
+    return [null, []];
+  },
+  npyDecode: ({ buf }) => {
+    const vol = decodeNpy(buf);
+    return [{ vol }, [vol.data.buffer]];
+  },
   chunks: ({ sid, key: _key, hidden, diff, palette, base: base0, alts }) => {
     const { vol } = stateOf(sid);
     const g = gridOf(vol);
@@ -717,29 +758,95 @@ export function handle(type: Kind, req: unknown): [unknown, Transferable[]] {
   return (handlers[type] as Handler<Kind>)(req as never);
 }
 
-/** 匯出（非同步：.vti 壓縮用 CompressionStream）。陣列先複製一份，之後的請求改到帳簿也不影響這次匯出。 */
-async function exportOne(req: Requests['export']['req']): Promise<[Uint8Array, Transferable[]]> {
+/** parked split 的匯出陣列：原始＋補丁，放在重複使用的 exportBuf 裡（O(上次外框＋這次外框)，不重新配置）。 */
+function parkedData(patch: SplitPatch): { data: Uint8Array; release: () => void } {
+  const o = origBook();
+  if (!exportBuf) exportBuf = { data: o.data.slice(), touch: null, busy: false };
+  const b = exportBuf;
+  if (b.busy) {
+    // 另一個匯出還在用它：複製一份（舊路徑）
+    const data = o.data.slice();
+    if (patch.box) pasteArr(data, dims, patch.box, patch.data);
+    return { data, release: () => {} };
+  }
+  b.busy = true;
+  if (b.touch) copyIn(b.data, o.data, b.touch);
+  if (patch.box) pasteArr(b.data, dims, patch.box, patch.data);
+  b.touch = patch.box ? { ...patch.box } : null;
+  return { data: b.data, release: () => void (b.busy = false) };
+}
+
+/**
+ * 匯出（非同步：.vti 壓縮用 CompressionStream）。live 的帳簿先複製一份（壓縮期間之後的請求可能改到它）；
+ * parked 用 exportBuf、原始直接用（永遠不寫），都不另外配置（plan v15 §5.5）。
+ * 同格式匯出帶 hint（plan v15 C1）：live 用帳簿的 diff 與外框、parked 用補丁的外框（函式自己在外框裡比對）、原始沒有改點。
+ */
+async function exportOne(req: Requests['export']['req']): Promise<[Requests['export']['res'], Transferable[]]> {
   const o = origBook();
   let data: Uint8Array;
+  let hint: ExportHint;
+  let release = () => {};
   if (req.owner) {
     const b = books.get(req.owner);
     if (!b) throw new Error(`Worker 沒有帳簿 ${req.owner}`);
     data = b.data.slice();
+    // diff 在 encodeVtiLike 一開始就同步掃完（第一個 await 之前），之後帳簿再改也不影響這次
+    hint = { ...(b.diff ? { diff: b.diff } : {}), box: diffBoxOf(b), dims: { ...dims } };
   } else if (req.patch) {
-    data = o.data.slice();
-    if (req.patch.box) pasteArr(data, dims, req.patch.box, req.patch.data);
-  } else data = o.data.slice();
-  const vol: Volume = { X: dims.X, Y: dims.Y, Z: dims.Z, data };
-  let out: Uint8Array;
-  if (req.format === 'npy') out = encodeNpy(vol);
-  else if (req.format === 'vti' && exportRaw && exportFractions) out = await encodeVtiLike(exportRaw, exportFractions, data, o.data, req.materials);
-  else out = await encodeVti(vol, req.spacing, req.origin, req.arrayName);
-  return [out, [out.buffer]];
+    const p = parkedData(req.patch);
+    data = p.data;
+    release = p.release;
+    hint = { box: req.patch.box, dims: { ...dims } };
+  } else {
+    data = o.data;
+    hint = { box: null, dims: { ...dims } };
+  }
+  try {
+    const vol: Volume = { X: dims.X, Y: dims.Y, Z: dims.Z, data };
+    let bytes: Uint8Array;
+    let stats: ExportStats | undefined;
+    if (req.format === 'npy') bytes = encodeNpy(vol);
+    else if (req.format === 'vti' && exportRaw && exportFractions) {
+      stats = { blocks: 0, redone: 0 };
+      // parts 裡沒碰到的 block 是原檔的 view，不能 transfer 原檔的 buffer：接成一塊再 transfer
+      bytes = await encodeVtiLike(exportRaw, exportFractions, data, o.data, req.materials, hint, { stats });
+    } else bytes = await encodeVti(vol, req.spacing, req.origin, req.arrayName);
+    return [{ bytes, crc: crc32(bytes), ...(stats ? { stats } : {}) }, [bytes.buffer]];
+  } finally {
+    release();
+  }
 }
 
-/** worker.ts 用：同步的照舊，export 回 Promise。 */
+/** 上傳的 .vti：只看標頭，原檔留在 Worker 等確認（plan v15 C3）。 */
+async function vtiInspectOne(req: Requests['vtiInspect']['req']): Promise<[VtiInspect, Transferable[]]> {
+  pendingRaw = req.buf;
+  try {
+    return [await inspectVti(req.buf), []];
+  } catch (e) {
+    pendingRaw = null;
+    throw e;
+  }
+}
+
+/** 對 pendingRaw 解碼；keepRaw 且有比例陣列時它就成為匯出用的原檔（主執行緒從頭到尾沒有第二份）。 */
+async function vtiDecodeOne(req: Requests['vtiDecode']['req']): Promise<[Requests['vtiDecode']['res'], Transferable[]]> {
+  const raw = pendingRaw;
+  if (!raw) throw new Error('Worker 沒有待解碼的 .vti（要先 vtiInspect）');
+  pendingRaw = null;
+  const { keepRaw, ...opts } = req;
+  const r = await decodeVti(raw, opts);
+  if (keepRaw && r.info.fractions) {
+    exportRaw = raw;
+    exportFractions = r.info.fractions;
+  }
+  return [r, [r.vol.data.buffer]];
+}
+
+/** worker.ts 用：同步的照舊；export／vtiInspect／vtiDecode 回 Promise。 */
 export function handleAny(type: Kind, req: unknown): [unknown, Transferable[]] | Promise<[unknown, Transferable[]]> {
   if (type === 'export') return exportOne(req as Requests['export']['req']);
+  if (type === 'vtiInspect') return vtiInspectOne(req as Requests['vtiInspect']['req']);
+  if (type === 'vtiDecode') return vtiDecodeOne(req as Requests['vtiDecode']['req']);
   return handle(type, req);
 }
 

@@ -1,7 +1,9 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { MATERIALS, demoVolume, initialLabeled } from './volume';
+import { MATERIALS, type Volume, decodeNpy, demoVolume, encodeNpy, initialLabeled } from './volume';
 import { type EditState, type Op, applyOp, matNameOf } from './ops';
 import type { Step } from './patch';
+import { type VtiInspect, decodeVti, encodeVtiLike, inspectVti } from './vti';
+import { crc32 } from './zip';
 
 // 假 Worker：真的跑 workerCore（同一套 handler），請求與回應都經過 structuredClone（和 postMessage 一樣是複本）。
 // 記下每種請求的次數（plan v9 §7：每一步只送 apply、沒有 diff／count；fork 只一次；head 對不上時 put）。
@@ -12,9 +14,10 @@ class FakeWorker {
   postMessage(msg: { id: number; type: string; req: Record<string, unknown> }) {
     sent.push({ type: msg.type, req: msg.req });
     const req = structuredClone(msg.req);
-    queueMicrotask(() => {
+    queueMicrotask(async () => {
       try {
-        const [result] = core.handle(msg.type as never, req);
+        const out = core.handleAny(msg.type as never, req);
+        const [result] = out instanceof Promise ? await out : out;
         this.onmessage?.({ data: { id: msg.id, ok: true, result: structuredClone(result) } } as MessageEvent);
       } catch (e) {
         this.onmessage?.({ data: { id: msg.id, ok: false, error: (e as Error).message } } as MessageEvent);
@@ -316,4 +319,230 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
     const d = (await client.previewIn(s, { op: push, ...pv })) as { data: Uint8Array };
     expect(same(d.data, previewOp(s, orig.vol, push)!.data)).toBe(true);
   }, 30_000);
+});
+
+describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯出帶 crc 與 hint', () => {
+  const FX = 8;
+  const FY = 6;
+  const FZ = 4;
+  const FN = FX * FY * FZ;
+  const enc = new TextEncoder();
+  const u32 = (...v: number[]) => new Uint8Array(new Uint32Array(v).buffer);
+  const cat = (...parts: Uint8Array[]) => {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) (out.set(p, o), (o += p.length));
+    return out;
+  };
+  async function deflate(u: Uint8Array) {
+    const cs = new CompressionStream('deflate');
+    const w = cs.writable.getWriter();
+    void w.write(u);
+    void w.close();
+    return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+  }
+  /** 主材質：z < 2 是 1、其他 2，角落 x<2 y<2 z=0 的 4 格是 3（只在第一個 block 裡）。 */
+  const mainOf = (i: number) => {
+    const x = i % FX;
+    const y = Math.floor(i / FX) % FY;
+    const z = Math.floor(i / (FX * FY));
+    return x < 2 && y < 2 && z === 0 ? 3 : z < 2 ? 1 : 2;
+  };
+  /** 3 個 Float32 比例陣列（appended raw、zlib、blockSize 256 → 每個陣列 3 塊）＋FieldData 材質表。 */
+  async function fractionVti() {
+    const blockSize = 256;
+    const block = async (b: Uint8Array) => {
+      const nb = Math.ceil(b.length / blockSize);
+      const parts: Uint8Array[] = [];
+      for (let k = 0; k < nb; k++) parts.push(await deflate(b.subarray(k * blockSize, Math.min(b.length, (k + 1) * blockSize))));
+      return cat(u32(nb, blockSize, b.length % blockSize, ...parts.map((p) => p.length)), ...parts);
+    };
+    const app: Uint8Array[] = [];
+    const tags: string[] = [];
+    let off = 0;
+    for (let k = 1; k <= 3; k++) {
+      const v = new Float32Array(FN);
+      for (let i = 0; i < FN; i++) v[i] = mainOf(i) === k ? 0.8 : 0.1;
+      const raw = await block(new Uint8Array(v.buffer));
+      tags.push(`<DataArray type="Float32" Name="material_${k}" format="appended" offset="${off}"/>`);
+      app.push(raw);
+      off += raw.length;
+    }
+    const names = Array.from(enc.encode('Si\0SiO2\0TiN\0')).join(' ');
+    const ext = `0 ${FX - 1} 0 ${FY - 1} 0 ${FZ - 1}`;
+    const head = `<?xml version="1.0"?>
+<VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt32" compressor="vtkZLibDataCompressor">
+  <ImageData WholeExtent="${ext}" Origin="0 0 0" Spacing="0.5 0.5 0.5">
+    <FieldData>
+      <DataArray type="Int32" Name="MaterialCode" NumberOfTuples="3" format="ascii">1 2 3</DataArray>
+      <DataArray type="String" Name="MaterialName" NumberOfTuples="3" format="ascii">${names}</DataArray>
+    </FieldData>
+    <Piece Extent="${ext}">
+      <PointData Scalars="material_1">
+        ${tags.join('\n        ')}
+      </PointData>
+    </Piece>
+  </ImageData>
+  <AppendedData encoding="raw">
+   _`;
+    return cat(enc.encode(head), ...app, enc.encode('\n  </AppendedData>\n</VTKFile>\n'));
+  }
+  const MATS = [
+    { id: 1, name: 'Si', color: '#c8c8be' },
+    { id: 2, name: 'SiO2', color: '#96d2e6' },
+    { id: 3, name: 'TiN', color: '#8c96aa' },
+    { id: 9, name: '新材質', color: '#ff0000' },
+  ];
+  const bytesSame = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+  type Dec = { vol: Volume; info: { fractions?: { name: string; id: number; dtype: string }[] } };
+  const inspectIn = (buf: ArrayBuffer) => core.handleAny('vtiInspect', { buf }) as Promise<[VtiInspect, Transferable[]]>;
+  const decodeIn = (req: { keepRaw: boolean; fractions?: { name: string; id: number }[] }) => core.handleAny('vtiDecode', req) as Promise<[Dec & { valueMap: Map<number, number> }, Transferable[]]>;
+  type Exp = { bytes: Uint8Array; crc: number; stats?: { blocks: number; redone: number } };
+  const exportIn = (req: Record<string, unknown>) => core.handleAny('export', req) as Promise<[Exp, Transferable[]]>;
+
+  it('vtiInspect／vtiDecode 經 handleAny === 直接呼叫 inspectVti／decodeVti；keepRaw 之後原檔就是匯出用的那份；vtiDrop 釋放', async () => {
+    const file = await fractionVti();
+    const raw = file.slice().buffer;
+    const [ins] = await inspectIn(raw);
+    expect(ins).toEqual(await inspectVti(file.slice().buffer));
+    expect(ins.fractions.map((f) => f.id)).toEqual([1, 2, 3]);
+    expect(core.inspect().pendingRaw).toBe(raw);
+    const [dec, transfer] = await decodeIn({ keepRaw: true });
+    const ref = await decodeVti(file.slice().buffer);
+    expect(Array.from(dec.vol.data)).toEqual(Array.from(ref.vol.data));
+    expect(Array.from(dec.vol.data)).toEqual(Array.from({ length: FN }, (_, i) => mainOf(i)));
+    expect(dec.info).toEqual(ref.info);
+    expect([...dec.valueMap]).toEqual([...ref.valueMap]);
+    expect(transfer).toEqual([dec.vol.data.buffer]);
+    // 原檔沒複製：pendingRaw 直接變成 exportRaw
+    expect(core.inspect().pendingRaw).toBeNull();
+    expect(core.inspect().exportRaw).toBe(raw);
+    expect(core.inspect().exportFractions).toEqual(ref.info.fractions);
+    // 沒有待解碼的檔 → 錯誤
+    await expect(decodeIn({ keepRaw: true })).rejects.toThrow();
+    // 手動指定比例陣列 === decodeVti(buf, { fractions })
+    const manual = [
+      { name: 'material_1', id: 5 },
+      { name: 'material_3', id: 7 },
+    ];
+    await inspectIn(file.slice().buffer);
+    const [dm] = await decodeIn({ keepRaw: true, fractions: manual });
+    const rm = await decodeVti(file.slice().buffer, { fractions: manual });
+    expect(Array.from(dm.vol.data)).toEqual(Array.from(rm.vol.data));
+    expect(dm.info.fractions).toEqual(rm.info.fractions);
+    expect(core.inspect().exportFractions).toEqual(rm.info.fractions);
+    // keepRaw: false → 解完就丟（exportRaw 不動）
+    const before = core.inspect().exportRaw;
+    await inspectIn(file.slice().buffer);
+    await decodeIn({ keepRaw: false });
+    expect(core.inspect().exportRaw).toBe(before);
+    // 取消：vtiDrop 釋放 pendingRaw
+    const r2 = file.slice().buffer;
+    await inspectIn(r2);
+    expect(core.inspect().pendingRaw).toBe(r2);
+    core.handle('vtiDrop', {});
+    expect(core.inspect().pendingRaw).toBeNull();
+    // exportMeta 只送 fractions：原檔留著；送 null：原檔一起放掉
+    core.handle('exportMeta', { fractions: ref.info.fractions! });
+    expect(core.inspect().exportRaw).toBe(before);
+    core.handle('exportMeta', { fractions: null });
+    expect(core.inspect().exportRaw).toBeNull();
+    expect(core.inspect().exportFractions).toBeNull();
+    // 壞檔：pendingRaw 不留
+    await expect(inspectIn(enc.encode('<nope/>').slice().buffer)).rejects.toThrow();
+    expect(core.inspect().pendingRaw).toBeNull();
+  });
+
+  it('npyDecode 經 handleAny === decodeNpy，vol.data transfer', () => {
+    const vol = demoVolume();
+    const buf = encodeNpy(vol).slice().buffer;
+    const [r, transfer] = core.handleAny('npyDecode', { buf: buf.slice(0) }) as [{ vol: Volume }, Transferable[]];
+    const ref = decodeNpy(buf);
+    expect([r.vol.X, r.vol.Y, r.vol.Z]).toEqual([ref.X, ref.Y, ref.Z]);
+    expect(same(r.vol.data, ref.data)).toBe(true);
+    expect(transfer).toEqual([r.vol.data.buffer]);
+  });
+
+  it('export：crc === crc32(bytes)；同格式 parked ≡ live ≡ 純函式整陣列路徑、原始 === 原檔；只重壓碰到的 block', async () => {
+    const { extractPatch } = await import('../splits/lifecycle');
+    const file = await fractionVti();
+    await inspectIn(file.slice().buffer);
+    const [dec] = await decodeIn({ keepRaw: true });
+    const vol = dec.vol;
+    const [ld] = core.handle('load', { sid: 500, vol }) as [{ labels: Int32Array }, unknown];
+    core.handle('exportMeta', { fractions: dec.info.fractions! });
+    const L = initialLabeled(vol, (id) => `材質 ${id}`);
+    const req = { format: 'vti', spacing: [0.5, 0.5, 0.5], origin: [0, 0, 0], arrayName: 'material', materials: MATS };
+    // 原始：逐位元組 === 原檔，沒有 block 重壓
+    const [o, tr] = await exportIn(req);
+    expect(bytesSame(o.bytes, file)).toBe(true);
+    expect(o.crc).toBe(crc32(file));
+    expect(o.stats).toEqual({ blocks: 0, redone: 0 }); // 沒改點：純函式直接回原檔，沒碰任何 block
+    expect(tr).toEqual([o.bytes.buffer]);
+    // live：角落的 TiN（4 格、只在第一個 block）換成新材質 9
+    const tin = L.comps.find((c) => c.mat === 3)!;
+    core.handle('fork', { owner: 'e', src: 'base', sid: 500 });
+    const full = { axis: 'z' as const, lo: 0, hi: FZ - 1 };
+    core.handle('apply', { owner: 'e', from: 500, to: 501, comps: L.comps, op: { kind: 'material', keys: [tin.key], scope: full, m: 9 }, matNames: {}, keyCounter: 1000 });
+    const b = core.inspect().books.get('e')!;
+    expect(b.diffCount).toBe(4);
+    const [live] = await exportIn({ ...req, owner: 'e' });
+    const ref = live.bytes;
+    expect(live.crc).toBe(crc32(ref));
+    // 和純函式帶 hint（diff＋外框）的結果逐位元組相同；整陣列路徑重壓每一塊（壓縮位元組可能不同），比解回來的值
+    const diff = new Uint8Array(FN);
+    for (let i = 0; i < FN; i++) diff[i] = b.data[i] !== vol.data[i] ? 1 : 0;
+    const box = { x0: 0, x1: 1, y0: 0, y1: 1, z0: 0, z1: 0 };
+    expect(bytesSame(ref, await encodeVtiLike(file, dec.info.fractions!, b.data, vol.data, MATS, { diff, box, dims: { X: FX, Y: FY, Z: FZ } }))).toBe(true);
+    const whole = await encodeVtiLike(file, dec.info.fractions!, b.data, vol.data, MATS, undefined, { whole: true });
+    expect(Array.from((await decodeVti(whole.slice().buffer)).vol.data)).toEqual(Array.from(b.data));
+    // 3 個原陣列各 3 塊，只有第一塊重壓；新材質的陣列另算
+    expect(live.stats!.redone).toBeLessThan(live.stats!.blocks);
+    expect(live.stats!.blocks).toBeGreaterThanOrEqual(9);
+    // 解回來的值：角落是 9、其他照舊
+    const back = await decodeVti(ref.slice().buffer);
+    expect(Array.from(back.vol.data)).toEqual(Array.from(b.data));
+    // parked（補丁）：和 live 逐位元組相同；連做兩次（exportBuf 重複使用）仍相同；原始再匯一次不受影響
+    const patch = extractPatch(vol, b.data, b.labels, vol.data, ld.labels, b.touch, core.inspect().compsOf.get('e')!);
+    const [p1] = await exportIn({ ...req, patch });
+    expect(bytesSame(p1.bytes, ref)).toBe(true);
+    expect(p1.crc).toBe(crc32(ref));
+    const [p2] = await exportIn({ ...req, patch });
+    expect(bytesSame(p2.bytes, ref)).toBe(true);
+    const [o2] = await exportIn(req);
+    expect(bytesSame(o2.bytes, file)).toBe(true);
+    // 兩個 parked 匯出重疊（exportBuf busy → 退回複製）也對
+    const [q1, q2] = await Promise.all([exportIn({ ...req, patch }), exportIn({ ...req, patch: { box: null, data: new Uint8Array(0), labels: new Int32Array(0), comps: [] } })]);
+    expect(bytesSame(q1[0].bytes, ref)).toBe(true);
+    expect(bytesSame(q2[0].bytes, file)).toBe(true);
+    // vti1／npy 的 crc
+    const [v1] = await exportIn({ ...req, format: 'vti1', owner: 'e' });
+    expect(v1.crc).toBe(crc32(v1.bytes));
+    expect(v1.stats).toBeUndefined();
+    const [np] = await exportIn({ ...req, format: 'npy', patch });
+    expect(np.crc).toBe(crc32(np.bytes));
+    expect(same(decodeNpy(np.bytes.slice().buffer).data, b.data)).toBe(true);
+  }, 30_000);
+
+  it('client：inspectVtiIn 帶 transfer list、decodeVtiIn → exportMetaIn(fractions) → exportIn 回位元組附 crc', async () => {
+    const file = await fractionVti();
+    const buf = file.slice().buffer;
+    sent.length = 0;
+    const ins = await client.inspectVtiIn(buf);
+    expect(ins.fractions.length).toBe(3);
+    const { vol, info } = await client.decodeVtiIn({ keepRaw: true });
+    expect(Array.from(vol.data)).toEqual(Array.from({ length: FN }, (_, i) => mainOf(i)));
+    const o = await client.loadOrig(vol);
+    await client.exportMetaIn(info.fractions!);
+    expect(sent.find((m) => m.type === 'exportMeta')!.req).toEqual({ fractions: info.fractions });
+    const orig: EditState = { vol, L: { labels: o.labels, comps: [] }, version: o.version, owner: 'base' };
+    const bytes = await client.exportIn({ state: orig }, { format: 'vti', spacing: [1, 1, 1], origin: [0, 0, 0], arrayName: 'material', materials: MATS });
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(bytesSame(bytes, file)).toBe(true);
+    expect(bytes.crc).toBe(crc32(file));
+    expect(bytes.stats).toEqual({ blocks: 0, redone: 0 });
+    const { vol: nv } = await client.decodeNpyIn(encodeNpy(vol).slice().buffer);
+    expect(same(nv.data, vol.data)).toBe(true);
+    await client.dropVtiIn();
+  });
 });

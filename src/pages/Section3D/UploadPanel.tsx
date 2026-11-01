@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Alert, App, Button, Checkbox, Flex, InputNumber, Segmented, Steps, Table, Typography, Upload } from 'antd';
 import { InboxOutlined } from '@ant-design/icons';
-import { type Material, decodeNpy } from '../../volume/volume';
-import { type VtiInspect, decodeVti, inspectVti } from '../../volume/vti';
+import type { Material } from '../../volume/volume';
+import type { VtiInspect } from '../../volume/vti';
+import { decodeNpyIn, decodeVtiIn, dropVtiIn, inspectVtiIn } from '../../volume/client';
 import type { Editor } from './editor';
 
 const { Text } = Typography;
@@ -17,11 +18,12 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
   const busy = progress?.text ?? null;
   const setBusy = (text: string | null, step = 0) => setProgress(text === null ? null : { step, text });
   const [unit, setUnit] = useState<'nm' | 'um'>('nm');
-  /** 偵測到比例陣列或 FieldData：先列出來給使用者確認（plan v11 §4.0 上傳面板），再載入。 */
-  const [pending, setPending] = useState<{ file: File; buf: ArrayBuffer; ins: VtiInspect; pick: Record<string, number | null> } | null>(null);
-  const loadVti = async (file: File, buf: ArrayBuffer, fractions?: { name: string; id: number }[]) => {
+  /** 偵測到比例陣列或 FieldData：先列出來給使用者確認（plan v11 §4.0 上傳面板），再載入。原檔在 Worker（plan v15 C3），這裡不留 buf。 */
+  const [pending, setPending] = useState<{ file: File; ins: VtiInspect; pick: Record<string, number | null> } | null>(null);
+  /** 解碼在 Worker（plan v15 C3）：原檔已經在那裡（inspectVtiIn），有比例陣列時留著當匯出用（keepRaw）。 */
+  const loadVti = async (file: File, fractions?: { name: string; id: number }[]) => {
     setBusy('解碼 .vti…', 1);
-    const { vol, info } = await decodeVti(buf, fractions ? { fractions } : {});
+    const { vol, info } = await decodeVtiIn({ ...(fractions ? { fractions } : {}), keepRaw: true });
     setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`, 2);
     // FieldData 的材質表：代碼對得上的用它的名字與顏色，其他仍是「材質 n」
     const mats: Material[] | undefined = info.fieldData
@@ -37,7 +39,7 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
         arrayName: info.arrayName,
         arrays: info.arrays,
         unit,
-        ...(info.fractions ? { raw: buf, fractions: info.fractions } : {}),
+        ...(info.fractions ? { hasRaw: true, fractions: info.fractions } : {}),
         materialSource: mats?.length ? 'FieldData' : 'auto',
         input: { source: info.source, ...(info.fractions ? { fractionArrays: info.fractions.map((f) => f.name) } : {}), fieldData: !!info.fieldData, dtype: info.dtype, compressed: info.compressed },
       },
@@ -54,15 +56,16 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
     try {
       const buf = await file.arrayBuffer();
       if (/\.vti$/i.test(file.name)) {
-        const ins = await inspectVti(buf);
+        // buf transfer 給 Worker（之後這裡的 buf 是空的）；Worker 留著等確認
+        const ins = await inspectVtiIn(buf);
         if (ins.fractions.length || ins.fieldData) {
-          setPending({ file, buf, ins, pick: Object.fromEntries(ins.arrays.map((a) => [a.name, a.matched])) });
+          setPending({ file, ins, pick: Object.fromEntries(ins.arrays.map((a) => [a.name, a.matched])) });
           return;
         }
-        await loadVti(file, buf);
+        await loadVti(file);
       } else {
         setBusy('解碼 .npy…', 1);
-        const vol = decodeNpy(buf);
+        const { vol } = await decodeNpyIn(buf);
         setBusy(`分析 ${(vol.data.length / 1e6).toFixed(1)} M voxels 的結構…`, 2);
         await ed.loadVolume(vol, { name: file.name, format: 'npy' });
         message.success(`已載入 ${file.name}，shape (${vol.Z}, ${vol.Y}, ${vol.X})`);
@@ -82,7 +85,7 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
     const p = pending;
     setPending(null);
     try {
-      await loadVti(p.file, p.buf, fractions);
+      await loadVti(p.file, fractions);
       onDone();
     } catch (e) {
       message.error((e as Error)?.message ?? '這個檔案讀不出來');
@@ -157,7 +160,14 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
             名稱不像 material_k 的陣列標橘色；勾選並填編號就會一起當比例陣列。匯出時照原格式寫回（未改點每個陣列原值不動，改點新材質 1、其他 0）。
           </Text>
           <Flex gap={8} justify="end">
-            <Button onClick={() => setPending(null)}>取消</Button>
+            <Button
+              onClick={() => {
+                setPending(null);
+                void dropVtiIn();
+              }}
+            >
+              取消
+            </Button>
             <Button type="primary" onClick={confirm}>
               載入
             </Button>

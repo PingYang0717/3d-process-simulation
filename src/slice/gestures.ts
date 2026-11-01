@@ -134,11 +134,12 @@ export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, sh
     return { kind: 'translate', keys, scope: g.scope, d: uvTo3D(g.axis, du, dv), backfill: g.backfill, follow: g.follow };
   }
   const r = rings.get(h.key)![h.ring];
+  // 邊：法線方向的格數只算一次（push 的 n、文字、相對式記錄都用同一個；plan v15 B3）
+  const amt = h.kind === 'edge' ? edgeAmount(r, h, delta, shift) : 0;
   if (h.kind === 'edge') {
     const group = smoothEdgeGroup(r, h.index, shift);
     const nrm = groupNormal(r, group);
-    const n = edgeAmount(r, h, delta, shift);
-    if (!n) return null;
+    if (!amt) return null;
     const box = g.sliceBox(h.key);
     const axisN = Math.abs(nrm[0]) > 0.999 || Math.abs(nrm[1]) > 0.999;
     if (axisN && !isSingle(shift) && isAxisEdge(r, group) && box && !r.hole) {
@@ -151,7 +152,7 @@ export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, sh
       const span = dv ? Math.min(...us) === box.u0 && Math.max(...us) === box.u1 + 1 : Math.min(...vs) === box.v0 && Math.max(...vs) === box.v1 + 1;
       if (outer && span) {
         const dir: Vec3 = uvTo3D(g.axis, du, dv);
-        return { kind: 'push', keys, scope: g.scope, dir, n, follow: g.follow, backfill: g.backfill };
+        return { kind: 'push', keys, scope: g.scope, dir, n: amt, follow: g.follow, backfill: g.backfill };
       }
     }
   }
@@ -164,26 +165,55 @@ export function gestureToOp(rings: Map<string, Ring[]>, h: Handle, delta: XY, sh
   const text =
     h.kind === 'node'
       ? `${NODE_WORD[mode as NodeDrag]}${uvWord(Math.round(delta[0]), Math.round(delta[1]))}移 (${Math.round(delta[0])}, ${Math.round(delta[1])})`
-      : `${isSingle(shift) ? '單段' : '邊'}往${edgeAmount(r, h, delta, shift) > 0 ? '外' : '內'} ${Math.abs(edgeAmount(r, h, delta, shift))} vx（${(Math.abs(edgeAmount(r, h, delta, shift)) * g.nm).toFixed(1)} nm）`;
+      : `${isSingle(shift) ? '單段' : '邊'}往${amt > 0 ? '外' : '內'} ${Math.abs(amt)} vx（${(Math.abs(amt) * g.nm).toFixed(1)} nm）`;
   // 相對式（§7.8）：記下手勢本身，每一片找同一個把手重做
-  const rel = recordGesture(rings.get(h.key)!, h, delta, h.kind === 'edge' ? edgeAmount(r, h, delta, shift) : 0, mode);
+  const rel = recordGesture(rings.get(h.key)!, h, delta, amt, mode);
   return { kind: 'profile', keys, scope: g.scope, at: g.at, perKey: { [h.key]: perKey }, follow: g.follow, backfill: g.backfill, text, ...(rel ? { gestures: { [h.key]: rel } } : {}) };
 }
 
-/** 一個結構的環（第 ring 個改了 disp）→ 這一片要加、要拿的格子（RLE）。沒有改到回傳 null。 */
+/**
+ * 這個手勢取整之後的身分（plan v15 B3）：同一個 key ⇒ gestureToOp 的 Op 逐欄相同（JSON 相同），
+ * 所以拖拉中每個 rAF 先算 key，和上一幀相同就沿用上一幀的 Op，不重跑光柵化／BFS／RLE，也不再送預覽。
+ * - region：取整的位移 (du, dv)
+ * - edge：法線方向的格數（push 的 n／profile 的位移）＋取整的位移（RelGesture.delta 記的是它）
+ * - node：dragDisp 的整數位移串（含拖法）＋取整的位移（文字與 RelGesture.delta）
+ * 回傳字串只拿來比較，不要解析。rings 裡沒有這個把手回傳 ''。
+ */
+export function gestureKey(rings: Map<string, Ring[]>, h: Handle, delta: XY, shift: DragArg): string {
+  const du = Math.round(delta[0]);
+  const dv = Math.round(delta[1]);
+  if (h.kind === 'region') return `r:${du},${dv}`;
+  const r = rings.get(h.key)?.[h.ring];
+  if (!r) return '';
+  if (h.kind === 'edge') return `e:${h.key}/${h.ring}/${h.index}:${edgeAmount(r, h, delta, shift)}|${du},${dv}|${isSingle(shift) ? 1 : 0}`;
+  const mode = resolveNodeDrag(r, h.index, shift);
+  const disp = dragDisp(r, h, delta, mode);
+  let out = `n:${h.key}/${h.ring}/${h.index}:${mode}|${du},${dv}|`;
+  // 只記有動的頂點（多數是 0）
+  for (let i = 0; i < disp.length; i++) if (disp[i][0] || disp[i][1]) out += `${i}=${disp[i][0]},${disp[i][1]};`;
+  return out;
+}
+
+/**
+ * 一個結構的環（第 ring 個改了 disp）→ 這一片要加、要拿的格子（RLE）。沒有改到回傳 null。
+ * plan v15 B3：掃描範圍只取「第 ring 環改前 ∪ 改後」的外框（其他環改前 === 改後，偶奇規則下它們在這個外框外面
+ * 的貢獻前後相同、差為 0）；rasterize 仍傳全部多邊形（洞的奇偶規則要對），只在這個外框裡光柵化，
+ * before 的 inside() 也只掃這個外框。差的格子離外框邊至少 1 格，所以 BFS 的發現順序和整個聯集外框時相同。
+ */
 export function profileDelta(rs: Ring[], ring: number, disp: XY[], inside: (u: number, v: number) => boolean) {
   const after = rs.map((r, i) => (i === ring ? editRing(r, disp) : ringPolygon(r)));
   let u0 = Infinity;
   let v0 = Infinity;
   let u1 = -Infinity;
   let v1 = -Infinity;
-  for (const p of [...after, ...rs.map(ringPolygon)])
+  for (const p of [after[ring], ringPolygon(rs[ring])])
     for (const [u, v] of p) {
       u0 = Math.min(u0, Math.floor(u) - 1);
       v0 = Math.min(v0, Math.floor(v) - 1);
       u1 = Math.max(u1, Math.ceil(u) + 1);
       v1 = Math.max(v1, Math.ceil(v) + 1);
     }
+  if (u0 > u1) return null;
   const W = u1 - u0 + 1;
   const H = v1 - v0 + 1;
   const before = new Uint8Array(W * H);

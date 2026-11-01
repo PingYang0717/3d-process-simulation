@@ -89,8 +89,12 @@ function addRings(m: SliceModel, key: string, rs: Ring[]) {
   }
 }
 
+/** 測試／bench 用：描了幾次輪廓、驗證了幾個結構（plan v15 A4：沒碰到的片這兩個都不該動）。 */
+export const modelStats = { traced: 0, verified: 0 };
+
 /** 一個結構這一片的輪廓（v7 的 traceRings）。 */
 function traceKey(L: Labeled, vol: Volume, axis: Axis, at: number, key: string): Ring[] {
+  modelStats.traced++;
   const s = sliceOfKey(L, vol, axis, at, key);
   return s ? traceRings(s.inside, s.u0, s.v0, s.u1, s.v1) : [];
 }
@@ -278,6 +282,7 @@ export function rasterizeModel(m: SliceModel, key: string, u0: number, v0: numbe
  * 驗證（§7.4）：一個結構的幾何光柵化和這一片的 voxel 逐格比對；回傳不同的格子（切面座標）。
  */
 export function verifyKey(m: SliceModel, L: Labeled, vol: Volume, key: string): XY[] {
+  modelStats.verified++;
   const s = sliceOfKey(L, vol, m.axis, m.at, key);
   const polys = keyPolygons(m, key);
   let u0 = s ? s.u0 : Infinity;
@@ -428,57 +433,178 @@ export function snapshot(m: SliceModel): SliceModel {
 }
 export const restore = (s: SliceModel): SliceModel => ({ ...snapshot(s), rev: s.rev + 1 });
 
+/** 快照的位元組估算（plan v15 D2）：exact 每個點 16、每個頂點 24、環的每個 id 8。 */
+export function bytesOf(m: SliceModel): number {
+  let n = 0;
+  for (const seg of m.exact.values()) n += seg.length * 16;
+  n += Object.keys(m.vertices).length * 24;
+  for (const r of m.rings) n += r.loop.length * 8;
+  return n;
+}
+
 /** 一次取用的結果：模型＋這次驗證時重描了哪些結構（訊息用）。 */
 export interface Got {
   model: SliceModel;
   fixed: VerifyResult['fixed'];
 }
 
+/** snaps 的值：實體快照，或指向另一個版本實體快照的指標（永遠指向實體，不鏈）。 */
+type Snap = SliceModel | { sameAs: string };
+const isAlias = (s: Snap): s is { sameAs: string } => 'sameAs' in s;
+const versionOf = (k: string) => Number(k.slice(k.lastIndexOf('@') + 1));
+
 /**
  * 幾何層的倉庫（§6）：每個 (axis, at) 一份，最多留 8 片（LRU）。
  * 每個版本的幾何另外留快照：復原／重做回到某個版本時直接還原那時的幾何（節點回到原位）；
  * 沒有快照（換 split、3D 筆刷改了這片）就驗證，對不上的結構重描並保留節點 id。
+ *
+ * plan v15 D2／A4：
+ * - 快照的值是 SliceModel 或 { sameAs }：keep() 時模型的 rev 和上一次存快照時相同（這個版本沒改幾何）就只存指標，
+ *   指標永遠指向實體快照（扁平不鏈）；restore 時解參考。
+ * - 實體快照總位元組 > SNAP_BYTES（或筆數 > SNAP_LIMIT）時從最舊的逐出；被指標參考的實體不逐。
+ * - prune(live)：版本已經回不去的快照刪掉。bytes()：給 bench 與 DEV。
+ * - get(..., touched = false)：這一步沒碰到這一片 → 不驗證，只把版本號接上（快照存指標）。
  */
 export class ModelStore {
   static LIMIT = 8;
   static SNAP_LIMIT = 400;
+  static SNAP_BYTES = 64 * 1024 * 1024;
   private cur = new Map<string, SliceModel>();
-  private snaps = new Map<string, SliceModel>();
+  private snaps = new Map<string, Snap>();
+  /** 實體快照的位元組。 */
+  private sizes = new Map<string, number>();
+  /** 實體 key → 指向它的 alias key。 */
+  private refs = new Map<string, Set<string>>();
+  private total = 0;
+  /** 這個模型物件上一次存實體快照（或由實體快照還原）時的 key 與 rev：rev 沒變就存指標。 */
+  private keptAt = new WeakMap<SliceModel, { key: string; rev: number }>();
 
   private remember(id: string, m: SliceModel) {
     this.cur.delete(id);
     this.cur.set(id, m);
     while (this.cur.size > ModelStore.LIMIT) this.cur.delete(this.cur.keys().next().value!);
   }
+  /** 解參考：這個 key 的實體快照（沒有回 undefined）。 */
+  private entity(k: string): { key: string; m: SliceModel } | undefined {
+    const s = this.snaps.get(k);
+    if (!s) return undefined;
+    if (!isAlias(s)) return { key: k, m: s };
+    const t = this.snaps.get(s.sameAs);
+    return t && !isAlias(t) ? { key: s.sameAs, m: t } : undefined;
+  }
+  /** 拿掉一筆（實體或指標）；實體被拿掉時指向它的指標也一起拿掉（已經沒有資料）。 */
+  private drop(k: string) {
+    const s = this.snaps.get(k);
+    if (!s) return;
+    this.snaps.delete(k);
+    if (isAlias(s)) {
+      this.refs.get(s.sameAs)?.delete(k);
+      return;
+    }
+    this.total -= this.sizes.get(k) ?? 0;
+    this.sizes.delete(k);
+    for (const a of this.refs.get(k) ?? []) this.snaps.delete(a);
+    this.refs.delete(k);
+  }
+  /**
+   * 超過上限就從最舊的逐出：指標直接逐、實體只在沒有指標參考時逐；每逐一筆從頭再找（逐掉指標之後它指的實體
+   * 可能就變成可逐的了）；全都被參考就停（略超過上限）。
+   */
+  private evict() {
+    while (this.snaps.size > ModelStore.SNAP_LIMIT || this.total > ModelStore.SNAP_BYTES) {
+      let victim: string | undefined;
+      for (const [k, s] of this.snaps)
+        if (isAlias(s) || !this.refs.get(k)?.size) {
+          victim = k;
+          break;
+        }
+      if (victim === undefined) break;
+      this.drop(victim);
+    }
+  }
   private keep(id: string, m: SliceModel) {
     const k = `${id}@${m.baseVersion}`;
-    this.snaps.delete(k);
-    this.snaps.set(k, snapshot(m));
-    while (this.snaps.size > ModelStore.SNAP_LIMIT) this.snaps.delete(this.snaps.keys().next().value!);
+    const last = this.keptAt.get(m);
+    const target = last && last.rev === m.rev ? this.entity(last.key) : undefined;
+    if (target && target.key === k) {
+      // 同一個版本、幾何沒變：只刷新順序
+      const s = this.snaps.get(k)!;
+      this.snaps.delete(k);
+      this.snaps.set(k, s);
+      return;
+    }
+    if (target) {
+      // 幾何和 target 那個版本一模一樣：存指標（扁平：指向實體）。k 原本若是被參考的實體，把那些指標改指 target
+      const was = this.snaps.get(k);
+      if (was && !isAlias(was)) {
+        for (const a of this.refs.get(k) ?? []) {
+          this.snaps.set(a, { sameAs: target.key });
+          this.refs.get(target.key)?.add(a);
+        }
+        this.refs.delete(k);
+        this.total -= this.sizes.get(k) ?? 0;
+        this.sizes.delete(k);
+        this.snaps.delete(k);
+      } else this.drop(k);
+      this.snaps.set(k, { sameAs: target.key });
+      if (!this.refs.has(target.key)) this.refs.set(target.key, new Set());
+      this.refs.get(target.key)!.add(k);
+      this.evict();
+      return;
+    }
+    // 實體快照：同一個 key 原本的實體被換掉時，指向它的指標跟著指向新的（版本相同＝同一片 voxel，形狀一樣）
+    const was = this.snaps.get(k);
+    const keepRefs = was && !isAlias(was) ? this.refs.get(k) : undefined;
+    if (keepRefs) {
+      this.total -= this.sizes.get(k) ?? 0;
+      this.snaps.delete(k);
+    } else this.drop(k);
+    const snap = snapshot(m);
+    const b = bytesOf(snap);
+    this.snaps.set(k, snap);
+    this.sizes.set(k, b);
+    this.total += b;
+    this.keptAt.set(m, { key: k, rev: m.rev });
+    this.evict();
   }
 
   /**
    * 這一片、這個版本的幾何（必要時建立、還原快照或驗證重描）。
    * seq＝editor 已經算完的步數：比放開時大就表示那一步回來了（沒改到任何格子時版本不變，靠這個知道）。
+   * touched（plan v15 A4）＝這一步的 stepTouch 有沒有碰到 (axis, at) 這一片；省略＝true（現行為：驗證）。
+   * false 時若這一片沒有在等 Worker、也沒有這個版本的快照，幾何一定還和 voxel 對得上：不驗證、不重描，
+   * 只把 baseVersion 接上並存一個指向上一版快照的指標。
    */
-  get(L: Labeled, vol: Volume, axis: Axis, at: number, keys: string[], version: number, seq = 0): Got {
+  get(L: Labeled, vol: Volume, axis: Axis, at: number, keys: string[], version: number, seq = 0, touched = true): Got {
     const id = `${axis}|${at}`;
     let m = this.cur.get(id);
     let fixed: VerifyResult['fixed'] = [];
+    let settled = false;
     if (m?.pending && seq > m.pendingSeq) {
       // 那一步算完了：版本變了就驗證；沒變（沒改到）就回到放開前的快照
       m.pending = false;
       m.baseVersion = -1;
+      settled = true;
     }
     if (m?.pending && m.pendingFrom === version) {
       // 放開了、Worker 還沒回來：先用已經更新的幾何
     } else if (!m || m.pending || m.baseVersion !== version) {
-      const snap = this.snaps.get(`${id}@${version}`);
-      if (snap && !m?.pending) m = restore(snap);
-      else if (m) {
-        fixed = verifyAndFix(m, L, vol, keys, version).fixed;
-        m.rev++;
+      const snap = this.entity(`${id}@${version}`);
+      if (snap && !m?.pending) {
+        m = restore(snap.m);
+        // 還原出來的就是那份實體：之後沒改就能用指標
+        this.keptAt.set(m, { key: snap.key, rev: m.rev });
+      } else if (m && !touched && !m.pending && !settled && m.baseVersion >= 0) {
+        m.baseVersion = version;
         this.keep(id, m);
+      } else if (m) {
+        fixed = verifyAndFix(m, L, vol, keys, version).fixed;
+        // 快照先存（rev 沒變＝這次驗證沒重描、也沒人改過幾何 → 指標），再換 rev 讓環的快取重取；
+        // 換 rev 不改幾何，所以「這個模型等於哪份實體快照」的紀錄跟著更新，下一次 begin() 仍能存指標
+        this.keep(id, m);
+        m.rev++;
+        const ka = this.keptAt.get(m);
+        if (ka) ka.rev = m.rev;
       } else {
         m = buildSliceModel(L, vol, axis, at, keys, version);
         this.keep(id, m);
@@ -497,9 +623,38 @@ export class ModelStore {
     m.pendingFrom = version;
     m.pendingSeq = seq;
   }
+  /** 版本已經回不去（不在任何 split 的 hist／future／cur 裡）的快照刪掉；被 live 指標參考的實體留著。 */
+  prune(live: Set<number>) {
+    const need = new Set<string>();
+    for (const [k, s] of this.snaps) {
+      if (!live.has(versionOf(k))) continue;
+      need.add(k);
+      if (isAlias(s)) need.add(s.sameAs);
+    }
+    for (const k of [...this.snaps.keys()]) if (!need.has(k)) this.drop(k);
+  }
+  /** 實體快照的總位元組（估算）。 */
+  bytes() {
+    return this.total;
+  }
+  /** 快照筆數（實體、指標）；測試用。 */
+  counts() {
+    let alias = 0;
+    for (const s of this.snaps.values()) if (isAlias(s)) alias++;
+    return { entities: this.snaps.size - alias, aliases: alias };
+  }
+  /** 測試用：某個版本的快照是不是指標、指向誰。 */
+  snapOf(axis: Axis, at: number, version: number): { alias: boolean; sameAs?: number } | null {
+    const s = this.snaps.get(`${axis}|${at}@${version}`);
+    if (!s) return null;
+    return isAlias(s) ? { alias: true, sameAs: versionOf(s.sameAs) } : { alias: false };
+  }
   /** 換檔案：全部丟掉。 */
   clear() {
     this.cur.clear();
     this.snaps.clear();
+    this.sizes.clear();
+    this.refs.clear();
+    this.total = 0;
   }
 }

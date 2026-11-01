@@ -105,18 +105,69 @@ export interface TracedHandle {
   handle: Handle | null;
 }
 
+/** FNV-1a 32-bit：h 是目前的雜湊、x 是要混進去的整數（四個 byte 逐一混）。 */
+const fnv = (h: number, x: number) => {
+  h = Math.imul(h ^ (x & 255), 16777619);
+  h = Math.imul(h ^ ((x >>> 8) & 255), 16777619);
+  h = Math.imul(h ^ ((x >>> 16) & 255), 16777619);
+  h = Math.imul(h ^ (x >>> 24), 16777619);
+  return h;
+};
+/**
+ * 輪廓的數值簽名（plan v15 D3）：兩個不同種子的 FNV-1a 32-bit，over 把手欄位與每個環的 hole＋pts 整數。
+ * 原本是 pts.join(';') 的長字串（每片每幀都 join 一次、key 本身就是幾 KB）。碰撞由 sameShape 逐值比對擋掉。
+ */
+export function shapeSig(h: TracedHandle): string {
+  let a = 0x811c9dc5;
+  let b = 0x050c5d1f;
+  const mix = (x: number) => {
+    a = fnv(a, x);
+    b = fnv(b, x);
+  };
+  if (h.handle) {
+    mix(h.handle.kind === 'node' ? 1 : h.handle.kind === 'edge' ? 2 : 3);
+    mix(h.handle.ring);
+    mix(h.handle.index);
+  } else mix(-1);
+  mix(h.rings.length);
+  for (const r of h.rings) {
+    mix(r.hole ? 1 : 0);
+    mix(r.pts.length);
+    for (const p of r.pts) {
+      mix(p[0] | 0);
+      mix(p[1] | 0);
+    }
+  }
+  return `${a >>> 0}:${b >>> 0}`;
+}
+/** 簽名相同時再逐值比對（和舊的字串 key 同一個等價關係：把手＋每個環的 hole＋pts）。 */
+export function sameShape(x: TracedHandle, y: TracedHandle): boolean {
+  if (!!x.handle !== !!y.handle) return false;
+  if (x.handle && y.handle && (x.handle.kind !== y.handle.kind || x.handle.ring !== y.handle.ring || x.handle.index !== y.handle.index)) return false;
+  if (x.rings.length !== y.rings.length) return false;
+  for (let i = 0; i < x.rings.length; i++) {
+    const p = x.rings[i];
+    const q = y.rings[i];
+    if (p.hole !== q.hole || p.pts.length !== q.pts.length) return false;
+    for (let k = 0; k < p.pts.length; k++) if (p.pts[k][0] !== q.pts[k][0] || p.pts[k][1] !== q.pts[k][1]) return false;
+  }
+  return true;
+}
+
 /**
  * 拖拉中每片輪廓的快取（plan v9 §4.5）：key（片＋結構＋把手）→ 描好的輪廓；
  * 輪廓一模一樣的片共用同一份物件（沿法線擠出的結構多半每片都一樣），applyProfileMask 對同一份只重做一次手勢。
+ * plan v15 D3：byKey／byShape 各自 LRU（Map 插入順序，命中時重新 set 到尾端），滿了只逐最舊的一筆，不再整個 clear()
+ * （原本滿 8192 時連 byKey 一起清，下一幀所有片重描一次）。sig 可換（測試用來製造碰撞）。
  */
-export function ringCache(max = 8192) {
+export function ringCache(max = 8192, sig: (h: TracedHandle) => string = shapeSig) {
   const byKey = new Map<string, TracedHandle>();
   const byShape = new Map<string, TracedHandle>();
   const stats = { traced: 0, hits: 0 };
-  const sig = (h: TracedHandle) =>
-    `${h.handle ? `${h.handle.kind}${h.handle.ring}:${h.handle.index}` : '-'}|${h.rings.map((r) => `${r.hole ? 'h' : 'o'}${r.pts.join(';')}`).join('|')}`;
   return {
     stats,
+    /** 目前 byKey 裡有幾筆（測試／bench 用）。 */
+    size: () => byKey.size,
     clear() {
       byKey.clear();
       byShape.clear();
@@ -125,16 +176,21 @@ export function ringCache(max = 8192) {
       const hit = byKey.get(key);
       if (hit) {
         stats.hits++;
+        byKey.delete(key);
+        byKey.set(key, hit);
         return hit;
       }
       stats.traced++;
       let h = make();
       const k = sig(h);
       const same = byShape.get(k);
-      if (same) h = same;
-      else byShape.set(k, h);
-      if (byKey.size >= max) this.clear();
+      // 簽名相同但 pts 不同（碰撞）：當 miss，用新的這份蓋掉（舊的那份還在 byKey 裡被用，不受影響）
+      if (same && sameShape(same, h)) h = same;
+      byShape.delete(k);
+      byShape.set(k, h);
+      while (byShape.size > max) byShape.delete(byShape.keys().next().value!);
       byKey.set(key, h);
+      while (byKey.size > max) byKey.delete(byKey.keys().next().value!);
       return h;
     },
   };

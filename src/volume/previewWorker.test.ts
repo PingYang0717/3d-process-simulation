@@ -5,7 +5,7 @@ import { type EditState, type Op, matNameOf } from './ops';
 import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
-import type { TracedHandle } from '../slice/relative';
+import { type TracedHandle, ringCache, shapeSig } from '../slice/relative';
 import { ModelStore, ringsOf } from '../slice/model';
 import { opOfGesture, sliceContext } from '../pages/Section3D/handleOps';
 import { globalIndex } from './patch';
@@ -13,6 +13,52 @@ import * as core from './workerCore';
 
 const matName = matNameOf(MATERIALS);
 const same = (a: ArrayLike<number>, b: ArrayLike<number>) => a.length === b.length && Array.prototype.every.call(a, (v: number, i: number) => v === b[i]);
+
+/** 一個 2×2 的方塊輪廓（左上角在 (x, n)）＋節點把手；給 ringCache 測試用的最小 TracedHandle。 */
+const th = (n: number, x = 0): TracedHandle => ({
+  rings: [{ pts: [[x, n], [x + 2, n], [x + 2, n + 2], [x, n + 2]], raw: [], nodes: new Set([0]), hole: false }],
+  handle: { kind: 'node', key: '', ring: 0, index: 0 },
+});
+
+describe('ringCache LRU 與數值簽名（plan v15 D3）', () => {
+  it('滿 max 之後再放一筆只逐最舊的一筆（命中過的搬到尾端）、stats.traced 只 +1', () => {
+    const c = ringCache(4);
+    for (let i = 0; i < 4; i++) c.get(`k${i}`, () => th(i));
+    expect(c.size()).toBe(4);
+    expect(c.stats.traced).toBe(4);
+    // k0 命中 → 搬到尾端；放第 5 筆逐的是 k1
+    c.get('k0', () => th(0));
+    expect(c.stats.hits).toBe(1);
+    c.get('k4', () => th(4));
+    expect(c.size()).toBe(4);
+    expect(c.stats.traced).toBe(5);
+    for (const k of ['k0', 'k2', 'k3', 'k4']) c.get(k, () => th(99));
+    expect(c.stats.hits).toBe(5);
+    expect(c.stats.traced).toBe(5);
+    c.get('k1', () => th(1));
+    expect(c.stats.traced).toBe(6);
+    expect(c.size()).toBe(4);
+  });
+
+  it('同形狀共用同一份；簽名相同但 pts 不同（人工碰撞）當 miss、不共用；兩個不同形狀的簽名不同', () => {
+    const c = ringCache(8, () => 'collide');
+    const a = c.get('a', () => th(0));
+    expect(c.get('b', () => th(0))).toBe(a);
+    const d = c.get('d', () => th(5));
+    expect(d).not.toBe(a);
+    expect(d.rings[0].pts[0][1]).toBe(5);
+    // 碰撞之後舊的那份仍由 byKey 給回
+    expect(c.get('a', () => th(0))).toBe(a);
+    const c2 = ringCache(8);
+    const x = c2.get('x', () => th(1));
+    expect(c2.get('y', () => th(1))).toBe(x);
+    expect(c2.get('q', () => th(2))).not.toBe(x);
+    expect(shapeSig(th(1))).not.toBe(shapeSig(th(2)));
+    expect(shapeSig(th(1))).toBe(shapeSig(th(1)));
+    expect(shapeSig({ ...th(1), handle: null })).not.toBe(shapeSig(th(1)));
+    expect(shapeSig({ ...th(1), rings: [{ ...th(1).rings[0], hole: true }] })).not.toBe(shapeSig(th(1)));
+  });
+});
 
 /** 拖 fin 右上角節點往右上 k 格的 profile Op（和 bench.ts drag 同一個手勢，整根 scope）。 */
 function dragOps() {

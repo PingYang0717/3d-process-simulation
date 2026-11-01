@@ -61,12 +61,81 @@ export interface Cell {
   dir: number;
 }
 
+/** BFS 的 scratch（plan v15 B3）：依 W·H 放大、每次 fill 清，不每幀配新的。同一時間只有一個 deltaOf 在跑。 */
+let dirScratch = new Int8Array(0);
+let seenScratch = new Uint8Array(0);
+const scratchFor = (n: number) => {
+  if (dirScratch.length < n) {
+    dirScratch = new Int8Array(n);
+    seenScratch = new Uint8Array(n);
+  }
+  return { dirOf: dirScratch, seen: seenScratch };
+};
+
 /**
  * 前後兩份格子的差：after && !before → 加、before && !after → 拿。
  * 加的格子方向＝從原本的結構 BFS 走過來的方向（離原本邊界由近到遠排序）；
  * 拿的格子方向＝往外（往現在的外面 BFS 反過來）。
+ *
+ * plan v15 B3：BFS 的種子只取「邊界格」——是 src 而且 4 鄰接裡有 target 的格子。原本把所有 src 格子都推進 queue，
+ * 拿的那次（src = 外面）等於整個 bbox 的外面都進 JS array。發現的集合與順序和原本完全相同：原本的種子迴圈依
+ * index 遞增、每個種子 d = 0..3 找鄰居，一個沒有 target 鄰居的種子什麼都不會發現，拿掉它不影響其他種子的順序
+ * （deltaOfRef 是原本的寫法，raster.test.ts 隨機對照）。dirOf／seen 用模組層 scratch；回傳的 Cell[] 不變。
  */
 export function deltaOf(before: Uint8Array, after: Uint8Array, u0: number, v0: number, W: number, H: number): { add: Cell[]; remove: Cell[] } {
+  const N = W * H;
+  const { dirOf, seen } = scratchFor(N);
+  /** src(i) 是種子的那一側、target(i) 要被發現的格子；bfs 回傳發現的順序，方向留在 dirOf。 */
+  const bfs = (src: (i: number) => boolean, target: (i: number) => boolean) => {
+    dirOf.fill(-1, 0, N);
+    seen.fill(0, 0, N);
+    const order: number[] = [];
+    let q: number[] = [];
+    for (let i = 0; i < N; i++) {
+      if (!src(i)) continue;
+      const u = i % W;
+      // 邊界格：4 鄰接裡至少一個 target
+      if ((u + 1 < W && target(i + 1)) || (u > 0 && target(i - 1)) || (i + W < N && target(i + W)) || (i >= W && target(i - W))) q.push(i);
+    }
+    while (q.length) {
+      const nq: number[] = [];
+      for (const i of q) {
+        const u = i % W;
+        const v = (i - u) / W;
+        for (let d = 0; d < 4; d++) {
+          const nu = u + DIR_UV[d][0];
+          const nv = v + DIR_UV[d][1];
+          if (nu < 0 || nv < 0 || nu >= W || nv >= H) continue;
+          const j = nv * W + nu;
+          if (seen[j] || !target(j)) continue;
+          seen[j] = 1;
+          dirOf[j] = d;
+          order.push(j);
+          nq.push(j);
+        }
+      }
+      q = nq;
+    }
+    return order;
+  };
+  const isAdd = (i: number) => !!after[i] && !before[i];
+  const isRem = (i: number) => !!before[i] && !after[i];
+  // 加：從原本的結構走進新長出來的格子（scratch 在下一次 bfs 會被蓋掉，所以沒走到的也在這裡先補）
+  const add: Cell[] = bfs((i) => !!before[i], isAdd).map((i) => ({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: dirOf[i] }));
+  const addTail: Cell[] = [];
+  for (let i = 0; i < N; i++) if (after[i] && !before[i] && dirOf[i] < 0) addTail.push({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: 3 });
+  // 拿：從外面（原本就不是結構的格子）走進被拿掉的格子；往外 = 走進來方向的反向
+  const flip = [1, 0, 3, 2];
+  const remove: Cell[] = bfs((i) => !before[i], isRem).map((i) => ({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: flip[dirOf[i]] }));
+  // 和外面不相連的被拿掉的格子（例如被包住）也要拿：方向給往上
+  for (let i = 0; i < N; i++)
+    if (before[i] && !after[i] && dirOf[i] < 0) remove.push({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: 3 });
+  for (const c of addTail) add.push(c);
+  return { add, remove };
+}
+
+/** v14 以前的 deltaOf（所有 src 格子都當種子、每次配新陣列）：只給測試對照與 fallback 用，結果和 deltaOf 逐格、逐順序相同。 */
+export function deltaOfRef(before: Uint8Array, after: Uint8Array, u0: number, v0: number, W: number, H: number): { add: Cell[]; remove: Cell[] } {
   const bfs = (seed: (i: number) => boolean, target: (i: number) => boolean) => {
     const dirOf = new Int8Array(W * H).fill(-1);
     const order: number[] = [];
@@ -97,11 +166,9 @@ export function deltaOf(before: Uint8Array, after: Uint8Array, u0: number, v0: n
   };
   const adds = bfs((i) => !!before[i], (i) => !!after[i] && !before[i]);
   const add: Cell[] = adds.order.map((i) => ({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: adds.dirOf[i] }));
-  // 拿：從外面（原本就不是結構的格子）走進被拿掉的格子；往外 = 走進來方向的反向
   const rems = bfs((i) => !before[i], (i) => !!before[i] && !after[i]);
   const flip = [1, 0, 3, 2];
   const remove: Cell[] = rems.order.map((i) => ({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: flip[rems.dirOf[i]] }));
-  // 和外面不相連的被拿掉的格子（例如被包住）也要拿：方向給往上
   for (let i = 0; i < W * H; i++)
     if (before[i] && !after[i] && rems.dirOf[i] < 0) remove.push({ u: (i % W) + u0, v: Math.floor(i / W) + v0, dir: 3 });
   for (let i = 0; i < W * H; i++)

@@ -567,6 +567,7 @@ e2e（`scripts/e2e/m15.cjs`，需 `npm run dev`）：
 
 - **A1 多了 `canPatchMask`**（`editor.ts`）：`nameByVotes` 可能把被併結構的 key 認領給 S 外面的編號，這時只在 box 裡補 mask 會漏。規則＝每個結構編號「選了／沒選」前後不同的，改前、改後的外框都要在 box 裡，否則整個重建（`maskOf`）。`LastStep` 多一欄 `owner`（哪本帳簿），換 split 時不會拿別本帳簿的 box 去補。DEV 下每步 1/20 機率和 `maskOf` 全量比對，不同就 `console.error` ＋ 重建。
 - **A2 `restore` 回應沒帶 axes**：主執行緒 `restoreBuffers` 在補丁外框裡順手數（`recountAxes`），Worker `pastePatch` 同一個函式；Worker 協定一個欄位都沒加。
+- **A5 改為三軸 VOID 直方圖（M15.7 追加）**：計畫寫的 `voidBoxOf = origVoidBox ∪ touch` 是鬆外框（touch 只會長大），非相鄰版本比舊版 `boxOf` 慢（§11.3 原第 4 條）；改成 `Book.voidAxes`（和 A2 的 `axes` 同一個 `Axes` 型別、同一套手法）：`load` 在數體積帳的迴圈裡順手數、`carryStepStats` 在 `counts[old]--; counts[now]++` 旁邊 VOID 進出各 ±1、`pastePatch` 貼補丁前在 box 裡差量、`put` 一次 `recountMatAxes`、`copyBook`／`resetScratch` 複製；`voidBoxOf = boxOfAxes(voidAxes)` O(X+Y+Z) 貼合外框。`origVoidBox` 拿掉；Worker 協定不動。
 - **A3 的測試斷言改了**：「PF < 舊 Smax 的 1/10」只對刻意的案例成立（整根 fin 長高時 F 被襯層撐大，只有 1.2×）；改用 fin 局部長高（159×）與整結構換空氣（22.7×）兩個案例斷言，另外四個 S ≠ F 的案例只斷言結果和 `relabelFast` 逐位元組相同。
 - **C7 `summarize` 放在 workerCore 的 `apply`／`applyParked` handler**，`applyOpInPlace` 仍回原始 Report（kernel 不知道上限）；`OpReport` 欄位不變。
 - **§10「`previewIn` 不再送 `comps`」**：`compsOf` 以 owner（不是 sid）為 key；新增 `comps` handler 與 `put.comps?`，給 parked → live 與重播後主執行緒要 comps 用。
@@ -668,9 +669,9 @@ DEV 計數器（`__selMaskMs`、`__diffBoxMs`、`__handleBuilds`、`__bvhBuilds`
 | 主執行緒貼補丁＋diff＋axes（poly 長高 1／縮 1） | 0.2～0.5 | 0.5～2 | 0.8～1.2／4.3～7.1 | `bench.ts step 1 2 3` |
 | 復原堆疊：10 步 poly 長高 1 累計／`trimHist` 截後 | 7.2／7.2 MB（10 筆） | 49.3／49.3 MB（10 筆） | 165.5／165.5 MB（10 筆） | `bench.ts step 1 2 3` |
 | 復原堆疊：50 步基板級 translate 累計／截後（上限 256 MB） | 253／253 MB（50 筆） | 2,023／**244 MB**（6 筆，丟 44） | 6,828／**137 MB**（1 筆，丟 49）；50 步後 Node 記憶體增量 284 MB | `bench.ts mem 1 2 3 --op translate-substrate` |
-| `layer {mat: VOID}` 全量（X-ray 第一次；touch 空） | 57 | **35～71**（整陣列掃描已不在路徑上，剩 mesh） | **82～106** | `bench.ts layer void 1 2 3` |
-| `layer {mat: VOID}` 增量（base＝上一步） | 17 | 21～38 | 80～88 | 同上 |
-| `layer {mat: VOID}` 非相鄰版本（沒有 base；poly 推過一步之後，`voidBoxOf`＝原始 VOID 外框 ∪ touch） | 44 | **231～236**（基線 84） | **579～659**（基線 208） | 同上 |
+| `layer {mat: VOID}` 全量（X-ray 第一次；touch 空）（M15.7 追加 VOID 直方圖後重跑） | 54 | **50**（整陣列掃描已不在路徑上，剩 mesh；改前同日 35～71） | **111**（改前 82～106） | `bench.ts layer void 1 2 3` |
+| `layer {mat: VOID}` 增量（base＝上一步） | 17 | 23 | 78 | 同上 |
+| `layer {mat: VOID}` 非相鄰版本（沒有 base；poly 推過一步之後，`voidBoxOf`＝帳簿 VOID 三軸直方圖的貼合外框） | 44 | **36**（基線 84；改前 231～236） | **65**（基線 208；改前 579～659） | 同上 |
 | 2D 拖頂邊 60 幀（push 路徑）：60 幀中位數／真的算 Op 的幀中位數（基板／Poly 整層） | 0.0／0.6 | 0.0／1.7（Poly 2.0） | 0.0／4.5（Poly 5.2） | `bench.ts drag2 1 2 3` |
 | 2D 拖頂邊左端角節點 60 幀（profile 路徑）：60 幀中位數／真的算 Op 的幀中位數（p95） | 0.0／3.6（10.5） | 0.0／**7.0（13.0）**（Poly 12.3（16.5）） | 0.0／**15.0（20.7）**（Poly 19.1（34.5）） | 同上 |
 | 算 Op 的次數／幀數（`gestureKey` 去重）；profileDelta 次數／幀數（`deltaOf` 實際計數）；位元組相同的 Op 重算 | 0.12；0.30；push 50%／profile 0% | **0.22**；0.60；push 50%／profile 0% | **0.22**；0.60；push 25%／profile 0% | 同上 |
@@ -694,7 +695,7 @@ DEV 計數器（`__selMaskMs`、`__diffBoxMs`、`__handleBuilds`、`__bvhBuilds`
 - **A1 `selMask` 在「結構縮小」的步驟 ×2 9～10 ms／×3 26～35 ms（目標 < 3／< 5）。** 配置已是 0、長高步 3 ms 達標；但 poly 縮 1 的 `stepTouch` 是整根 poly（S ＝ F ＝ 掉了體素的結構的外框，432×127×72 ＝ 3.9 M 格），`patchMask` 要在 S 裡跑兩遍（mask ＋ aff）。這是 A3 的 S 粒度，不是 A1 的問題；要再壓得把「labels 真的變了的格子」的貼合外框（Worker 在 relabel 時順手數，像 axes 那樣）放進 `LastStep`，`patchMask` 只掃它。留作選配。
 - **A3 relabel 快照 fin 左右搬 1 ×3 23.3 MB（目標 ≤ F、×3 < 2 MB）。** PF 現在就等於 F（`S 的 before` 與 PS 相同），143 → 23 MB 是 F ≠ S 省下的；剩下的 23 MB 是 F 本身：fin 整根 lost bbox ∪ R±1 碰到的襯層／STI 外框。目標寫的「< 2 MB」是把 F 估成只有 R，低估了 lost bbox。要再縮只能把「掉了體素的結構」改成只重 flood fill 掉的那塊的連通範圍，涉及 relabel 的正確性論證，不在本計畫做。
 - **×3 一步 Worker apply fin 左右搬 1：563～895 ms（目標 < 500）。** 比基線 629～1,056 少的就是 memcpy 的部分；剩下是 R 裡的 kernel ＋ 在 S（仍包含整個基板 bbox）裡 flood fill ＋ chunk。容器還有別的 e2e 在跑，數字偏保守，但不會壓到 500 以下。
-- **A5 VOID 層「非相鄰版本」在寬 touch 之後 236／659 ms（基線 84／208）。** 第一次開 X-ray（touch 空）從 129／234 降到 35～71／82～106（掃描已不在路徑上，剩 mesh）；但沒有 base 時 `voidBoxOf`＝原始 VOID 外框 ∪ touch 是一個鬆外框，poly 推過一步之後 touch 是整根 poly，mesh 的範圍比舊版 `boxOf` 掃出來的貼合 VOID 外框大很多。切 split、復原跳好幾步會走到這條。修法：Book 裡維護貼合的 VOID 外框（每步從補丁的 before／after 差量更新，像 axes），或 `voidBoxOf` 先和「這一步 S 裡真的有 VOID 的 chunk」取交集。留作下一輪。
+- **A5 VOID 層「非相鄰版本」在寬 touch 之後 236／659 ms（基線 84／208）——已解決（M15.7 追加）。** 原因是 `voidBoxOf`＝原始 VOID 外框 ∪ touch 是鬆外框，poly 推過一步之後 touch 是整根 poly，mesh 的範圍比舊版 `boxOf` 掃出來的貼合 VOID 外框大很多。改成 Book 裡維護 VOID 的三軸直方圖（`voidAxes`，和 A2 的 axes 同一套：每步在 `carryStepStats` 的同一個迴圈裡差量、`pastePatch` 在 box 裡差量、`put` 重數一次），`voidBoxOf = boxOfAxes(voidAxes)` 是貼合外框、O(X+Y+Z)。同一台重跑：非相鄰版本 **44／36／65 ms**（×2、×3 都低於基線 84／208，也低於全量 50／111，因為沒有 base 時 mesh 的 chunk 數和貼合外框一樣少）；全量、增量不變（54／50／111、17／23／78）。`worker.test.ts` 每個 handler 之後斷言 `boxOfAxes(voidAxes)` === 整陣列暴力的 VOID 外框，並有「相隔兩角各改一次、再切到非相鄰版本」只算貼合外框碰到的 chunk 的案例。
 - **C4 解碼批次在 Node 只到 0.46～0.64×（目標 ≤ 1/3）。** `DecompressionStream` 每條 ~0.2 ms 固定成本且不並行（Node 的 zlib 綁定在同一條 thread pool 排隊），15,360 塊就是 3 s 地板；瀏覽器實測另記（協調者補）。再快要用 `node:zlib` 的同步 inflate（Node 專用）或把 block 併成更大的 chunk 再 inflate（格式不允許）。
 - **C2 匯出 20 個 vti1 zip 主執行緒 heap 瞬時尖峰 +147 MB（目標 ≤ 1 個 split ＋ 32 MB ＝ 47 MB；M15.5 初測，協調者重跑後以 §3 為準）。** Blob／串流 sink 要抄每段、Worker transfer 來的 buffer 等 GC；gc 後只剩 +6 MB，所以是 GC 時機不是常駐。再壓要把 buffer transfer 回 Worker 重用，留作選配。Node 裡的 `ZipWriter` 本身不複製資料段（arrayBuffers 增量 0）。
 - **C1 同格式匯出 ×2 改 2 萬格 280～305 ms（目標 < 300，邊緣）。** 重壓數已經是碰到的 block 數（320／15,360）；剩下是 320 塊 inflate ＋ deflate ＋ 原檔 1.3 MB 的 XML／appended 區塊拷貝。×3 378 ms。

@@ -171,32 +171,65 @@ describe('單本帳簿的 Worker 協定（plan v9 §4.2）', () => {
 
 describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview 不送 comps', () => {
   const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+  /** 暴力：整個陣列裡 VOID 的貼合外框（M15.7 A5 的對照）。 */
+  const voidBoxBrute = (d: { X: number; Y: number; Z: number }, data: Uint8Array) => {
+    const b = { x0: d.X, x1: -1, y0: d.Y, y1: -1, z0: d.Z, z1: -1 };
+    for (let z = 0, i = 0; z < d.Z; z++)
+      for (let y = 0; y < d.Y; y++)
+        for (let x = 0; x < d.X; x++, i++)
+          if (data[i] === 254) {
+            if (x < b.x0) b.x0 = x;
+            if (x > b.x1) b.x1 = x;
+            if (y < b.y0) b.y0 = y;
+            if (y > b.y1) b.y1 = y;
+            if (z < b.z0) b.z0 = z;
+            if (z > b.z1) b.z1 = z;
+          }
+    return b.x1 < 0 ? null : b;
+  };
   const pv = { cap: Infinity, hidden: new Uint8Array(256), palette: new Float32Array(768).fill(0.5), showDiff: false, seq: 1, mesh: false };
 
-  it('每個 handler 之後 diffBoxOfAxes === tightBox（apply／derive／fork／replay／put／restore）', async () => {
-    const { diffBoxOfAxes, tightBox } = await import('./patch');
+  it('每個 handler 之後 diffBoxOfAxes === tightBox、boxOfAxes(voidAxes) === 暴力 VOID 外框（apply／derive／fork／replay／put／restore／applyParked）', async () => {
+    const { boxOfAxes, diffBoxOfAxes, tightBox } = await import('./patch');
     const { applyStepInPlace } = await import('./patch');
     const { extractPatch } = await import('../splits/lifecycle');
+    const { VOID } = await import('./volume');
     const { orig, own, step } = await setup();
     const checkAll = () => {
-      for (const [o, b] of core.inspect().books) if (o !== 'base') expect(diffBoxOfAxes(b.axes)).toEqual(b.diffCount ? tightBox(orig.vol, b.diff!, b.touch) : null);
+      const { books, scratch } = core.inspect();
+      for (const [o, b] of books) if (o !== 'base') expect(diffBoxOfAxes(b.axes)).toEqual(b.diffCount ? tightBox(orig.vol, b.diff!, b.touch) : null);
+      // VOID 直方圖（M15.7 A5）：每本（含原始、scratch）都和整個陣列暴力掃出的貼合 VOID 外框相同
+      for (const [, b] of books) expect(boxOfAxes(b.voidAxes)).toEqual(voidBoxBrute(orig.vol, b.data));
+      if (scratch) expect(boxOfAxes(scratch.voidAxes)).toEqual(voidBoxBrute(orig.vol, scratch.data));
     };
     let s = own('ax', orig);
     await tick();
     checkAll();
     const poly = s.L.comps.find((c) => c.mat === 6)!;
+    const poly2 = s.L.comps.filter((c) => c.mat === 6)[1];
     const fin = s.L.comps.find((c) => c.mat === 3)!;
+    const voidComp = s.L.comps.find((c) => c.mat === VOID)!;
+    expect(voidComp).toBeDefined();
     const full = { axis: 'z' as const, lo: 0, hi: s.vol.Z - 1 };
     const steps: Step[] = [];
     for (const op of [
       { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' },
       { kind: 'translate', keys: [fin.key], scope: { axis: 'z', lo: 40, hi: 90 }, d: [2, 0, 0], backfill: 'orig', follow: true },
+      // 產生新的 VOID（整根 poly 換成空洞）與拿掉原有的 VOID（bamboo defect 補回 Poly）：VOID 外框會長大又縮回
+      { kind: 'material', keys: [poly2.key], scope: full, m: VOID },
+      { kind: 'material', keys: [voidComp.key], scope: full, m: 6 },
       { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: -2, follow: true, backfill: 'orig' },
     ] as Op[]) {
       const r = await step(s, op);
       s = r.next;
       steps.push(r.step);
       checkAll();
+      // material 的兩步真的動到 VOID：外框長大（poly2 整根變空洞）、再縮回（defect 補回去之後只剩 poly2）
+      if (op.kind === 'material') {
+        const bx = voidBoxBrute(orig.vol, core.inspect().books.get('ax')!.data)!;
+        expect(bx).not.toEqual(voidBoxBrute(orig.vol, orig.vol.data));
+        expect(op.m === VOID ? bx.y1 - bx.y0 + 1 : bx.x1 - bx.x0 + 1).toBe(op.m === VOID ? poly2.bbox.y1 - poly2.bbox.y0 + 1 : poly2.bbox.x1 - poly2.bbox.x0 + 1);
+      }
     }
     // 復原兩步、重做一步
     let cur = s;
@@ -217,6 +250,10 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
     const b = core.inspect().books.get('ax3')!;
     const patch = extractPatch(orig.vol, b.data, b.labels, orig.vol.data, orig.L.labels, b.touch, core.inspect().compsOf.get('ax3')!);
     await client.restoreIn('ax4', client.newVersion(), patch);
+    checkAll();
+    // applyParked（scratch：原始 → 貼補丁 → 套 op，補丁裡有新的 VOID）
+    await client.applyParkedIn({ patch, ops: [{ kind: 'material', keys: [poly2.key], scope: full, m: VOID }], matNames, keyCounter: 3000 });
+    expect(core.inspect().scratch).not.toBeNull();
     checkAll();
     // put（帳簿掉了之後補送）
     client.dropOwners(['ax']);
@@ -271,7 +308,8 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
       expect(r.full).toBe(true);
       return r.items.filter((it) => it.m.quads > 0).map((it) => it.k).sort((a, b) => a - b);
     };
-    expect(core.inspect().origVoidBox).not.toBeNull();
+    const { boxOfAxes } = await import('./patch');
+    expect(boxOfAxes(core.inspect().books.get('base')!.voidAxes)).toEqual(voidBoxBrute(vol, vol.data));
     expect(layerOf(300)).toEqual(brute(vol.data));
     // 一步把一根 poly 換成 VOID（新的 VOID 在 touch 裡）
     const L = initialLabeled(vol, matName);
@@ -288,6 +326,53 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
     // mesh 的 {mat: VOID} 路徑也不掃
     core.handle('mesh', { sid: 301, hidden: new Uint8Array(256), only: { mat: VOID }, palette: new Float32Array(768) });
     expect(core.scanStats.boxOf).toBe(n + 1);
+  }, 30_000);
+
+  it('VOID 層（A5，M15.7）：相隔兩角各改一次（touch 撐到整個 X×Z）再切到非相鄰版本，只算貼合 VOID 外框碰到的 chunk', async () => {
+    const { chunkBox, chunkCount, chunksTouching, gridOf } = await import('./chunks');
+    const { unionBox } = await import('./patch');
+    const { VOID } = await import('./volume');
+    const vol = demoVolume();
+    core.handle('load', { sid: 400, vol: { ...vol, data: vol.data.slice() } });
+    const L = initialLabeled(vol, matName);
+    const sub = L.comps.reduce((a, c) => (c.count > a.count ? c : a));
+    const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+    const top = sub.bbox.y0;
+    const pushAt = (center: [number, number, number]): Op => ({ kind: 'push', keys: [sub.key], scope: full, dir: [0, -1, 0], n: 1, follow: false, backfill: 'orig', local: { center, radius: 3, shape: 'square' } });
+    core.handle('fork', { owner: 'cn', src: 'base', sid: 400 });
+    core.handle('apply', { owner: 'cn', from: 400, to: 401, comps: L.comps, op: pushAt([1, top, 1]), matNames, keyCounter: 1000 });
+    expect(core.inspect().heads.get('cn')).toBe(401);
+    core.handle('apply', { owner: 'cn', from: 401, to: 402, comps: core.inspect().compsOf.get('cn')!, op: pushAt([vol.X - 2, top, vol.Z - 2]), matNames, keyCounter: 1100 });
+    expect(core.inspect().heads.get('cn')).toBe(402);
+    const b = core.inspect().books.get('cn')!;
+    // touch 已經撐到整個 X×Z；VOID 本身沒動
+    expect([b.touch!.x0, b.touch!.x1, b.touch!.z0, b.touch!.z1]).toEqual([0, vol.X - 1, 0, vol.Z - 1]);
+    const tight = voidBoxBrute(vol, b.data)!;
+    expect(tight).toEqual(voidBoxBrute(vol, vol.data));
+    const g = gridOf(vol);
+    const want = chunksTouching(vol, g, tight).length;
+    // 舊的鬆外框（原始 VOID 外框 ∪ touch）會多算很多 chunk：這個案例才有鑑別力
+    expect(chunksTouching(vol, g, unionBox(voidBoxBrute(vol, vol.data), b.touch)!).length).toBeGreaterThan(want);
+    // 非相鄰版本（base 是兩步前）→ 全量，但只 mesh 貼合 VOID 外框碰到的 chunk，不多不少
+    const n0 = core.scanStats.layerChunks;
+    const nb = core.scanStats.boxOf;
+    const [r] = core.handle('layer', { sid: 402, key: 'void', filter: { mat: VOID }, tint: [0, 0, 0], base: 400 }) as [{ full: boolean; items: { k: number; m: { quads: number } }[] }, unknown];
+    expect(r.full).toBe(true);
+    expect(core.scanStats.boxOf).toBe(nb);
+    expect(core.scanStats.layerChunks - n0).toBe(want);
+    // 回的 chunk 集合 === 逐 chunk 暴力找 VOID
+    const brute: number[] = [];
+    for (let k = 0; k < chunkCount(g); k++) {
+      const cb = chunkBox(vol, g, k);
+      let any = false;
+      for (let z = cb.z0; z <= cb.z1 && !any; z++) for (let y = cb.y0; y <= cb.y1 && !any; y++) for (let x = cb.x0; x <= cb.x1; x++) if (b.data[(z * vol.Y + y) * vol.X + x] === VOID) { any = true; break; }
+      if (any) brute.push(k);
+    }
+    expect(r.items.filter((it) => it.m.quads > 0).map((it) => it.k).sort((a, c) => a - c)).toEqual(brute);
+    // 沒有 base（切 split／開 X-ray）同樣只算這些 chunk
+    const n1 = core.scanStats.layerChunks;
+    core.handle('layer', { sid: 402, key: 'void', filter: { mat: VOID }, tint: [0, 0, 0] });
+    expect(core.scanStats.layerChunks - n1).toBe(want);
   }, 30_000);
 
   it('previewIn 不送 comps（§10）：Worker 用自己存的 compsOf；結果和帶 comps 相同；原始經 compsIn、掉帳簿經 put 都有', async () => {

@@ -1,7 +1,7 @@
 // 補丁（plan v7 §8.2、§8.3、§10.7）：一步改動＝外框＋外框裡改前、改後的資料。
 // 主執行緒用它從目前的陣列做出下一個版本（memcpy＋貼上），復原貼 before、重做貼 after，
 // 不必每一步都存整個陣列。
-import { type BBox, type Comp, type LabelMove, type Labeled, type Volume, moveLabel } from './volume';
+import { type BBox, type Comp, type LabelMove, type Labeled, type Volume, VOID, moveLabel } from './volume';
 
 type Dims = { X: number; Y: number; Z: number };
 type Arr = Uint8Array | Int32Array;
@@ -114,18 +114,20 @@ export function applyStep(s: { vol: Volume; L: Labeled }, step: Step, dir: 'fwd'
 }
 
 /**
- * 三條軸上每一片各有幾個 diff 格（plan v15 §5.1 A2）：和 diff 一起差量維護，貼合的 diff 外框就是三條軸
- * 第一個與最後一個非 0 的位置，O(X+Y+Z)，不必每步掃整個 touch。
+ * 三條軸上每一片各有幾個「符合條件的格子」（plan v15 §5.1 A2 的 diff、M15.7 的 VOID）：和資料一起差量維護，
+ * 貼合的外框就是三條軸第一個與最後一個非 0 的位置，O(X+Y+Z)，不必每步掃整個 touch 或整個陣列。
  */
-export interface DiffAxes {
+export interface Axes {
   x: Int32Array;
   y: Int32Array;
   z: Int32Array;
 }
-export const newAxes = (dims: Dims): DiffAxes => ({ x: new Int32Array(dims.X), y: new Int32Array(dims.Y), z: new Int32Array(dims.Z) });
-export const copyAxes = (a: DiffAxes): DiffAxes => ({ x: a.x.slice(), y: a.y.slice(), z: a.z.slice() });
-/** 三條軸第一個與最後一個非 0 → 貼合外框；一格 diff 都沒有回傳 null。O(X+Y+Z)。 */
-export function diffBoxOfAxes(a: DiffAxes): BBox | null {
+/** A2 的名字：diff 的三軸直方圖（和 Axes 同一個型別）。 */
+export type DiffAxes = Axes;
+export const newAxes = (dims: Dims): Axes => ({ x: new Int32Array(dims.X), y: new Int32Array(dims.Y), z: new Int32Array(dims.Z) });
+export const copyAxes = (a: Axes): Axes => ({ x: a.x.slice(), y: a.y.slice(), z: a.z.slice() });
+/** 三條軸第一個與最後一個非 0 → 貼合外框；一格都沒有回傳 null。O(X+Y+Z)。 */
+export function boxOfAxes(a: Axes): BBox | null {
   const span = (h: Int32Array): [number, number] => {
     let lo = 0;
     while (lo < h.length && !h[lo]) lo++;
@@ -139,11 +141,13 @@ export function diffBoxOfAxes(a: DiffAxes): BBox | null {
   const [z0, z1] = span(a.z);
   return { x0, x1, y0, y1, z0, z1 };
 }
+/** A2 的名字：diff 直方圖的貼合外框（＝boxOfAxes）。 */
+export const diffBoxOfAxes = boxOfAxes;
 /**
  * 依 diff 重數 axes（整個清零，再數 box 裡的）：box 外的 diff 必須都是 0（restore／貼補丁到原始複本時成立）。
  * O(X+Y+Z + box)；box 為 null＝沒有 diff。
  */
-export function recountAxes(dims: Dims, diff: Uint8Array, box: BBox | null, axes = newAxes(dims)): DiffAxes {
+export function recountAxes(dims: Dims, diff: Uint8Array, box: BBox | null, axes = newAxes(dims)): Axes {
   axes.x.fill(0);
   axes.y.fill(0);
   axes.z.fill(0);
@@ -160,10 +164,32 @@ export function recountAxes(dims: Dims, diff: Uint8Array, box: BBox | null, axes
     }
   return axes;
 }
+/**
+ * 數某個材質的三軸直方圖（M15.7 A5：空洞層的貼合 VOID 外框）：整個清零，再數 box 裡 data[i] === mat 的格子。
+ * box 為 null＝整個陣列（put 收到主執行緒的帳簿時一次 O(N)）。
+ */
+export function recountMatAxes(dims: Dims, data: Uint8Array, mat: number, box: BBox | null, axes = newAxes(dims)): Axes {
+  axes.x.fill(0);
+  axes.y.fill(0);
+  axes.z.fill(0);
+  const b = box ?? { x0: 0, x1: dims.X - 1, y0: 0, y1: dims.Y - 1, z0: 0, z1: dims.Z - 1 };
+  for (let z = b.z0; z <= b.z1; z++)
+    for (let y = b.y0; y <= b.y1; y++) {
+      const row = (z * dims.Y + y) * dims.X;
+      for (let x = b.x0; x <= b.x1; x++)
+        if (data[row + x] === mat) {
+          axes.x[x]++;
+          axes.y[y]++;
+          axes.z[z]++;
+        }
+    }
+  return axes;
+}
 
 /**
  * 補丁在 R 裡對 diff（和原始不同的格子）與材質體積帳的差量更新（plan v9 §4.4）：O(補丁)。
- * data 是已經貼好補丁的陣列；回傳新的 diff 計數。axes 有給就在同一個迴圈裡同步三條軸的 diff 直方圖（A2）。
+ * data 是已經貼好補丁的陣列；回傳新的 diff 計數。axes 有給就在同一個迴圈裡同步三條軸的 diff 直方圖（A2）；
+ * voidAxes 有給就同步 VOID 的三軸直方圖（M15.7 A5：格子從 VOID 變走 −1、變成 VOID ＋1，只在真的改變的格子動）。
  */
 export function carryStepStats(
   dims: Dims,
@@ -174,7 +200,8 @@ export function carryStepStats(
   counts: Float64Array,
   step: Step,
   dir: 'fwd' | 'back' = 'fwd',
-  axes?: DiffAxes,
+  axes?: Axes,
+  voidAxes?: Axes,
 ) {
   const p = step.data;
   if (!p) return diffCount;
@@ -191,6 +218,12 @@ export function carryStepStats(
         if (now === old) continue;
         counts[old]--;
         counts[now]++;
+        if (voidAxes && (old === VOID || now === VOID)) {
+          const dv = now === VOID ? 1 : -1;
+          voidAxes.x[i - row + box.x0] += dv;
+          voidAxes.y[y] += dv;
+          voidAxes.z[z] += dv;
+        }
         const d = now !== orig[i] ? 1 : 0;
         const dd = d - diff[i];
         if (!dd) continue;

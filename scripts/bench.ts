@@ -27,7 +27,7 @@
 //       npx vite-node scripts/bench.ts overlay [scale] [n=200]：n 個 split 疊圖換片一次（overlayEntry＝contourOf 只描 keys 外框＋sliceDiff，進 contourCache）總 ms、
 //         對照 contourOf 'full'；legend 滑過 60 次：頁面是 useMemo 命中（0 次重算），另印快取全命中重組 lines 的每次 ms
 //       npx vite-node scripts/bench.ts thumbs [scale ...]：thumbRGBA 一張（sliceRGBA(crop) 共用裁切窗暫存）的 ms 與配置位元組
-//       npx vite-node scripts/bench.ts layer void [scale ...]：Worker layer {mat: VOID}（X-ray；voidBoxOf＝原始 VOID 外框 ∪ touch）全量、增量、非相鄰版本的 ms
+//       npx vite-node scripts/bench.ts layer void [scale ...]：Worker layer {mat: VOID}（X-ray；voidBoxOf＝帳簿 VOID 三軸直方圖的貼合外框）全量、增量、非相鄰版本的 ms
 import { type BBox, MATERIALS, VOID, type Vec3, demoVolume, greedyMesh, initialLabeled, unionBBox } from '../src/volume/volume';
 import { type EditState, type Op, applyOp, matNameOf } from '../src/volume/ops';
 import { applyOpLocal } from '../src/volume/apply';
@@ -989,7 +989,7 @@ async function benchThumbs(scale: number) {
   );
 }
 
-/** 空洞層（A5）：Worker layer {mat: VOID}（X-ray）全量＝boxOf 掃整個陣列（每格一個 closure）再 mesh；增量（base＝上一步）只看補丁外框；非相鄰版本又是全量。 */
+/** 空洞層（A5）：Worker layer {mat: VOID}（X-ray）全量＝貼合 VOID 外框（M15.7：帳簿的 VOID 三軸直方圖，O(X+Y+Z)；舊版 boxOf 掃整個陣列、每格一個 closure）碰到的 chunk 再 mesh；增量（base＝上一步）只看補丁外框；非相鄰版本又是全量（poly 推過一步之後 touch 是整根 poly，貼合外框不受影響）。 */
 async function benchLayerVoid(scale: number) {
   const core = await import('../src/volume/workerCore');
   const vol = demoVolume(scale);
@@ -1002,7 +1002,7 @@ async function benchLayerVoid(scale: number) {
   let t = performance.now();
   const r0 = core.handle('layer', req(1))[0] as { items: unknown[]; full: boolean };
   const tFull = performance.now() - t;
-  // 同樣的整陣列 closure 掃描在這裡重現（boxOf 沒有 export），估算掃描佔多少
+  // 舊版的整陣列 closure 掃描在這裡重現（boxOf 沒有 export），對照省下多少
   const data = vol.data;
   const test = (i: number) => data[i] === VOID;
   t = performance.now();

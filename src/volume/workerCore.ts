@@ -9,7 +9,7 @@ import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
 import { type TracedHandle, ringCache } from '../slice/relative';
-import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, copyAxes, diffBoxOfAxes, newAxes, recountAxes, unionBox } from './patch';
+import { type Axes, type DiffAxes, type Step, applyStepInPlace, boxOfAxes, carryStepStats, copyAxes, newAxes, recountAxes, recountMatAxes, unionBox } from './patch';
 import { type OpReport, summarize } from './report';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
 import { type SplitPatch, type SplitStats, applyPatch, extractPatch, patchStats, stepTouch } from '../splits/lifecycle';
@@ -168,6 +168,8 @@ export interface Book {
   counts: Float64Array;
   /** 三條軸的 diff 直方圖（plan v15 A2）：貼合的 diff 外框 O(X+Y+Z)，不再每步掃寬鬆外框。 */
   axes: DiffAxes;
+  /** VOID 的三軸直方圖（plan v15 A5，M15.7）：空洞層的貼合 VOID 外框 O(X+Y+Z)，只在 data 真的改變的格子旁邊差量維護。 */
+  voidAxes: Axes;
   /** 所有改過的範圍（data、labels 的 S、換編號的結構外框）的聯集：外面和原始逐位元組相同（park／scratch 只碰這裡）。 */
   touch: BBox | null;
 }
@@ -179,12 +181,10 @@ const heads = new Map<string, number>();
 /** 每個版本從哪一版、改了哪個外框來的（box：體素；labelBox：結構編號，⊇ box）。chunk／圖層只重算改到的地方。 */
 const parents = new Map<number, { from: number; box: BBox | null; labelBox: BBox | null }>();
 let origSid = 0;
-/** 原始裡 VOID 的外框（plan v15 A5）：載入時數體積帳的同一個迴圈順手算；之後 VOID 只會在 touch 裡出現或消失。 */
-let origVoidBox: BBox | null = null;
 /** 每本帳簿現在的結構清單（plan v15 §10）：apply／derive／replay／restore／put／comps 都會更新，拖拉預覽用它、不必每幀送。 */
 const compsOf = new Map<string, Comp[]>();
-/** 測試用：整陣列掃描的次數（A5：VOID 層不該呼叫 boxOf）。 */
-export const scanStats = { boxOf: 0 };
+/** 測試用：整陣列掃描的次數（A5：VOID 層不該呼叫 boxOf）與 layer 算過的 chunk 數（VOID 層只該算貼合 VOID 外框碰到的）。 */
+export const scanStats = { boxOf: 0, layerChunks: 0 };
 /** 拖拉預覽的每片輪廓快取（§4.5）：只對 previewSid 有效。 */
 const rings = ringCache();
 let previewSid = -1;
@@ -192,7 +192,7 @@ let previewSid = -1;
 export const previewStats = rings.stats;
 
 /** 測試用：看 Worker 的內部狀態。 */
-export const inspect = () => ({ books, heads, parents, origSid, compsOf, origVoidBox, pendingRaw, exportRaw, exportFractions });
+export const inspect = () => ({ books, heads, parents, origSid, compsOf, scratch, pendingRaw, exportRaw, exportFractions });
 
 const origBook = () => books.get(BASE_OWNER)!;
 const volOf = (b: Book): Volume => ({ X: dims.X, Y: dims.Y, Z: dims.Z, data: b.data });
@@ -220,26 +220,23 @@ function countAll(data: Uint8Array) {
   for (let i = 0; i < data.length; i++) out[data[i]]++;
   return out;
 }
-/** 載入時的一次掃描：體積帳＋ VOID 的外框（同一個迴圈，plan v15 A5）。 */
+/** 載入時的一次掃描：體積帳＋ VOID 的三軸直方圖（同一個迴圈，plan v15 A5）。 */
 function countAllAndVoid(v: Volume) {
   const { X, Y, Z, data } = v;
   const out = new Float64Array(256);
-  const b: BBox = { x0: X, x1: -1, y0: Y, y1: -1, z0: Z, z1: -1 };
+  const va = newAxes(v);
   for (let z = 0, i = 0; z < Z; z++)
     for (let y = 0; y < Y; y++)
       for (let x = 0; x < X; x++, i++) {
         const m = data[i];
         out[m]++;
         if (m === VOID) {
-          if (x < b.x0) b.x0 = x;
-          if (x > b.x1) b.x1 = x;
-          if (y < b.y0) b.y0 = y;
-          if (y > b.y1) b.y1 = y;
-          if (z < b.z0) b.z0 = z;
-          if (z > b.z1) b.z1 = z;
+          va.x[x]++;
+          va.y[y]++;
+          va.z[z]++;
         }
       }
-  return { counts: out, voidBox: b.x1 < 0 ? null : b };
+  return { counts: out, voidAxes: va };
 }
 function copyBook(b: Book): Book {
   const N = b.data.length;
@@ -250,20 +247,21 @@ function copyBook(b: Book): Book {
     diffCount: b.diffCount,
     counts: b.counts.slice(),
     axes: copyAxes(b.axes),
+    voidAxes: copyAxes(b.voidAxes),
     touch: b.touch ? { ...b.touch } : null,
   };
 }
 /** 貼合的 diff 外框（plan v12 §5.2；v15 A2 改從三條軸的直方圖來，O(X+Y+Z)）。 */
 export function diffBoxOf(b: Book): BBox | null {
   if (!b.diff || !b.diffCount) return null;
-  return diffBoxOfAxes(b.axes);
+  return boxOfAxes(b.axes);
 }
 /** 一步補丁之後：touch union 這一步碰到的範圍（復原也 union）。diff 外框由 axes 差量維護，不必在這裡記。 */
 const growTouch = (b: Book, step: Step) => {
   b.touch = unionBox(b.touch, stepTouch(step));
 };
-/** VOID 的外框（plan v15 A5）：原始的 VOID 外框 ∪ touch——VOID 只會在改過的範圍裡出現或消失，不必掃整個陣列。 */
-const voidBoxOf = (b: Book): BBox | null => unionBox(origVoidBox, b.touch);
+/** VOID 的貼合外框（plan v15 A5，M15.7）：從帳簿的 VOID 三軸直方圖來，O(X+Y+Z)；不掃整個陣列、也不是 touch 那種鬆外框。 */
+const voidBoxOf = (b: Book): BBox | null => boxOfAxes(b.voidAxes);
 
 /** 重複使用的帳簿（plan v12 §5.3）：產生 split、對 parked split 套用、匯出 parked split 都在這裡算，不另外 fork。 */
 let scratch: Book | null = null;
@@ -285,8 +283,9 @@ function resetScratch(src: Book): Book {
   }
   b.counts = src.counts.slice();
   b.diffCount = src.diffCount;
-  // scratch 的 diff 現在和 src 的逐位元組相同（touch 外都是 0），直方圖直接複製
+  // scratch 的 data、diff 現在和 src 的逐位元組相同（touch 外都和原始相同），兩種直方圖直接複製
   b.axes = copyAxes(src.axes);
+  b.voidAxes = copyAxes(src.voidAxes);
   b.touch = src.touch ? { ...src.touch } : null;
   return b;
 }
@@ -294,6 +293,25 @@ const boxSizeOf = (b: BBox) => (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1) * (b.z1 - b
 /** 補丁貼到 b（b 必須是原始的內容）：data、labels、diff、體積帳、外框。 */
 function pastePatch(b: Book, p: SplitPatch) {
   const o = origBook();
+  if (p.box) {
+    // VOID 直方圖差量（A5）：貼之前在 box 裡逐格比「現在的 data」和「補丁要貼的」，從 VOID 變走 −1、變成 VOID ＋1
+    const bx = p.box;
+    const va = b.voidAxes;
+    const W = bx.x1 - bx.x0 + 1;
+    for (let z = bx.z0, k = 0; z <= bx.z1; z++)
+      for (let y = bx.y0; y <= bx.y1; y++) {
+        const row = (z * dims.Y + y) * dims.X + bx.x0;
+        for (let x = 0; x < W; x++, k++) {
+          const old = b.data[row + x];
+          const now = p.data[k];
+          if (old === now || (old !== VOID && now !== VOID)) continue;
+          const dv = now === VOID ? 1 : -1;
+          va.x[bx.x0 + x] += dv;
+          va.y[y] += dv;
+          va.z[z] += dv;
+        }
+      }
+  }
   applyPatch(dims, b.data, b.labels, p);
   const st = patchStats(dims, p, o.data, o.counts);
   if (p.box) {
@@ -338,7 +356,7 @@ const ctxOf = (matNames: Record<number, string>, keyCounter: number) => {
 function applyTo(b: Book, comps: Comp[], op: Op, ctx: ReturnType<typeof ctxOf>['ctx']) {
   const r = applyOpInPlace({ vol: volOf(b), L: { labels: b.labels, comps } }, op, ctx);
   if (r.step.data) {
-    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd', b.axes);
+    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd', b.axes, b.voidAxes);
     growTouch(b, r.step);
   }
   return r;
@@ -401,9 +419,8 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     dims = { X: vol.X, Y: vol.Y, Z: vol.Z };
     compsOf.clear();
     const { labels, raw } = labelComponents(vol);
-    const { counts, voidBox } = countAllAndVoid(vol);
-    origVoidBox = voidBox;
-    books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, axes: newAxes(dims), touch: null });
+    const { counts, voidAxes } = countAllAndVoid(vol);
+    books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, axes: newAxes(dims), voidAxes, touch: null });
     scratch = null;
     exportBuf = null;
     heads.set(BASE_OWNER, sid);
@@ -442,7 +459,8 @@ export const handlers: { [K in Kind]: Handler<K> } = {
         diffCount++;
       }
     const all: BBox = { x0: 0, x1: dims.X - 1, y0: 0, y1: dims.Y - 1, z0: 0, z1: dims.Z - 1 };
-    books.set(owner, { data: vol.data, labels, diff, diffCount, counts: countAll(vol.data), axes: recountAxes(dims, diff, diffCount ? all : null), touch: all });
+    // 主執行緒送來的整本帳簿：diff 與 VOID 直方圖各一次 O(N) 重數
+    books.set(owner, { data: vol.data, labels, diff, diffCount, counts: countAll(vol.data), axes: recountAxes(dims, diff, diffCount ? all : null), voidAxes: recountMatAxes(dims, vol.data, VOID, null), touch: all });
     heads.set(owner, sid);
     return [null, []];
   },
@@ -481,7 +499,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     const b = bookAt(owner, from);
     const cs = applyStepInPlace(dims, b.data, b.labels, step, dir);
     if (cs) compsOf.set(owner, cs);
-    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, step, dir, b.axes);
+    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, step, dir, b.axes, b.voidAxes);
     growTouch(b, step);
     heads.set(owner, to);
     parents.set(to, { from, box: step.data?.box ?? null, labelBox: step.labels?.box ?? step.data?.box ?? null });
@@ -614,7 +632,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       let box: BBox | null;
       if ('mat' in only) {
         test = (i) => vol.data[i] === only.mat;
-        // 空洞層（A5）：原始的 VOID 外框 ∪ touch；其他材質才掃整個陣列
+        // 空洞層（A5）：帳簿的 VOID 直方圖給貼合外框；其他材質才掃整個陣列
         box = only.mat === VOID ? voidBoxOf(stateOf(sid).book) : boxOf(vol, test);
       } else {
         const on = new Uint8Array(Math.max(1, ...only.comps.map((c) => c + 1)));
@@ -680,7 +698,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     } else if ('mat' in filter) {
       const mat = filter.mat;
       code = (i) => (data[i] === mat ? 1 : 0);
-      // 空洞層（A5）：VOID 只會在原始的 VOID 外框與 touch 裡，不掃整個陣列；其他材質在全量時才 boxOf
+      // 空洞層（A5）：帳簿的 VOID 直方圖給貼合外框（O(X+Y+Z)），不掃整個陣列；其他材質在全量時才 boxOf
       box = mat === VOID ? voidBoxOf(book) : null;
     } else {
       sel = true;
@@ -716,6 +734,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     const color = (c: number): [number, number, number] =>
       c === REMOVED && isDiff ? REMOVED_RGB : palette ? [palette[c * 3], palette[c * 3 + 1], palette[c * 3 + 2]] : tint;
     const items: ChunkItem[] = [];
+    scanStats.layerChunks += ks.length;
     for (const k of ks) {
       const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
       if (inflate) for (let i = 0; i < m.positions.length; i++) m.positions[i] += m.normals[i] * inflate;

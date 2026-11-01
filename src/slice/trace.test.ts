@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ringPolygon, traceRings } from './trace';
 import { deltaOf, editRing, rasterize } from './raster';
+import { profileDelta } from './gestures';
+import { encodeRle } from '../volume/rle';
+import type { Ring, XY } from './trace';
 
 /** 字元圖 → 格子（# = 結構）。 */
 function grid(rows: string[]) {
@@ -100,5 +103,69 @@ describe('光柵化與差（§10.2）', () => {
     expect(after[5 * g.W + 3]).toBe(1);
     expect(remove.every((c) => c.u >= 3)).toBe(true);
     expect(remove.every((c) => c.dir === 0 || c.dir === 3)).toBe(true);
+  });
+});
+
+/** v14 的 profileDelta（外框＝所有環改前 ∪ 改後）：對照用。 */
+function profileDeltaRef(rs: Ring[], ring: number, disp: XY[], inside: (u: number, v: number) => boolean) {
+  const after = rs.map((r, i) => (i === ring ? editRing(r, disp) : ringPolygon(r)));
+  let u0 = Infinity;
+  let v0 = Infinity;
+  let u1 = -Infinity;
+  let v1 = -Infinity;
+  for (const p of [...after, ...rs.map(ringPolygon)])
+    for (const [u, v] of p) {
+      u0 = Math.min(u0, Math.floor(u) - 1);
+      v0 = Math.min(v0, Math.floor(v) - 1);
+      u1 = Math.max(u1, Math.ceil(u) + 1);
+      v1 = Math.max(v1, Math.ceil(v) + 1);
+    }
+  const W = u1 - u0 + 1;
+  const H = v1 - v0 + 1;
+  const before = new Uint8Array(W * H);
+  for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) if (inside(u + u0, v + v0)) before[v * W + u] = 1;
+  const { add, remove } = deltaOf(before, rasterize(after, u0, v0, W, H), u0, v0, W, H);
+  if (!add.length && !remove.length) return null;
+  return { add: encodeRle(add), remove: encodeRle(remove) };
+}
+
+describe('profileDelta 外框只看改的環（plan v15 B3）', () => {
+  const cases = [
+    // 有洞：外環＋內環
+    grid(['..........', '.########.', '.#......#.', '.#..##..#.', '.#..##..#.', '.#......#.', '.########.', '..........']),
+    // 兩塊分開的結構（同一個 key 兩個環）
+    grid(['............', '.###....###.', '.###....###.', '.###....###.', '............']),
+    // 三個環：大塊＋洞＋遠處的小塊
+    grid(['...............', '.#######.......', '.#.....#.......', '.#.###.#.......', '.#.###.#....##.', '.#.....#....##.', '.#######.......', '...............']),
+  ];
+  it('每個環、每個頂點、幾種位移：和舊版（所有環的聯集外框）的 RLE 逐欄相同', () => {
+    let n = 0;
+    let nonNull = 0;
+    for (const g of cases) {
+      const rings = traceRings(g.inside, 0, 0, g.W - 1, g.H - 1);
+      expect(rings.length).toBeGreaterThanOrEqual(2);
+      rings.forEach((r, ri) => {
+        for (let i = 0; i < r.pts.length; i++)
+          for (const d of [
+            [1, 0],
+            [0, -1],
+            [-1, 1],
+            [2, 2],
+            [0, 0],
+          ] as XY[]) {
+            const disp = r.pts.map((_, k) => (k === i ? d : ([0, 0] as XY)));
+            const a = profileDelta(rings, ri, disp, g.inside);
+            const b = profileDeltaRef(rings, ri, disp, g.inside);
+            expect(a).toEqual(b);
+            n++;
+            if (a) nonNull++;
+          }
+        // 整個環平移（含洞縮小／放大）
+        const all = r.pts.map(() => [1, -1] as XY);
+        expect(profileDelta(rings, ri, all, g.inside)).toEqual(profileDeltaRef(rings, ri, all, g.inside));
+      });
+    }
+    expect(n).toBeGreaterThan(50);
+    expect(nonNull).toBeGreaterThan(20);
   });
 });

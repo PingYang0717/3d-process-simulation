@@ -113,6 +113,14 @@ export function mirroredOp(
   const perKey: Record<string, { add: Rle2D; remove: Rle2D }> = {};
   const gestures: Record<string, RelGesture> = {};
   for (const [, c] of [[h.key, h] as [string, Handle], ...pairs]) {
+    // 主 key 已經在 main 裡算過（plan v15 B3）：直接拿 main 的 perKey／gestures，不再第二次 profileDelta。
+    // main 是 push（但對應的不是全部同樣的 push）時 main 沒有 perKey，才照一般路徑算。
+    if (c === h && main.kind === 'profile') {
+      perKey[c.key] = main.perKey[c.key];
+      const rel = main.gestures?.[c.key];
+      if (rel) gestures[c.key] = rel;
+      continue;
+    }
     const r = rings.get(c.key)![c.ring];
     const dl = c === h ? delta : deltaFor(c);
     const pd = profileDelta(rings.get(c.key)!, c.ring, dragDisp(r, c, dl, shift), (u, v) => g.inside(c.key, u, v));

@@ -10,7 +10,11 @@ import { type Shape, mirroredOp } from '../../slice/mirror';
 import { type ModelStore, type SliceModel, applyDisp, exactOp, locate, ringsOf, translateKeys } from '../../slice/model';
 import { type GestureOpts, type PickedHandle, sliceRings } from './SliceEditor';
 
-/** 一片上的手勢環境：環、inside、外框、形狀（對應用）。 */
+/**
+ * 一片上的手勢環境：環、inside、外框、形狀（對應用）。
+ * plan v15 A4：Shape.area 是 lazy getter——只有「對應」配對（mirror 且多選，counterparts → alike）才讀它，
+ * 讀到時才掃外框數格、算過一次就記住；areaOf(key) 同一份。每步重建 context 不再對每個 key 掃整個 bbox。
+ */
 export function sliceContext(L: Labeled, vol: Volume, axis: Axis, at: number, keys: string[], opts: GestureOpts, rings?: Map<string, Ring[]>) {
   const rs = rings ?? sliceRings(L, vol, axis, at, keys);
   const [ua, va] = planeAxes(axis);
@@ -37,10 +41,21 @@ export function sliceContext(L: Labeled, vol: Volume, axis: Axis, at: number, ke
           v1 = Math.max(v1, v - 1);
         }
     if (u0 > u1) continue;
-    let area = 0;
-    for (let v = v0; v <= v1; v++) for (let u = u0; u <= u1; u++) if (inside(key, u, v)) area++;
-    shapes.set(key, { box: { u0, v0, u1, v1 }, mat: L.comps[idxOf.get(key)!].mat, area });
+    let area = -1;
+    shapes.set(key, {
+      box: { u0, v0, u1, v1 },
+      mat: L.comps[idxOf.get(key)!].mat,
+      get area() {
+        if (area < 0) {
+          area = 0;
+          for (let v = v0; v <= v1; v++) for (let u = u0; u <= u1; u++) if (inside(key, u, v)) area++;
+        }
+        return area;
+      },
+    });
   }
+  /** 這個結構在這一片的格數（lazy，同 shapes.get(key).area）。 */
+  const areaOf = (key: string) => shapes.get(key)?.area ?? 0;
   const g: GestureCtx = {
     axis,
     at,
@@ -52,7 +67,7 @@ export function sliceContext(L: Labeled, vol: Volume, axis: Axis, at: number, ke
     inside,
     sliceBox: (key) => shapes.get(key)?.box ?? null,
   };
-  return { rings: rs, inside, shapes, g };
+  return { rings: rs, inside, shapes, areaOf, g };
 }
 export type SliceCtx = ReturnType<typeof sliceContext> & { model?: SliceModel };
 

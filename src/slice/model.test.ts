@@ -4,12 +4,13 @@ import { type EditState, type Op, matNameOf } from '../volume/ops';
 import { applyOpLocal } from '../volume/apply';
 import { sliceRings } from '../pages/Section3D/SliceEditor';
 import { sliceContext } from '../pages/Section3D/handleOps';
-import { type Handle, dragDisp, gestureToOp } from './gestures';
+import { type Handle, dragDisp, gestureKey, gestureToOp } from './gestures';
 import { dragDispFloat, resolveNodeDrag } from './snap';
 import type { Ring, XY } from './trace';
 import {
   ModelStore,
   applyDisp,
+  modelStats,
   exactOp,
   buildSliceModel,
   insertNode,
@@ -279,4 +280,151 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     expect(op.kind === 'profile' && op.text?.startsWith('角')).toBe(true);
     expect(op.kind === 'profile' && op.gestures?.[fins[0].key]?.drag).toBe('corner');
   }, 30_000);
+
+  // ---- plan v15 M15.3 ----
+  it('gestureKey 相同 ⇒ gestureToOp 的 Op JSON 相同；profile／translate 的 JSON 相同 ⇒ key 相同（B3）', () => {
+    const c = sliceContext(base.L, vol, 'z', 26, keys, opts());
+    const hs = allHandles(c.rings).filter((_, i) => i % 2 === 0);
+    const region: Handle = { kind: 'region', key: keys[0], ring: -1, index: -1 };
+    const vals = [-2.4, -1.6, -0.4, 0, 0.3, 0.6, 1.4, 2.5];
+    const deltas: XY[] = vals.flatMap((du) => vals.map((dv) => [du, dv] as XY));
+    let total = 0;
+    let dedup = 0;
+    for (const h of [...hs, region])
+      for (const mode of ['falloff', 'corner', false, true] as const) {
+        const byKey = new Map<string, string>();
+        const byJson = new Map<string, string>();
+        for (const d of deltas) {
+          const key = gestureKey(c.rings, h, d, mode);
+          const json = JSON.stringify(gestureToOp(c.rings, h, d, mode, c.g));
+          total++;
+          const prev = byKey.get(key);
+          if (prev !== undefined) {
+            expect(json).toBe(prev);
+            dedup++;
+          } else byKey.set(key, json);
+          // push 沒有記 RelGesture.delta（同 n 的不同 (du,dv) 是同一個 Op）：只對 profile／translate 檢查反方向
+          if (json !== 'null' && !json.startsWith('{"kind":"push"')) {
+            const pk = byJson.get(json);
+            if (pk !== undefined) expect(pk).toBe(key);
+            else byJson.set(json, key);
+          }
+        }
+      }
+    // 浮點位移落在同一格之間的很多：至少 1/4 的幀不必重算
+    expect(dedup).toBeGreaterThan(total / 4);
+  });
+
+  const sameGeom = (a: ReturnType<typeof snapshot>, b: ReturnType<typeof snapshot>) => {
+    expect(a.vertices).toEqual(b.vertices);
+    expect(a.rings).toEqual(b.rings);
+    expect([...a.exact]).toEqual([...b.exact]);
+    expect(a.handles).toEqual(b.handles);
+    expect(a.custom).toEqual(b.custom);
+    expect(a.removed).toEqual(b.removed);
+    expect(a.edited).toEqual(b.edited);
+    expect(a.origin).toEqual(b.origin);
+  };
+
+  it('倉庫：這一步沒碰這一片（touched=false）→ 不驗證、不重描、同一份模型，快照存指標（扁平）；還原回來 deep-equal（A4、D2）', () => {
+    const store = new ModelStore();
+    const k = [fins[0].key];
+    const g1 = store.get(base.L, vol, 'z', 26, k, 1, 0).model;
+    const s1 = snapshot(g1);
+    const t0 = modelStats.traced;
+    const v0 = modelStats.verified;
+    const g2 = store.get(base.L, vol, 'z', 26, k, 2, 1, false).model;
+    expect(g2).toBe(g1);
+    expect(g2.baseVersion).toBe(2);
+    expect(modelStats.traced).toBe(t0);
+    expect(modelStats.verified).toBe(v0);
+    expect(store.snapOf('z', 26, 2)).toEqual({ alias: true, sameAs: 1 });
+    // 再一步沒碰：指標仍指向實體，不鏈
+    store.get(base.L, vol, 'z', 26, k, 3, 2, false);
+    expect(store.snapOf('z', 26, 3)).toEqual({ alias: true, sameAs: 1 });
+    expect(store.counts()).toEqual({ entities: 1, aliases: 2 });
+    expect(modelStats.verified).toBe(v0);
+    // 復原到版本 2（指標）：還原出來的幾何 deep-equal 版本 1 的實體快照
+    const back = store.get(base.L, vol, 'z', 26, k, 2, 2).model;
+    expect(back).not.toBe(g1);
+    sameGeom(back, s1);
+    expect(modelStats.verified).toBe(v0);
+    // 從指標還原出來的模型再走沒碰到的一步：還是指標（不多存一份）
+    store.get(base.L, vol, 'z', 26, k, 4, 3, false);
+    expect(store.snapOf('z', 26, 4)).toEqual({ alias: true, sameAs: 1 });
+    expect(store.counts()).toEqual({ entities: 1, aliases: 3 });
+    // 對照：touched 省略（＝true）就驗證；驗證通過、沒人改幾何 → 也是指標
+    store.get(base.L, vol, 'z', 26, k, 5, 4);
+    expect(modelStats.verified).toBe(v0 + 1);
+    expect(store.snapOf('z', 26, 5)).toEqual({ alias: true, sameAs: 1 });
+  });
+
+  it('倉庫：幾何改過（加節點，rev 變了）之後的沒碰到的一步存實體快照；之後再沒碰才又是指標', () => {
+    const store = new ModelStore();
+    const k = [fins[0].key];
+    const g1 = store.get(base.L, vol, 'z', 26, k, 1, 0).model;
+    const r = ringsOf(g1, k).get(fins[0].key)![0];
+    const seg = r.raw.findIndex((x) => x.length > 3);
+    insertNode(g1, fins[0].key, 0, seg, 1);
+    store.get(base.L, vol, 'z', 26, k, 2, 1, false);
+    expect(store.snapOf('z', 26, 2)).toEqual({ alias: false });
+    store.get(base.L, vol, 'z', 26, k, 3, 2, false);
+    expect(store.snapOf('z', 26, 3)).toEqual({ alias: true, sameAs: 2 });
+    expect(store.counts()).toEqual({ entities: 2, aliases: 1 });
+  });
+
+  it('倉庫：SNAP_BYTES 超過時最舊的被逐、被指標參考的實體不逐；prune 只留 live 版本（D2）', () => {
+    const saved = ModelStore.SNAP_BYTES;
+    try {
+      const store = new ModelStore();
+      const k = [fins[0].key];
+      const g1 = store.get(base.L, vol, 'z', 26, k, 1, 0).model;
+      const B = store.bytes();
+      // fin 這一片只有幾十個頂點：幾百 B（bytesOf 是估算，只要是正數、三份放不進 2.5 份就夠）
+      expect(B).toBeGreaterThan(100);
+      ModelStore.SNAP_BYTES = Math.floor(B * 2.5);
+      const grow = (version: number) => {
+        const r = ringsOf(g1, k).get(fins[0].key)![0];
+        const seg = r.raw.findIndex((x) => x.length > 3);
+        insertNode(g1, fins[0].key, 0, seg, 1);
+        store.get(base.L, vol, 'z', 26, k, version, version - 1, false);
+      };
+      store.get(base.L, vol, 'z', 26, k, 2, 1, false); // v2 → v1
+      grow(3); // 實體
+      store.get(base.L, vol, 'z', 26, k, 4, 3, false); // v4 → v3
+      expect(store.counts()).toEqual({ entities: 2, aliases: 2 });
+      grow(5); // 第三份實體：超過 2.5 B → 逐最舊：v2（指標）、再 v1（沒人參考了）
+      expect(store.bytes()).toBeLessThanOrEqual(ModelStore.SNAP_BYTES);
+      expect(store.snapOf('z', 26, 1)).toBeNull();
+      expect(store.snapOf('z', 26, 2)).toBeNull();
+      expect(store.snapOf('z', 26, 3)).toEqual({ alias: false });
+      expect(store.snapOf('z', 26, 4)).toEqual({ alias: true, sameAs: 3 });
+      expect(store.snapOf('z', 26, 5)).toEqual({ alias: false });
+      // 被指標參考的實體不逐：復原到 v3（從實體還原）再走一步沒碰到的 v8 → v8 指向 v3。
+      // 把上限壓到只放得下一份：逐的順序是 v4（指標）→ v5（沒人參考的實體）；v3 雖然最舊，但 v8 還指著它，留下
+      const back = store.get(base.L, vol, 'z', 26, k, 3, 7).model;
+      expect(back).not.toBe(g1);
+      store.get(base.L, vol, 'z', 26, k, 8, 7, false);
+      expect(store.snapOf('z', 26, 8)).toEqual({ alias: true, sameAs: 3 });
+      ModelStore.SNAP_BYTES = Math.floor(B * 1.5);
+      store.get(base.L, vol, 'z', 26, k, 9, 8, false); // 再一個指標，觸發 evict
+      expect(store.bytes()).toBeLessThanOrEqual(ModelStore.SNAP_BYTES);
+      expect(store.snapOf('z', 26, 3)).toEqual({ alias: false });
+      expect(store.snapOf('z', 26, 4)).toBeNull();
+      expect(store.snapOf('z', 26, 5)).toBeNull();
+      expect(store.snapOf('z', 26, 8)).toEqual({ alias: true, sameAs: 3 });
+      expect(store.snapOf('z', 26, 9)).toEqual({ alias: true, sameAs: 3 });
+      // prune：只留 live（9 與它指的 3）
+      ModelStore.SNAP_BYTES = saved;
+      store.prune(new Set([9]));
+      expect(store.counts()).toEqual({ entities: 1, aliases: 1 });
+      expect(store.snapOf('z', 26, 3)).toEqual({ alias: false });
+      expect(store.snapOf('z', 26, 8)).toBeNull();
+      store.prune(new Set());
+      expect(store.counts()).toEqual({ entities: 0, aliases: 0 });
+      expect(store.bytes()).toBe(0);
+    } finally {
+      ModelStore.SNAP_BYTES = saved;
+    }
+  });
 });

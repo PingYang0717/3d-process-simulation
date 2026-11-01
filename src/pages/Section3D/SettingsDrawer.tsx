@@ -60,12 +60,12 @@ export function SettingsDrawer({
               ]}
             />
           </Row>
-          <Row label="搬走／縮短後空出來的地方填" sub="「原本的內容」讓往上再往下、長高再縮短都能回到原點">
+          <Row label="搬走／縮短後空出來的地方填" sub="「外層補上」：先回到原本的內容（長高再縮短能回到原點），原本就是這個結構的地方由外面緊鄰的那一層補上，不留空氣（預設）；「原本的內容」：那種地方留空氣">
             <Select
               value={ed.backfill}
               onChange={ed.setBackfill}
               style={{ width: 150 }}
-              options={[{ value: 'orig' as const, label: '原本的內容' }, ...ed.materials.map((m) => ({ value: m.id, label: <MatLabel mat={m} /> }))]}
+              options={[{ value: 'outer' as const, label: '外層補上' }, { value: 'orig' as const, label: '原本的內容' }, ...ed.materials.map((m) => ({ value: m.id, label: <MatLabel mat={m} /> }))]}
             />
           </Row>
         </Section>

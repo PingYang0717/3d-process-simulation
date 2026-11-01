@@ -90,7 +90,7 @@ function EditToolbarImpl({ ed, onTab }: { ed: Editor; onTab: (t: EditTab) => voi
         {tab === 'browse'
           ? `已選 ${name}：按 E 進入聚焦編輯`
           : tab === 'handles'
-            ? '拖箭頭＝整面長縮 · 拖角＝圓頭 · 其他地方拖＝轉視角'
+            ? '順箭頭拖＝長、反方向＝縮 · 拖角＝圓頭 · 其他地方拖＝轉視角'
             : tab === 'brush'
               ? '在已選結構的面上拖＝筆刷；其他地方拖＝轉視角'
               : '拖節點、邊、整塊；E 回瀏覽'}

@@ -1,7 +1,7 @@
 // plan v10 §4.5：3D 把手 → Op 的純函式。
 import { describe, expect, it } from 'vitest';
 import type { BBox } from '../../volume/volume';
-import { cornerHandles, cornerRadius, faceHandles, faceSteps, facesCamera, pickHandle, pushOpOf } from './handles3d';
+import { cornerHandles, cornerRadius, faceAxisName, faceDragWords, faceHandles, faceSteps, facesCamera, pickHandle, pushOpOf } from './handles3d';
 
 const b: BBox = { x0: 10, x1: 19, y0: 20, y1: 39, z0: 0, z1: 99 };
 
@@ -65,5 +65,25 @@ describe('點把手', () => {
     ];
     expect(pickHandle(items, 106, 100)).toBe('b');
     expect(pickHandle(items, 200, 200)).toBeNull();
+  });
+});
+
+describe('面把手的拖法說明（螢幕方向）', () => {
+  it('箭頭朝左：往左拖＝長、往右拖＝縮', () => {
+    expect(faceDragWords(-10, 0, 10)).toEqual({ grow: '往左', shrink: '往右' });
+  });
+  it('箭頭朝右上（螢幕 y 往下為正）', () => {
+    expect(faceDragWords(7, -7, 10)).toEqual({ grow: '往右上', shrink: '往左下' });
+  });
+  it('正對著看：和 faceSteps 一樣用上下', () => {
+    expect(faceDragWords(0.5, 0.5, 10)).toEqual({ grow: '往上', shrink: '往下' });
+  });
+  it('縮得很小（1 格不到 4 px）但斜著看：照箭頭方向，不是上下', () => {
+    expect(faceDragWords(-2, 0.5, 3)).toEqual({ grow: '往左', shrink: '往右' });
+    expect(faceSteps(-20, 0, -2, 0.5, 3, 50)).toBeGreaterThan(0);
+  });
+  it('面的名字用軸', () => {
+    expect(faceAxisName([0, 0, -1])).toBe('z− 面');
+    expect(faceAxisName([1, 0, 0])).toBe('x+ 面');
   });
 });

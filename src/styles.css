@@ -468,7 +468,7 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .sp-stage { display: flex; align-items: center; justify-content: center; height: 220px; padding: 8px; border-radius: 8px; background: var(--lab-face); border: 1px solid var(--lab-line-2); overflow: hidden; }
 .sp-canvas { position: relative; display: inline-block; max-width: 100%; max-height: 100%; line-height: 0; }
 .sp-canvas canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; display: block; }
-.sp-canvas .sp-over { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: auto; pointer-events: none; }
+.sp-canvas .sp-over { position: absolute; top: 0; left: 0; width: 100%; height: 100%; max-width: none; image-rendering: auto; pointer-events: none; }
 .sp-slice { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--c-text-2); }
 .sp-slice-label { flex: none; min-width: 74px; font-variant-numeric: tabular-nums; }
 .sp-slice-label b { color: var(--lab-ink); font-weight: 600; }

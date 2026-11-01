@@ -197,7 +197,7 @@ export interface RoundStats {
  * 圓頭的回填（plan v14 §5.3）：使用者沒指定材質（'orig'）時填「上面那層」——閘極頂原本就是 Poly，照 'orig' 會變空氣。
  * 只有剖面在 y 上（XY、YZ 剖面）才有「上」；XZ 剖面（沿 y）照舊。
  */
-export const roundBackfill = (backfill: Backfill, axis: Axis): Backfill => (backfill === 'orig' && axis !== 'y' ? 'above' : backfill);
+export const roundBackfill = (backfill: Backfill, axis: Axis): Backfill => ((backfill === 'orig' || backfill === 'outer') && axis !== 'y' ? 'above' : backfill);
 
 /**
  * 圓頭的 Op 與參考片統計一次算好（plan v14 P5：面板不再為統計多算一次 roundCells）。

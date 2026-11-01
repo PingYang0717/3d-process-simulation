@@ -58,7 +58,7 @@ import { hiddenTable, palette } from './tables';
 import { DIFF_EDGE_HEX, SEL_RGB, drawSlice } from './drawSlice';
 import { SlicePreviewLayer } from './SlicePreviewLayer';
 import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor';
-import { type Handle3D, HANDLE_PX, cornerHandles, cornerRadius, faceHandles, faceSteps, facesCamera, pickHandle } from './handles3d';
+import { type Handle3D, HANDLE_PX, cornerHandles, cornerRadius, faceAxisName, faceDragWords, faceHandles, faceSteps, facesCamera, isHeadOn, pickHandle } from './handles3d';
 import type { CornerId } from '../../slice/round';
 import { ArrowHelper, OctahedronGeometry } from 'three';
 
@@ -75,8 +75,6 @@ const CORNER_COLOR = 0x722ed1;
 const HANDLE_HOT = 0xfaad14;
 /** 按下後要先拖過這麼多像素才算拖拉，否則一律當點選（避免手抖就改到體素）。 */
 const DRAG_DEAD_ZONE = 8;
-/** 法線在螢幕上短於這麼多像素＝正對著面看，改用垂直位移估算格數。 */
-const HEAD_ON_PX = 4;
 /** 同一個位置再點一次（時間、距離內）＝沿射線選下一個結構。 */
 const RECLICK_MS = 1500;
 const RECLICK_PX = 6;
@@ -1402,8 +1400,14 @@ export function View3D({
         return { ...h, visible: obj.visible, x: ((v.x + 1) / 2) * r.width + r.left, y: ((1 - v.y) / 2) * r.height + r.top };
       });
     };
+  /** 面把手的說明：用螢幕方向說哪邊拖＝長、哪邊拖＝縮（例如「往左拖＝長、往右拖＝縮」）。 */
+  const faceTag = (h: Extract<Handle3D, { kind: 'face' }>) => {
+    const { vx, vy, pxPerVoxel } = screenVectors(h.pos, h.dir);
+    const w = faceDragWords(vx, vy, pxPerVoxel);
+    return `${w.grow}拖＝長、${w.shrink}拖＝縮（${faceAxisName(h.dir)}）`;
+  };
   const handleTip = (h: Handle3D, v: number) => {
-    if (h.kind === 'face') return v ? `${directionName(h.dir)}${v > 0 ? '長' : '縮'} ${Math.abs(v)} vx（${(Math.abs(v) * nmPerVoxel).toFixed(1)} nm）· 放開套用，Esc 取消` : `沿箭頭拖：${directionName(h.dir)}長／縮`;
+    if (h.kind === 'face') return v ? `${faceAxisName(h.dir)}${v > 0 ? '往外長' : '往內縮'} ${Math.abs(v)} vx（${(Math.abs(v) * nmPerVoxel).toFixed(1)} nm）· 放開套用，Esc 取消` : faceTag(h);
     return v ? `圓角 r = ${v}（${(v * nmPerVoxel).toFixed(1)} nm）· 放開套用，Esc 取消` : '往內拖＝圓角半徑；點一下調參數';
   };
   const handleOpOf = (d: NonNullable<typeof hdRef.current>) =>
@@ -1768,7 +1772,7 @@ export function View3D({
       return `${who} 方頭到 ${'xyz'[a]} = ${to}${d.n ? `（再${d.n > 0 ? '外' : '內'} ${Math.abs(d.n)} vx，${nm(d.n)}）` : ''}`;
     }
     if (!d.n) return `${who}：拖動改變格數，Esc 取消`;
-    return `${who} ${directionName(d.dir)}${d.n >= 0 ? '長' : '縮'} ${Math.abs(d.n)} vx（${nm(d.n)}）`;
+    return `${who} ${faceAxisName(d.dir)}${d.n >= 0 ? '往外長' : '往內縮'} ${Math.abs(d.n)} vx（${nm(d.n)}）`;
   };
   /** 游標旁的提示位置（相對畫布）。 */
   const tipPos = (clientX: number, clientY: number) => {
@@ -1974,7 +1978,7 @@ export function View3D({
           n: 0,
           maxN,
           armed: false,
-          headOn: Math.hypot(vx, vy) < HEAD_ON_PX,
+          headOn: isHeadOn(vx, vy, pxPerVoxel),
           pxPerVoxel,
           hitVoxel: coordsOf(h.p),
           mode: brushRef.current.mode,
@@ -2061,8 +2065,8 @@ export function View3D({
             showRing(null, null);
             showHoverBox(null);
             host.style.cursor = 'grab';
-            setHoverTag({ text: hh.kind === 'face' ? `拖＝${directionName(hh.dir)}長／縮` : '拖＝圓角半徑，點一下調參數', ...pos });
-            onHover(hh.kind === 'face' ? `面把手：沿箭頭拖＝${directionName(hh.dir)}整面長／縮，拖的時候就看得到結果，放開套用；Esc 取消` : '角把手：往內拖＝圓角半徑；點一下開圓頭面板調方圓度、不對稱、凹角');
+            setHoverTag({ text: hh.kind === 'face' ? faceTag(hh) : '拖＝圓角半徑，點一下調參數', ...pos });
+            onHover(hh.kind === 'face' ? `面把手：${faceTag(hh)}——順著箭頭＝整面往外長，反方向＝往內縮；拖的時候就看得到結果，放開套用；Esc 取消` : '角把手：往內拖＝圓角半徑；點一下開圓頭面板調方圓度、不對稱、凹角');
             return;
           }
         }
@@ -2079,10 +2083,11 @@ export function View3D({
             setHoverTag({ text: `點一下：圈內方頭到這面（${dirName}）`, ...pos });
             onHover(`局部方頭（${who}）：點一下把圈內補到這一面；按住再拖可以多 ±n 格；轉視角在別處拖`);
           } else {
-            const { vx, vy } = screenVectors(h.point, h.n);
-            host.style.cursor = Math.hypot(vx, vy) < HEAD_ON_PX || Math.abs(vy) >= Math.abs(vx) ? 'ns-resize' : 'ew-resize';
-            setHoverTag({ text: `拖：${dirName}長／縮`, ...pos });
-            onHover(`局部長／縮（${who}）：按住${dirName}拉＝長、往回推＝縮，放開套用（拖的時候就看得到結果），Esc 取消；轉視角在別處拖`);
+            const { vx, vy, pxPerVoxel } = screenVectors(h.point, h.n);
+            host.style.cursor = isHeadOn(vx, vy, pxPerVoxel) || Math.abs(vy) >= Math.abs(vx) ? 'ns-resize' : 'ew-resize';
+            const w = faceDragWords(vx, vy, pxPerVoxel);
+            setHoverTag({ text: `${w.grow}拖＝長、${w.shrink}拖＝縮（${faceAxisName(h.n)}）`, ...pos });
+            onHover(`局部長／縮（${who}）：${w.grow}拖＝往外長、${w.shrink}拖＝往內縮，放開套用（拖的時候就看得到結果），Esc 取消；轉視角在別處拖`);
           }
           return;
         }
@@ -2098,7 +2103,7 @@ export function View3D({
               ? `剖面：點一下選取 ${comp.label}`
               : selected
                 ? toolRef.current
-                  ? `${comp.label}：拖箭頭＝整面長縮、拖角＝圓頭；其他地方拖＝轉視角`
+                  ? `${comp.label}：順著箭頭拖＝那一面往外長、反方向＝往內縮；拖角＝圓頭；其他地方拖＝轉視角`
                   : `${comp.label}：按 E（或雙擊）進入聚焦編輯；現在拖拉只轉視角`
                 : `點一下選取 ${comp.label}；同一處再點一次＝選它後面的結構；Shift 多選`
             : null,

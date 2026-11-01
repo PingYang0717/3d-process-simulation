@@ -66,9 +66,10 @@ export type Vec3 = [number, number, number];
 export type ZRange = [number, number];
 /**
  * 空出來的體素填什麼：'orig' = 原始陣列在那個位置的材質，或指定編號；
+ * 'outer' = 同 'orig'，但原本就是被拿走的材質時填外面緊鄰的那一層（不留空氣；新 Op 的預設）；
  * 'above' = 上面那層（plan v14 §5.3，只有圓頭的削用：沿 −y 越過結構自己找到的第一格；找不到、或是空氣，照 'orig'）。
  */
-export type Backfill = 'orig' | 'above' | number;
+export type Backfill = 'orig' | 'outer' | 'above' | number;
 
 export const AIR = 0;
 export const VOID = 254;

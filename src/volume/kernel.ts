@@ -46,16 +46,22 @@ export type AboveOf = (i: number, movedMat: number) => number;
 /**
  * 回填：'orig' → 原始陣列該位置；若原本就是被搬走的材質則填 Air。
  * 'above'（plan v14 §5.3）→ above(i) 找到的材質；沒給 above 或找不到 → 照 'orig'。
+ * 'outer' → 和 'orig' 一樣，只是「原本就是被搬走的材質」時改填外面那一層（outer＝沿退的方向緊鄰的材質），
+ *   例如 fin 變窄：HfO₂ 跟著往內、外面的 gate／填充層補上，不會出現空氣；外面是空氣或出界（outer < 0）才填 Air。
  */
-export const fillAt = (orig: Volume, i: number, movedMat: number, backfill: Backfill, above?: AboveOf) => {
+export const fillAt = (orig: Volume, i: number, movedMat: number, backfill: Backfill, above?: AboveOf, outer = -1) => {
   if (typeof backfill === 'number') return backfill;
   if (backfill === 'above' && above) {
     const m = above(i, movedMat);
     if (m >= 0) return m;
   }
   const o = orig.data[i];
-  return o === movedMat ? AIR : o;
+  if (o !== movedMat) return o;
+  return backfill === 'outer' && outer >= 0 && outer !== movedMat ? outer : AIR;
 };
+
+/** (x, y, z) 沿 d 走一格的材質；出界回 -1。 */
+const matAt = (v: Volume, x: number, y: number, z: number) => (inVol(v, x, y, z) ? v.data[(z * v.Y + y) * v.X + x] : -1);
 
 /**
  * 從 (x, y, z) 起沿 step 收集前方薄層的體素（遇到 Air、stopMat 或厚於 LINER_MAX 的材質就停）。
@@ -171,11 +177,17 @@ export function removeCell(
         out[to] = read.data[j];
         to = j;
       }
-      out[to] = fillAt(orig, to, read.data[to], backfill, above);
+      // 最外面那一格：外面緊鄰的（厚的層、或結構自己以外第一個停下來的材質）補上；
+      // 'outer' 時一路跟到陣列邊界（外面出界）＝那一層延伸到邊界外，照它自己的材質補，不在邊上留空氣
+      const tx = to % X;
+      const ty = ((to - tx) / X) % Y;
+      const tz = (to - tx - ty * X) / (X * Y);
+      const o = matAt(read, tx + back[0], ty + back[1], tz + back[2]);
+      out[to] = backfill === 'outer' && o < 0 && orig.data[to] === read.data[to] ? read.data[to] : fillAt(orig, to, read.data[to], backfill, above, o);
       return;
     }
   }
-  out[i] = fillAt(orig, i, movedMat, backfill, above);
+  out[i] = fillAt(orig, i, movedMat, backfill, above, matAt(read, x + back[0], y + back[1], z + back[2]));
 }
 
 const DIRS6: Vec3[] = [

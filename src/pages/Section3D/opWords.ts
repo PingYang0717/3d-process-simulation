@@ -11,6 +11,8 @@ export interface WordsCtx {
 }
 
 const AXIS = ['x', 'y', 'z'] as const;
+/** 兩端的白話名字（x：左右、y：上下、z：前後；小端＝索引小的那一側，和 DIRECTIONS 一致）。 */
+export const SIDE_NAME: Record<0 | 1 | 2, [string, string]> = { 0: ['左', '右'], 1: ['上', '下'], 2: ['前', '後'] };
 const axisOf = (d: Vec3) => (d[0] ? 0 : d[1] ? 1 : 2);
 /** 方向 → 那一面的名字（體素 y 向下：−y＝頂面）。 */
 export function faceName(d: Vec3) {
@@ -82,7 +84,8 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     const W = op.axis === 1 ? 'H' : op.axis === 2 ? 'D' : 'W';
     const m = Math.abs(op.delta);
     const sides = op.anchor === 'center' ? (m % 2 ? `兩側 +${Math.floor(m / 2)}／+${Math.ceil(m / 2)} 格` : `兩側各 ${op.delta > 0 ? '+' : '−'}${m / 2} 格`) : `單側 ${op.delta > 0 ? '+' : '−'}${m} 格`;
-    const anchor = op.anchor === 'center' ? '中心不動' : op.anchor === 'lo' ? `${a} 小的一側不動` : `${a} 大的一側不動`;
+    const [sl, sh] = SIDE_NAME[op.axis];
+    const anchor = op.anchor === 'center' ? '兩側一起（中心不動）' : op.anchor === 'lo' ? `只動${sh}側（${sl}側不動）` : `只動${sl}側（${sh}側不動）`;
     return `${who} ${W}（${a}）${w0 !== null ? `${w0} → ${w0 + op.delta}` : ''}（${sides} = ${nmText(op.delta, w.nm)}）· ${anchor} · 襯層${op.follow ? '跟著' : '不跟'}${op.policy === 'overwrite' ? ' · 允許穿層' : ''}${tail}`;
   }
   if (op.kind === 'dilate')
@@ -112,7 +115,7 @@ export function dirLabel(d: Vec3) {
 
 /** 變數的操作名（下拉、表頭）。 */
 export const OP_LABEL: Record<string, string> = {
-  cd: '對稱 CD（寬度）',
+  cd: 'CD（寬度）',
   push: '長／縮一面',
   translate: '整塊移動',
   level: '方頭到（recess）',
@@ -123,7 +126,7 @@ export const OP_LABEL: Record<string, string> = {
 };
 /** 一句說明（tooltip）。 */
 export const OP_HELP: Record<string, string> = {
-  cd: '對稱 CD：沿一個軸改總寬度，兩側各推一半（奇數格多的給大的一側），也可以固定一側；襯層跟著推。',
+  cd: 'CD：沿一個軸改總寬度，預設兩側各推一半（奇數格多的給右／下／後側），也可以只動一側；襯層跟著推、外面的層讓位或補上。',
   push: '長／縮一面：結構在那個方向最外側的表面沿法線推 n 格（正＝長、負＝縮）；碰到厚的別的材質預設擋住。',
   translate: '整塊移動：結構沿一個軸平移 n 格，空出來的地方回填原本的內容。',
   level: '方頭到：那一面每一排補到同一個座標（只補空氣與可跟推的襯層）；可以相對另一個結構的面（相對 recess）。',

@@ -134,7 +134,7 @@ const info = (msg) => console.log('· ' + msg);
   const panel = page.locator('.design-panel');
   // 「加一個變數」直接選要改什麼（選單），加進去就帶第一組預設值；之後在卡片上調
   await panel.getByRole('button', { name: /加一個變數/ }).click();
-  await page.locator('.op-menu .op-menu-item', { hasText: '對稱 CD' }).click();
+  await page.locator('.op-menu .op-menu-item', { hasText: 'CD（寬度）' }).click();
   await panel.locator('.factor-card').first().getByRole('button', { name: /±1 nm/ }).click();
   await panel.getByRole('button', { name: /加一個變數/ }).click();
   await page.locator('.op-menu .op-menu-item', { hasText: '整塊移動' }).click();

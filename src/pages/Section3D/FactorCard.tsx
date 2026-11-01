@@ -11,7 +11,7 @@ import { factorWords } from './opWords';
 import { FacePicker } from './FacePicker';
 import { LevelsEditor } from './LevelsEditor';
 import { CATEGORY } from './colors';
-import { ALL_OPS, OP_HELP, OP_LABEL, OP_SHORT, OpGlyph, kindOfSel, newFactor, opsFor, switchOp } from './factorMeta';
+import { ALL_OPS, OP_HELP, OP_LABEL, OP_SHORT, OpGlyph, kindOfSel, newFactor, opsFor, switchOp, SIDE_NAME, TOGETHER } from './factorMeta';
 
 const { Text } = Typography;
 const AX = ['x', 'y', 'z'] as const;
@@ -132,8 +132,20 @@ export function FactorCard({
   if (f.op === 'cd' || f.op === 'translate') settings.push(<Row label="沿哪個軸">{axisSeg(((t.axis as number) ?? 0) as 0 | 1 | 2, (a) => setT({ axis: a }))}</Row>);
   if (f.op === 'cd')
     settings.push(
-      <Row label="哪邊不動">
-        <Segmented size="small" value={(t.anchor as string) ?? 'center'} onChange={(v) => setT({ anchor: v })} options={[{ label: '中心（兩側對稱）', value: 'center' }, { label: `${AX[(t.axis as number) ?? 0]} 小端`, value: 'lo' }, { label: `${AX[(t.axis as number) ?? 0]} 大端`, value: 'hi' }]} />
+      <Row label="往哪邊變">
+        <Segmented
+          size="small"
+          value={(t.anchor as string) ?? 'center'}
+          onChange={(v) => setT({ anchor: v })}
+          options={(() => {
+            const [a, b] = SIDE_NAME[((t.axis as number) ?? 0) as 0 | 1 | 2];
+            return [
+              { label: <Tooltip title={`中心不動，兩側各變一半（奇數格多的給${b}側）`}>兩側一起</Tooltip>, value: 'center' },
+              { label: <Tooltip title={`${a}側固定不動，只有${b}側往外長／往內縮`}>只動{b}側</Tooltip>, value: 'lo' },
+              { label: <Tooltip title={`${b}側固定不動，只有${a}側往外長／往內縮`}>只動{a}側</Tooltip>, value: 'hi' },
+            ];
+          })()}
+        />
       </Row>,
     );
   if (f.op === 'push' || (f.op === 'level' && !t.ref))
@@ -229,8 +241,16 @@ export function FactorCard({
   }
   if (f.op === 'cd' || f.op === 'push' || f.op === 'taper')
     settings.push(
-      <Row label="碰到別的材質">
-        <Segmented size="small" value={t.policy === 'overwrite' ? 'overwrite' : 'block'} onChange={(v) => setT({ policy: v === 'overwrite' ? 'overwrite' : undefined })} options={[{ label: '擋住', value: 'block' }, { label: '穿過去', value: 'overwrite' }]} />
+      <Row label="相連的層">
+        <Segmented
+          size="small"
+          value={((t.policy as string | undefined) ?? ed.pushPolicy) === 'overwrite' ? 'overwrite' : 'block'}
+          onChange={(v) => setT(v === 'overwrite' ? { ...TOGETHER } : { policy: 'block', follow: undefined })}
+          options={[
+            { label: <Tooltip title="變寬：薄襯層（HfO₂、TiN…）跟著往外推，外面厚的層讓出位置；變窄：襯層跟著往內，外面的層補上，不會留空氣">一起變</Tooltip>, value: 'overwrite' },
+            { label: <Tooltip title="變寬時碰到厚的別的材質就停（長不過去）；變窄時一樣由外面的層補上">厚的擋住</Tooltip>, value: 'block' },
+          ]}
+        />
       </Row>,
     );
   if (!fraction)

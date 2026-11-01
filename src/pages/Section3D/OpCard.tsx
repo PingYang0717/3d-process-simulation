@@ -12,7 +12,7 @@ import { MatLabel } from '../../ui/Swatch';
 import type { Editor } from './editor';
 import { ScopeControl, scopeWords, scopeWordsOf } from './PositionBar';
 import { FacePicker } from './FacePicker';
-import { type WordsCtx, describeOp, faceName } from './opWords';
+import { type WordsCtx, SIDE_NAME, describeOp, faceName } from './opWords';
 import { RoundCard } from './RoundCard';
 import type { RoundGesture } from '../../slice/round';
 import type { EdKey } from '../../ui/memoEd';
@@ -271,15 +271,15 @@ export function PushCard({ ed, compact, plane, initialDir }: { ed: Editor; compa
           )}
           {mode === 'cd' && (
             <>
-              <Text style={{ fontSize: 12 }}>沿 {AXN[a]} 的總寬；奇數格時多的一格給 {AXN[a]} 大的一側。</Text>
+              <Text style={{ fontSize: 12 }}>沿 {AXN[a]} 的總寬；兩側一起時，奇數格多的一格給{SIDE_NAME[a][1]}側。</Text>
               <Segmented
                 size="small"
                 value={anchor}
                 onChange={(v) => setAnchor(v as typeof anchor)}
                 options={[
-                  { label: '中心不動', value: 'center' },
-                  { label: `${AXN[a]} 小端不動`, value: 'lo' },
-                  { label: `${AXN[a]} 大端不動`, value: 'hi' },
+                  { label: '兩側一起', value: 'center' },
+                  { label: `只動${SIDE_NAME[a][1]}側`, value: 'lo' },
+                  { label: `只動${SIDE_NAME[a][0]}側`, value: 'hi' },
                 ]}
               />
             </>

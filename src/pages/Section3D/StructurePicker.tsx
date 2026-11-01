@@ -30,11 +30,12 @@ export interface Mark {
 }
 
 /** 在預覽上畫變數的標記：回傳畫不出來（垂直於切面）的那些的說明。 */
-function drawMarks(g: CanvasRenderingContext2D, W: number, H: number, axis: Axis, crop: { u0: number; v0: number }, s: number, box: BBox, marks: Mark[]) {
+function drawMarks(g: CanvasRenderingContext2D, W: number, H: number, axis: Axis, crop: { u0: number; v0: number }, s: number, box: BBox, marks: Mark[], ox = 0) {
   const [ua, va] = uvAxes(axis);
   const l = lo(box);
   const h = hi(box);
-  const X = (u: number) => (u - crop.u0) * s;
+  // ox＝截面圖左邊在這張畫布上的位置（畫布左右各多留 ox，窄的結構標籤才不會被切掉）
+  const X = (u: number) => (u - crop.u0) * s + ox;
   const Y = (v: number) => (v - crop.v0) * s;
   const x0 = X(l[ua]);
   const x1 = X(h[ua] + 1);
@@ -52,7 +53,8 @@ function drawMarks(g: CanvasRenderingContext2D, W: number, H: number, axis: Axis
     // 標籤撞到就往下挪
     for (let i = 0; i < 6; i++) if (used.some((u) => Math.abs(u.y - yy) < 16 && x < u.x + u.w && x + w > u.x)) yy += 16;
     const xx = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
-    const px = Math.min(Math.max(2, xx), W - w - 2);
+    // 比畫布還寬時靠左（開頭看得到），不要變成負的
+    const px = Math.max(2, Math.min(xx, W - w - 2));
     const py = Math.min(Math.max(9, yy), H - 9);
     g.fillStyle = 'rgba(255,255,255,.92)';
     g.beginPath();
@@ -102,22 +104,46 @@ function drawMarks(g: CanvasRenderingContext2D, W: number, H: number, axis: Axis
           out.push(`${name}：沿 ${AXL[a]}，垂直於這個切面（換 ${a === 0 ? 'XY 或 XZ' : a === 1 ? 'XY 或 YZ' : 'XZ 或 YZ'} 看）`);
           break;
         }
+        // 單側變（anchor lo＝小端不動、hi＝大端不動）：不動的那一側畫一條粗的「固定」線、只有另一側有箭頭
+        const anc = (t.anchor as string) ?? 'center';
+        const fixLo = anc === 'lo';
+        const fixHi = anc === 'hi';
         if (a === ua) {
           g.beginPath();
           g.moveTo(x0, cy);
           g.lineTo(x1, cy);
           g.stroke();
-          arrow(x0 + 8, cy, -1, 0, color, 8);
-          arrow(x1 - 8, cy, 1, 0, color, 8);
-          label(`${name} 寬度 ↔`, cx, cy - 14, color, 'center');
+          if (!fixLo) arrow(x0 + 8, cy, -1, 0, color, 8);
+          if (!fixHi) arrow(x1 - 8, cy, 1, 0, color, 8);
+          const fx = fixLo ? x0 : fixHi ? x1 : null;
+          if (fx !== null) {
+            g.save();
+            g.lineWidth = 4;
+            g.beginPath();
+            g.moveTo(fx, y0);
+            g.lineTo(fx, y1);
+            g.stroke();
+            g.restore();
+          }
+          label(`${name} 寬度 ${fixLo ? '→（左側不動）' : fixHi ? '←（右側不動）' : '↔'}`, cx, cy - 14, color, 'center');
         } else {
           g.beginPath();
           g.moveTo(cx, y0);
           g.lineTo(cx, y1);
           g.stroke();
-          arrow(cx, y0 + 8, 0, -1, color, 8);
-          arrow(cx, y1 - 8, 0, 1, color, 8);
-          label(`${name} 寬度 ↕`, cx + 8, cy, color);
+          if (!fixLo) arrow(cx, y0 + 8, 0, -1, color, 8);
+          if (!fixHi) arrow(cx, y1 - 8, 0, 1, color, 8);
+          const fy = fixLo ? y0 : fixHi ? y1 : null;
+          if (fy !== null) {
+            g.save();
+            g.lineWidth = 4;
+            g.beginPath();
+            g.moveTo(x0, fy);
+            g.lineTo(x1, fy);
+            g.stroke();
+            g.restore();
+          }
+          label(`${name} 寬度 ${fixLo ? '↓（上側不動）' : fixHi ? '↑（下側不動）' : '↕'}`, cx + 8, cy, color);
         }
         break;
       }
@@ -279,9 +305,13 @@ export function StructPreview({ ed, keys, face, marks: allMarks, onOpen3D, start
     cv.width = pic.W;
     cv.height = pic.H;
     cv.getContext('2d')!.putImageData(new ImageData(pic.data, pic.W, pic.H), 0, 0);
-    ov.width = pic.W;
+    // 標記畫布比截面圖寬：左右各多留到舞台邊（窄的 fin 標籤放得下）
+    const pad = Math.max(0, Math.floor((maxW - pic.W) / 2));
+    ov.width = pic.W + 2 * pad;
     ov.height = pic.H;
-    setNotes(drawMarks(ov.getContext('2d')!, pic.W, pic.H, axis, crop, thumbScale(crop, max), box, marks));
+    ov.style.left = `${-pad}px`;
+    ov.style.width = `${pic.W + 2 * pad}px`;
+    setNotes(drawMarks(ov.getContext('2d')!, pic.W + 2 * pad, pic.H, axis, crop, thumbScale(crop, max), box, marks, pad));
     // marks 的內容走 marksSig
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [box, rgb, ed.hidden, face, ed.orig, base, ed.vol, keys, maxW, maxH, axis, at, marksSig, visible]);

@@ -438,7 +438,7 @@ export function useEditor() {
   const designSeq = useRef(1);
   /** 矩陣表的「匯出時不包含」（預設全包含）。 */
   const [exportOff, setExportOff] = useState<Set<string>>(new Set());
-  const [backfill, setBackfill] = useState<Backfill>('orig');
+  const [backfill, setBackfill] = useState<Backfill>('outer');
   const [nmPerVoxel, setNmPerVoxel] = usePersisted('nmPerVoxel', 0.5, (v): v is number => typeof v === 'number' && v > 0);
   const [brush, setBrush] = usePersisted<Brush>(
     'brush',

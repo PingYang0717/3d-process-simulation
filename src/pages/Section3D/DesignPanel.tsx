@@ -374,4 +374,4 @@ function DesignPanelImpl({ ed, onMade, onOpen3D, onOpenStructure, title = true }
   );
 }
 
-export const DesignPanel = memoEd(DesignPanelImpl, ['L', 'vol', 'comps', 'active', 'busy', 'cancelDesign', 'factorCtx', 'genProgress', 'hidden', 'matName', 'materials', 'nmPerVoxel', 'orig', 'sel', 'selComps', 'splits', 'cursor'], 'DesignPanel');
+export const DesignPanel = memoEd(DesignPanelImpl, ['L', 'vol', 'comps', 'active', 'busy', 'cancelDesign', 'factorCtx', 'genProgress', 'hidden', 'matName', 'materials', 'nmPerVoxel', 'orig', 'pushPolicy', 'sel', 'selComps', 'splits', 'cursor'], 'DesignPanel');

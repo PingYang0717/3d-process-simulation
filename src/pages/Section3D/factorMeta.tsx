@@ -5,12 +5,13 @@ import { type Factor, type FactorOp, makeFactor, presetLevels } from '../../volu
 import { type Vec3, VOID, kindOf } from '../../volume/volume';
 import { roundFrame } from './RoundCard';
 import { OP_HELP, OP_LABEL } from './opWords';
+export { SIDE_NAME } from './opWords';
 
 export const ALL_OPS: FactorOp[] = ['cd', 'push', 'round', 'level', 'dilate', 'taper', 'translate', 'defect'];
 
 /** 一句白話（卡片上的副標、操作選單）。 */
 export const OP_SHORT: Record<FactorOp, string> = {
-  cd: '沿一個軸改總寬度，兩側對稱',
+  cd: '沿一個軸改總寬度（預設兩側一起變，也可以只動一側）',
   push: '某一面往外長、或往內縮',
   round: '頂端兩個角改成圓角',
   level: '某一面補平到指定高度（recess）',
@@ -39,15 +40,21 @@ export const cdAxis = (ed: Editor): 0 | 1 | 2 => {
   return b.x1 - b.x0 <= b.z1 - b.z0 ? 0 : 2;
 };
 
+/**
+ * 實驗的預設：相連的層一起變——薄襯層跟著推開／退回、厚的鄰居被吃掉或補上（不留空氣、不被擋住）。
+ * 寫死在 template 裡，之後改全域設定也不會讓已經設計好的實驗變樣。
+ */
+export const TOGETHER = { policy: 'overwrite', follow: true } as const;
+
 /** 這種操作的預設固定欄位（新增或換操作時用；之後在卡片「設定」裡改）。 */
 export function templateFor(ed: Editor, op: FactorOp): { template: Record<string, unknown>; param?: string; unit: Factor['unit'] } {
   const axis = cdAxis(ed);
   const up: Vec3 = [0, -1, 0];
   switch (op) {
     case 'cd':
-      return { template: { axis, anchor: 'center' }, unit: 'nm' };
+      return { template: { axis, anchor: 'center', ...TOGETHER }, unit: 'nm' };
     case 'push':
-      return { template: { dir: up }, unit: 'nm' };
+      return { template: { dir: up, ...TOGETHER }, unit: 'nm' };
     case 'translate':
       return { template: { axis }, unit: 'nm' };
     case 'level':
@@ -59,7 +66,7 @@ export function templateFor(ed: Editor, op: FactorOp): { template: Record<string
     case 'dilate':
       return { template: {}, unit: 'nm' };
     case 'taper':
-      return { template: { face: [1, 0, 0], along: 1, both: true }, param: 'bottom', unit: 'nm' };
+      return { template: { face: [1, 0, 0], along: 1, both: true, ...TOGETHER }, param: 'bottom', unit: 'nm' };
     case 'defect':
       return { template: { shape: 'slab', center: [0.5, 0.5, 0.5], size: [20, 1, 30], mat: VOID }, param: 'size[1]', unit: 'nm' };
   }

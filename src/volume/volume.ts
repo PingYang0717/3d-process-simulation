@@ -1342,7 +1342,7 @@ export interface RelabelInPlace {
 }
 
 /** 測試與 bench 用：最近一次 relabelInPlace 的舊值快照大小（PF 的格數；plan v15 A3 目標 ≤ F）。 */
-export const relabelStats = { snapshot: 0 };
+export const relabelStats: { snapshot: number; F: BBox | null; S: BBox | null } = { snapshot: 0, F: null, S: null };
 
 /**
  * relabelFast 的原地版本（plan v9 §4.3）：labels 直接改成新的編號，不影印整個陣列。
@@ -1406,6 +1406,7 @@ export function relabelInPlace(
   const FW = F.x1 - F.x0 + 1;
   const FH = F.y1 - F.y0 + 1;
   relabelStats.snapshot = PF.length;
+  relabelStats.F = { ...F };
   // 2. 清掉：掉了體素的結構（F 裡）、R 裡改過的格子
   for (let z = F.z0; z <= F.z1; z++)
     for (let y = F.y0; y <= F.y1; y++) {
@@ -1577,6 +1578,7 @@ export function relabelInPlace(
   while (n > 0 && holes.has(n - 1)) n--;
   comps.length = n;
   for (const mv of moves) moveLabel(labels, next, mv.box, mv.from, mv.to);
+  relabelStats.S = { ...S };
   return { comps, S, moves, before };
 }
 

@@ -175,3 +175,71 @@ describe('globalIndex（plan v14 §5.1：從 cellCloud 搬來）', () => {
     expect(globalIndex(box, dims, [0, local])).toEqual([(3 * 8 + 1) * 10 + 2, (5 * 8 + 2) * 10 + 3]);
   });
 });
+
+describe('diff 外框 O(X+Y+Z)（plan v15 A2）', () => {
+  it('隨機 50 步（含 back／reset）：carryStepStats 維護的 axes → diffBoxOfAxes === tightBox(dims, diff, touch)；recountAxes 重數相同', async () => {
+    const { diffBoxOfAxes, newAxes, recountAxes, tightBox, unionBox } = await import('./patch');
+    const { stepTouch } = await import('../splits/lifecycle');
+    let seq = 1000;
+    const ctx = { orig: vol, matName, newKey: () => `c${seq++}` };
+    const data = vol.data.slice();
+    const labels = L0.labels.slice();
+    let comps = L0.comps;
+    let diff = new Uint8Array(data.length);
+    let dc = 0;
+    let counts = Float64Array.from(countArray(vol.data));
+    let axes = newAxes(vol);
+    let touch: import('./volume').BBox | null = null;
+    const hist: Step[] = [];
+    let future: Step[] = [];
+    let rnd = 11;
+    const rand = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    let backs = 0;
+    const check = () => {
+      const want = dc ? tightBox(vol, diff, touch) : null;
+      expect(diffBoxOfAxes(axes)).toEqual(want);
+      const all = { x0: 0, x1: vol.X - 1, y0: 0, y1: vol.Y - 1, z0: 0, z1: vol.Z - 1 };
+      const re = recountAxes(vol, diff, all);
+      expect(same(re.x, axes.x) && same(re.y, axes.y) && same(re.z, axes.z)).toBe(true);
+    };
+    for (let k = 0; k < 50; k++) {
+      const r = rand();
+      if (r < 0.2 && hist.length) {
+        const st = hist.pop()!;
+        comps = applyStepInPlace(vol, data, labels, st, 'back') ?? comps;
+        dc = carryStepStats(vol, data, vol.data, diff, dc, counts, st, 'back', axes);
+        touch = unionBox(touch, stepTouch(st));
+        future.unshift(st);
+        backs++;
+      } else if (r < 0.3 && future.length) {
+        const st = future.shift()!;
+        comps = applyStepInPlace(vol, data, labels, st, 'fwd') ?? comps;
+        dc = carryStepStats(vol, data, vol.data, diff, dc, counts, st, 'fwd', axes);
+        touch = unionBox(touch, stepTouch(st));
+        hist.push(st);
+      } else if (r < 0.34) {
+        data.set(vol.data);
+        labels.set(L0.labels);
+        comps = L0.comps;
+        diff = new Uint8Array(data.length);
+        dc = 0;
+        counts = Float64Array.from(countArray(vol.data));
+        axes = newAxes(vol);
+        touch = null;
+        hist.length = 0;
+        future = [];
+      } else {
+        const res = applyOpInPlace({ vol: { ...vol, data }, L: { labels, comps } }, opAt(k, comps), ctx);
+        if (res.step.data) {
+          comps = res.comps;
+          dc = carryStepStats(vol, data, vol.data, diff, dc, counts, res.step, 'fwd', axes);
+          touch = unionBox(touch, stepTouch(res.step));
+          hist.push(res.step);
+          future = [];
+        }
+      }
+      check();
+    }
+    expect(backs).toBeGreaterThan(0);
+  }, 60_000);
+});

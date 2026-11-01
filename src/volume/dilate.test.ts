@@ -102,3 +102,27 @@ describe('dilate', () => {
     expectSame(base.vol.data, vol.data);
   });
 });
+
+describe('dilate 候選排序（plan v15 D5）', () => {
+  it('sortByDist（計數排序）=== comparator 排序 (best[p] − best[q]) || (p − q)，隨機 20 組', async () => {
+    const { sortByDist } = await import('./volume');
+    let rnd = 3;
+    const rand = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let t = 0; t < 20; t++) {
+      const n = 1 + Math.floor(rand() * 5000);
+      const r2 = 1 + Math.floor(rand() * 64);
+      const best = new Int32Array(n).fill(0x7fffffff);
+      const src = new Int32Array(n).fill(-1);
+      for (let k = 0; k < n; k++)
+        if (rand() < 0.6) {
+          best[k] = Math.floor(rand() * (r2 + 1));
+          src[k] = Math.floor(rand() * 100);
+        }
+      const cand: number[] = [];
+      for (let k = 0; k < n; k++) if (src[k] >= 0) cand.push(k);
+      cand.sort((p, q) => best[p] - best[q] || p - q);
+      expect(Array.from(sortByDist(best, src))).toEqual(cand);
+    }
+    expect(Array.from(sortByDist(new Int32Array(0), new Int32Array(0)))).toEqual([]);
+  });
+});

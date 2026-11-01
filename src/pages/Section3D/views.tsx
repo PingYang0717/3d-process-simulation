@@ -31,8 +31,9 @@ import {
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
-import { Group, type Intersection, type Material as ThreeMaterial, Sphere } from 'three';
+import { acceleratedRaycast } from 'three-mesh-bvh';
+import { Group, type Intersection, type Material as ThreeMaterial } from 'three';
+import { beginPickEvent, bvhStats, lazyRaycast, pickAlong, pickOrdered, scheduleIdleBVH } from './pick';
 import type { ChunkItem } from '../../volume/worker';
 import {
   type Axis,
@@ -240,31 +241,22 @@ const EDGE_QUADS_MAX = 60000;
 /** 主網格快取幾組（切 B、切 split、復原時不必再跟 Worker 要）。 */
 const PARTS_CACHE = 3;
 
-const _sphere = new Sphere();
 /**
- * BVH 懶建（plan v9 P5）：射線碰到這個 chunk 的外接球才建它的 BVH（通常 1～3 個），整個網格換上時不再同步建幾百棵。
- * 沒碰到的 chunk 直接略過。
+ * 畫質（plan v15 B6）：antialias 開著（MSAA 4）時每 CSS px 的 sample 數 = pixelRatio² × 4，dpr 2 就是 16。
+ * 靜止時 1.5（9 sample，和 2 的差異肉眼難辨）、互動中（轉視角、拖把手、拖筆刷）1.0（4 sample）；「高」＝2。
+ * 設定抽屜之後接 localStorage `se3d.v1.quality`（JSON 字串 "high"｜"standard"），這裡先只讀。
  */
-function lazyRaycast(this: Mesh, raycaster: Raycaster, intersects: Intersection[]) {
-  const g = this.geometry;
-  if (!g.attributes.position?.count) return;
-  if (!g.boundingSphere) g.computeBoundingSphere();
-  _sphere.copy(g.boundingSphere!).applyMatrix4(this.matrixWorld);
-  if (!raycaster.ray.intersectsSphere(_sphere)) return;
-  if (!g.boundsTree) g.boundsTree = new MeshBVH(g);
-  acceleratedRaycast.call(this, raycaster, intersects);
-}
-/** 閒置時補建還沒建的 BVH（一次一個；沒有 requestIdleCallback 的瀏覽器就等第一次點到再建）。 */
-const idleBVH = (meshes: () => Iterable<Mesh>) => {
-  const ric = (globalThis as { requestIdleCallback?: (cb: (d: { timeRemaining: () => number }) => void) => number }).requestIdleCallback;
-  if (!ric) return;
-  const step = (d: { timeRemaining: () => number }) => {
-    for (const m of meshes()) {
-      if (d.timeRemaining() < 4) return void ric(step);
-      if (!m.geometry.boundsTree && m.geometry.attributes.position?.count) m.geometry.boundsTree = new MeshBVH(m.geometry);
-    }
-  };
-  ric(step);
+export const PIXEL_RATIO = { standard: 1.5, high: 2, interact: 1 } as const;
+export const QUALITY_KEY = 'se3d.v1.quality';
+/** 靜止時的 pixelRatio：設定的上限和裝置 dpr 取小。 */
+export const idlePixelRatio = (dpr = window.devicePixelRatio || 1) => {
+  let q: unknown = null;
+  try {
+    q = JSON.parse(localStorage.getItem(QUALITY_KEY) ?? 'null');
+  } catch {
+    /* 沒存過或格式不對：標準 */
+  }
+  return Math.min(q === 'high' ? PIXEL_RATIO.high : PIXEL_RATIO.standard, dpr);
 };
 
 const newPart = (c: Ctx, m: MeshData) => {
@@ -287,8 +279,11 @@ const disposeOrphans = (c: Ctx, maps: Map<number, Mesh>[]) => {
   for (const m of c.partsCache.values()) for (const p of m.values()) alive.add(p);
   for (const m of maps) for (const p of m.values()) if (!alive.has(p)) p.geometry.dispose();
 };
-/** 換上一組主網格 chunk；cache＝存進快取（差異模式那一組不存）。 */
-const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>, shown: { sid: number; key: string } | null, cache: boolean, pin = false) => {
+/**
+ * 換上一組主網格 chunk；cache＝存進快取（差異模式那一組不存）。
+ * changed＝這一步換掉的 chunk 編號（增量更新時）：閒置補建 BVH 先建它們（下一次滑過最可能碰到的就是這些，plan v15 B4）。
+ */
+const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>, shown: { sid: number; key: string } | null, cache: boolean, pin = false, changed: Set<number> | null = null) => {
   const prev = c.parts;
   c.partGroup.clear();
   for (const p of map.values()) c.partGroup.add(p);
@@ -308,7 +303,9 @@ const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMate
     }
   }
   disposeOrphans(c, evicted);
-  idleBVH(() => c.parts.values());
+  // 單一 idle 排程：新的一組來了只換待建清單；這一步改到的 chunk 排前面
+  const first = changed ? new Set([...changed].map((k) => map.get(k)).filter((m): m is Mesh<BufferGeometry, MeshLambertMaterial> => !!m)) : null;
+  scheduleIdleBVH(map.values(), first?.size ? (m) => first.has(m as Mesh<BufferGeometry, MeshLambertMaterial>) : null);
 };
 
 /** 圖層換 chunk：full = 全部換掉；否則只換 items 裡的（quads = 0 的拿掉）。換掉的立刻釋放（圖層不快取）。 */
@@ -471,6 +468,8 @@ export function View3D({
   /** 把手拖拉：pointermove 只記 v，requestAnimationFrame 每幀最多算一次 Op 與預覽（plan v14 P1，和 2D 的 SliceEditor 一樣）。 */
   const hdRaf = useRef(0);
   const hdSent = useRef<number | null>(null);
+  /** 互動中降 pixelRatio（plan v15 B6；掛載時建立）：拖把手、拖筆刷過了死區就 true，放開／Esc false。 */
+  const lowResRef = useRef<(on: boolean) => void>(() => {});
   const cancelHdRaf = () => {
     if (hdRaf.current) cancelAnimationFrame(hdRaf.current);
     hdRaf.current = 0;
@@ -514,8 +513,22 @@ export function View3D({
     const host = hostRef.current!;
     const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     // 開發模式：e2e（scripts/e2e/perf.cjs）讀 renderer.info（geometry 數、draw call）
-    if (import.meta.env.DEV) (window as unknown as { __renderer?: WebGLRenderer }).__renderer = renderer;
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    if (import.meta.env.DEV) {
+      (window as unknown as { __renderer?: WebGLRenderer }).__renderer = renderer;
+      // e2e（perf.cjs）：事件裡同步建了幾棵 BVH（plan v15 B4：每事件有 8 ms 預算，其餘 idle 補）
+      Object.defineProperty(window, '__bvhBuilds', { get: () => bvhStats.sync, configurable: true });
+      Object.defineProperty(window, '__bvhStats', { get: () => ({ ...bvhStats }), configurable: true });
+    }
+    // 畫質（plan v15 B6）：靜止 ≤ 1.5（設定「高」＝2）、互動中 1.0；setPixelRatio 內部會 setSize，不必再叫
+    const prIdle = idlePixelRatio();
+    renderer.setPixelRatio(prIdle);
+    const lowRes = (on: boolean) => {
+      const pr = on ? Math.min(PIXEL_RATIO.interact, prIdle) : prIdle;
+      if (renderer.getPixelRatio() === pr) return;
+      renderer.setPixelRatio(pr);
+      kick();
+    };
+    lowResRef.current = lowRes;
     renderer.localClippingEnabled = true;
     renderer.outputColorSpace = LinearSRGBColorSpace;
     host.appendChild(renderer.domElement);
@@ -569,8 +582,8 @@ export function View3D({
       const dir = target.clone().sub(pos);
       const dist = dir.length();
       probe.set(pos, dir.normalize());
-      probe.firstHitOnly = true;
-      const h = probe.intersectObjects([...ps.values()], false)[0];
+      beginPickEvent();
+      const h = pickOrdered(probe, ps.values(), true)[0];
       return !!h && h.distance < dist - radius;
     };
     const setView = (preset: ViewPreset, box?: BBox) => {
@@ -838,6 +851,14 @@ export function View3D({
     // 按下要在 OrbitControls（掛在 canvas 上）之前決定是不是筆刷：capture 階段先跑，筆刷就先把 controls 關掉，
     // OrbitControls 連這一下都不會記到。之前是 React 的 onPointerDown 事後才關，OrbitControls 已經記了一個指標、
     // 又因為指標被我們捕捉而收不到放開，之後滾輪縮放就一直沒反應（視角像被鎖住）。
+    // 會拾取的事件（plan v15 B4）：capture 階段先重設這一事件的 BVH 建置預算（比 onDown 先註冊所以先跑），順便多畫兩格
+    //（滑鼠在別處移動、父元件重 render 不必重畫 3D，plan v9 P7）
+    const onEvent = () => {
+      beginPickEvent();
+      kick();
+    };
+    const kickEvents = ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown', 'dblclick'] as const;
+    kickEvents.forEach((ev) => host.addEventListener(ev, onEvent, { capture: true, passive: true }));
     const onDown = (e: PointerEvent) => downHandler.current?.(e);
     host.addEventListener('pointerdown', onDown, { capture: true });
     let flashTimer: ReturnType<typeof setTimeout>[] = [];
@@ -911,6 +932,20 @@ export function View3D({
       camera.updateProjectionMatrix();
     });
     ro.observe(host);
+    // 選取標籤的寬度（plan v15 B5）：ResizeObserver 量一次存起來，render loop 不讀 DOM。
+    // display:none 時量到 0，留著上一次的寬；文字變了（換選取、改名）會再量，順便多畫兩格讓位置跟上
+    const tagW = { current: 0 };
+    const tagEl = floatRef.current;
+    const tagRo = tagEl
+      ? new ResizeObserver((entries) => {
+          for (const e of entries) {
+            const w = e.borderBoxSize?.[0]?.inlineSize ?? (e.target as HTMLElement).offsetWidth;
+            if (w) tagW.current = w;
+          }
+          kick();
+        })
+      : null;
+    if (tagEl) tagRo!.observe(tagEl);
 
     // 小標籤與座標軸小圖在 render loop 裡投影定位，不走 React 狀態
     const p = new Vector3();
@@ -923,9 +958,22 @@ export function View3D({
     let raf = 0;
     // 只在有變化時才畫（鏡頭動、動畫、滑鼠事件、React 更新、Worker 結果到了）：
     // 靜止時不佔主執行緒，Worker 結果回來能馬上處理
-    controls.addEventListener('change', kick);
-    const kickEvents = ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown'] as const;
-    kickEvents.forEach((ev) => host.addEventListener(ev, kick, { passive: true }));
+    // 轉視角中（plan v15 B6）：start 之後第一次真的動了才降 pixelRatio（點一下不拖不會閃一格）；end 恢復（阻尼尾巴用全解析度）
+    let orbiting = false;
+    const onOrbitStart = () => {
+      orbiting = true;
+    };
+    const onOrbitChange = () => {
+      if (orbiting) lowRes(true);
+      kick();
+    };
+    const onOrbitEnd = () => {
+      orbiting = false;
+      lowRes(false);
+    };
+    controls.addEventListener('start', onOrbitStart);
+    controls.addEventListener('change', onOrbitChange);
+    controls.addEventListener('end', onOrbitEnd);
     const tick = () => {
       if (anim) {
         const k = Math.min(1, (performance.now() - anim.start) / anim.ms);
@@ -963,7 +1011,8 @@ export function View3D({
                 if (py < top) top = py;
               }
           const cx = sx / 8;
-          const tw = tag.offsetWidth || 300;
+          // 寬度由 ResizeObserver 量（plan v15 B5）：這裡只寫 style，不讀 offsetWidth（讀會強制 layout，下一幀又 thrash）
+          const tw = tagW.current || 300;
           // 剖面列在上緣時標籤別壓到它
           const minTop = clipRef.current ? 60 : 8;
           tag.style.display = '';
@@ -993,11 +1042,14 @@ export function View3D({
     tick();
     return () => {
       cancelAnimationFrame(raf);
-      controls.removeEventListener('change', kick);
-      kickEvents.forEach((ev) => host.removeEventListener(ev, kick));
+      controls.removeEventListener('start', onOrbitStart);
+      controls.removeEventListener('change', onOrbitChange);
+      controls.removeEventListener('end', onOrbitEnd);
+      kickEvents.forEach((ev) => host.removeEventListener(ev, onEvent, { capture: true }));
       flashTimer.forEach(clearTimeout);
       if (stepTimer) clearInterval(stepTimer);
       ro.disconnect();
+      tagRo?.disconnect();
       host.removeEventListener('pointerdown', onDown, { capture: true });
       host.removeEventListener('wheel', onWheel);
       controls.removeEventListener('end', scheduleRecenter);
@@ -1053,7 +1105,7 @@ export function View3D({
           const from = r.full ? null : r.from === c.shown?.sid ? c.parts : (c.partsCache.get(`${r.from}|${key}`) ?? null);
           // 底那一組剛好不在了：退回全量
           if (!r.full && !from) return fetch(undefined, []);
-          showParts(c, nextParts(c, from, r.items), { sid, key }, true, pin);
+          showParts(c, nextParts(c, from, r.items), { sid, key }, true, pin, r.full ? null : new Set(r.items.map((it) => it.k)));
           done(r.items.length, r.full);
         });
       // 快取裡同畫法的其他版本：Worker 可以從其中一個增量（restore 回來的 split 從原始那一組）
@@ -1231,6 +1283,11 @@ export function View3D({
   useEffect(() => {
     const g = handleGroupRef.current;
     if (!g) return;
+    // 量測用（perf.cjs，plan v15 B1）：這個 effect 跑了幾次＝把手拆掉重建了幾次；點切面換 cursor 不該增加
+    if (import.meta.env.DEV) {
+      const w = window as unknown as { __handleBuilds?: number };
+      w.__handleBuilds = (w.__handleBuilds ?? 0) + 1;
+    }
     for (const { obj } of handlesRef.current) {
       g.remove(obj);
       if (obj instanceof ArrowHelper) obj.dispose();
@@ -1447,13 +1504,6 @@ export function View3D({
     ray.setFromCamera(ndc, c.camera);
     return ray;
   };
-  /** 可點選的網格：主網格（差異模式時它就是半透明的「沒改」）。 */
-  const pickables = () => {
-    const c = ctxRef.current!;
-    const out: Mesh[] = [];
-    for (const p of c.parts.values()) out.push(p);
-    return out;
-  };
   /** 一個三角形命中 → 它貼著的實心體素與外法線（面朝相機那一側是空的）。 */
   const voxelOf = (h: { point: Vector3; face?: { normal: Vector3 } | null }) => {
     const c = ctxRef.current!;
@@ -1477,9 +1527,17 @@ export function View3D({
     const ray = rayAt(clientX, clientY);
     const cl = clipRef.current;
     const plane = clipPlane(cl);
-    // 剖開時要濾掉剖面後面的命中，所以只有沒剖開才只取第一個
-    ray.firstHitOnly = !plane;
-    const h = ray.intersectObjects(pickables(), false).find((h) => !plane || plane.distanceToPoint(h.point) >= -1e-6);
+    // 由近到遠（plan v15 B4）：沒剖開＝最近的一個就好；剖開時要濾掉剖面後面的命中，往後一個個找、找到就停
+    let h: Intersection | undefined;
+    if (!plane) h = pickOrdered(ray, c.parts.values(), true)[0];
+    else {
+      ray.firstHitOnly = false;
+      for (const x of pickAlong(ray, c.parts.values()))
+        if (plane.distanceToPoint(x.point) >= -1e-6) {
+          h = x;
+          break;
+        }
+    }
     const capHit = cl && c.cap.visible ? ray.intersectObject(c.cap, false)[0] : undefined;
     if (cl && capHit && (!h || capHit.distance < h.distance)) {
       const w = capHit.point;
@@ -1503,7 +1561,8 @@ export function View3D({
     const L = state.L;
     const out: { key: string; p: number }[] = [];
     const seen = new Set<string>();
-    for (const h of ray.intersectObjects(pickables(), false)) {
+    // 由近到遠逐個吐出（plan v15 B4）：湊滿 8 個結構就 break，後面的 chunk 不必算
+    for (const h of pickAlong(ray, c.parts.values())) {
       if (plane && plane.distanceToPoint(h.point) < -1e-6) continue;
       const v = voxelOf(h);
       if (!v) continue;
@@ -1530,7 +1589,7 @@ export function View3D({
     const ray = rayAt(clientX, clientY);
     ray.firstHitOnly = false;
     const plane = clipPlane(clipRef.current);
-    for (const h of ray.intersectObjects(pickables(), false)) {
+    for (const h of pickAlong(ray, c.parts.values())) {
       if (plane && plane.distanceToPoint(h.point) < -1e-6) continue;
       const v = voxelOf(h);
       if (v && sm[v.p]) return v;
@@ -1714,6 +1773,7 @@ export function View3D({
     const c = ctxRef.current;
     if (!c) return;
     c.controls.enabled = true;
+    lowResRef.current(false);
     hideGhost();
     setDragTip(null);
     if (!keep) onPreview(null);
@@ -1744,6 +1804,7 @@ export function View3D({
       if (e.key !== 'Escape' || (!dragRef.current && !hdRef.current)) return;
       e.stopImmediatePropagation();
       e.preventDefault();
+      lowResRef.current(false);
       if (hdRef.current) {
         cancelHdRaf();
         hdRef.current = null;
@@ -1920,6 +1981,7 @@ export function View3D({
           if (!hd.armed) {
             if (Math.hypot(e.clientX - hd.sx, e.clientY - hd.sy) < DRAG_DEAD_ZONE / 2) return;
             hd.armed = true;
+            lowResRef.current(true);
           }
           const dx = e.clientX - hd.sx;
           const dy = e.clientY - hd.sy;
@@ -1945,6 +2007,7 @@ export function View3D({
           if (!d.armed) {
             if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < DRAG_DEAD_ZONE) return;
             d.armed = true;
+            lowResRef.current(true);
           }
           const n = stepsOf(d, e.clientX, e.clientY);
           if (n !== d.n) {
@@ -2025,6 +2088,8 @@ export function View3D({
         const d = dragRef.current;
         const down = downRef.current;
         const hd = hdRef.current;
+        // 拖把手／拖筆刷結束：恢復靜止時的 pixelRatio（沒降過就什麼都不做）
+        lowResRef.current(false);
         dragRef.current = null;
         downRef.current = null;
         hdRef.current = null;

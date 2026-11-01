@@ -146,3 +146,20 @@ describe('split 生命週期（plan v12 §5.3）', () => {
     expect(toPark(live, [], 8, 'a')).toEqual([]);
   });
 });
+
+describe('axes（plan v15 A2）', () => {
+  it('restoreBuffers 的 axes → diffBoxOfAxes === tightBox；和 Worker restore 的帳簿相同', async () => {
+    const { diffBoxOfAxes, tightBox } = await import('../volume/patch');
+    const o = load();
+    SETS.forEach((ops, k) => {
+      const { book, comps } = live(`ax${k}`, 40 + k, ops);
+      const p = extractPatch(vol, book.data, book.labels, o.data, o.labels, book.touch, comps);
+      const r = restoreBuffers(vol, o.data, o.labels, o.counts, p);
+      expect(diffBoxOfAxes(r.axes)).toEqual(tightBox(vol, r.diff, r.touch));
+      expect(diffBoxOfAxes(book.axes)).toEqual(tightBox(vol, book.diff!, book.touch));
+      handle('restore', { owner: `rx${k}`, sid: 60 + k, patch: p });
+      const b = inspect().books.get(`rx${k}`)!;
+      expect(same(b.axes.x, r.axes.x) && same(b.axes.y, r.axes.y) && same(b.axes.z, r.axes.z)).toBe(true);
+    });
+  });
+});

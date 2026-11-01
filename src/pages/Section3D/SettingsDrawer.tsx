@@ -73,6 +73,18 @@ export function SettingsDrawer({
           >
             <InputNumber min={0} max={64} value={ed.liveK} onChange={(v) => v !== null && ed.setLiveK(Math.round(v))} style={{ width: 90 }} />
           </Row>
+          <Row label="復原記憶體上限" sub="每個 split 的復原堆疊最多佔這麼多（另外最多 50 步）；超過就從最早的一步開始釋放">
+            <Select
+              value={ed.histBytes}
+              onChange={ed.setHistBytes}
+              style={{ width: 110 }}
+              options={[
+                { value: 64, label: '64 MB' },
+                { value: 256, label: '256 MB' },
+                { value: 1024, label: '1 GB' },
+              ]}
+            />
+          </Row>
         </Section>
         <Section title="2D 剖面">
           <Row label="選到結構時自動放大到它" sub="2D 剖面的主切面">

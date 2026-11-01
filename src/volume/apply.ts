@@ -32,7 +32,7 @@ export function applyOpInPlace(s: EditState, input: Op | LegacyOp, ctx: OpContex
   const none: AppliedInPlace = { comps: s.L.comps, step: { data: null, labels: null }, report };
   const box = previewBox(s, op);
   if (!box) return none;
-  const p = previewOp(s, ctx.orig, op, Infinity, report)!;
+  const p = previewOp(s, ctx.orig, op, Infinity, report, undefined, box)!;
   if (op.kind === 'profile') {
     // scope 裡、選取外框外面的片：這個結構根本不在，算略過
     const a = axisIndex(op.scope.axis);

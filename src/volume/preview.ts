@@ -336,10 +336,11 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
 /**
  * 在裁切範圍內算這一步的結果；範圍超過 cap 個體素就回傳 null（留給 Worker）。
  * 範圍內逐體素和 applyOp 的結果相同；範圍外這一步本來就不會改到。
+ * box：呼叫端已經算好的 previewBox（applyOpInPlace 傳進來，同一個 Op 不算第二次；plan v15 §5.1）。
  */
-export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity, report?: Report, ringsFor?: RingsFor): Preview | null {
+export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap = Infinity, report?: Report, ringsFor?: RingsFor, box0?: BBox | null): Preview | null {
   const op = upgradeOp(input);
-  const box = previewBox(s, op);
+  const box = box0 === undefined ? previewBox(s, op) : box0;
   if (!box || boxVoxels(box) > cap) return null;
   const vol = cropVolume(s.vol, box);
   const o = cropVolume(orig, box);

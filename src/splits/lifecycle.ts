@@ -2,7 +2,7 @@
 // 補丁＝和原始不同（data 或 labels）的外框裡的 data／labels；外框外和原始逐位元組相同（每一步的補丁外框、
 // relabel 的 S 與換編號的結構外框都 union 進 touch，所以外面不會有不同）。
 import type { Axis, BBox, Comp, Labeled, Volume } from '../volume/volume';
-import { type Step, boxSize, cropArr, pasteArr, tightBox, unionBox } from '../volume/patch';
+import { type DiffAxes, type Step, boxSize, cropArr, diffBoxOfAxes, newAxes, pasteArr, unionBox } from '../volume/patch';
 
 type Dims = { X: number; Y: number; Z: number };
 
@@ -124,13 +124,16 @@ export interface Buffers {
   counts: Float64Array;
   /** 所有改過的範圍（寬鬆）：park 時只掃這裡。 */
   touch: BBox | null;
+  /** 三條軸的 diff 直方圖（plan v15 A2）：貼合的 diff 外框 O(X+Y+Z)。 */
+  axes: DiffAxes;
 }
 
-/** restore：原始複本（O(N) memcpy）→ 貼補丁 → box 內對照原始算 diff 與體積帳。 */
+/** restore：原始複本（O(N) memcpy）→ 貼補丁 → box 內對照原始算 diff 與體積帳（順手數 axes）。 */
 export function restoreBuffers(dims: Dims, orig: Uint8Array, origLabels: Int32Array, origCounts: Float64Array, p: SplitPatch): Buffers {
   const data = orig.slice();
   const labels = origLabels.slice();
   const diff = new Uint8Array(orig.length);
+  const axes = newAxes(dims);
   applyPatch(dims, data, labels, p);
   const st = patchStats(dims, p, orig, origCounts);
   if (p.box) {
@@ -138,15 +141,21 @@ export function restoreBuffers(dims: Dims, orig: Uint8Array, origLabels: Int32Ar
     for (let z = b.z0; z <= b.z1; z++)
       for (let y = b.y0; y <= b.y1; y++) {
         const row = (z * dims.Y + y) * dims.X;
-        for (let x = b.x0; x <= b.x1; x++) if (data[row + x] !== orig[row + x]) diff[row + x] = 1;
+        for (let x = b.x0; x <= b.x1; x++)
+          if (data[row + x] !== orig[row + x]) {
+            diff[row + x] = 1;
+            axes.x[x]++;
+            axes.y[y]++;
+            axes.z[z]++;
+          }
       }
   }
-  return { data, labels, diff, diffCount: st.changed, counts: st.counts, touch: p.box ? { ...p.box } : null };
+  return { data, labels, diff, diffCount: st.changed, counts: st.counts, touch: p.box ? { ...p.box } : null, axes };
 }
 
-/** live 帳簿的摘要（diff 外框只掃 touch）。 */
-export function buffersStats(dims: Dims, b: Buffers): SplitStats {
-  return { changed: b.diffCount, diffBox: b.diffCount ? tightBox(dims, b.diff, b.touch) : null, counts: b.counts };
+/** live 帳簿的摘要（diff 外框從三條軸的直方圖來，O(X+Y+Z)；plan v15 A2）。 */
+export function buffersStats(_dims: Dims, b: Buffers): SplitStats {
+  return { changed: b.diffCount, diffBox: b.diffCount ? diffBoxOfAxes(b.axes) : null, counts: b.counts };
 }
 
 /** 補丁佔多少位元組。 */

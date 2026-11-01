@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { type Labeled, MATERIALS, demoVolume, initialLabeled, maskOf, relabelFull } from './volume';
+import { type BBox, type Labeled, MATERIALS, demoVolume, initialLabeled, maskOf, relabelFull, relabelStats } from './volume';
 import { type EditState, type Op, applyOp, matNameOf } from './ops';
 import { applyOpLocal } from './apply';
-import { applyStep } from './patch';
+import { applyStep, cropArr } from './patch';
 
 const matName = matNameOf(MATERIALS);
 /** 兩份 labels 是不是同一套結構（逐體素比 key 與名稱；結構清單比 count 與 bbox）；編號可以不同。 */
@@ -111,4 +111,80 @@ describe('只在外框裡算＋補丁（§8.2、§8.3）', () => {
     expect(got.report.blocked).toBeGreaterThan(0);
     expect(Object.keys(got.report.blockedBy).map(Number).every((m) => m === 4 || m === 5)).toBe(true);
   }, 30_000);
+});
+
+describe('relabel 只快照 F（plan v15 A3）', () => {
+  const vol = demoVolume();
+  const base: EditState = { vol, L: initialLabeled(vol, matName) };
+  const poly = base.L.comps.filter((c) => c.mat === 6);
+  const fin = base.L.comps.find((c) => c.mat === 3)!;
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  const boxSize = (b: BBox) => (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1) * (b.z1 - b.z0 + 1);
+  /** 舊算法的快照大小：Smax = R ∪ 所有在 R±1 裡出現的結構的外框。 */
+  const smaxOf = (L: Labeled, R: BBox) => {
+    const { X, Y, Z } = vol;
+    const touched = new Set<number>();
+    for (let z = Math.max(0, R.z0 - 1); z <= Math.min(Z - 1, R.z1 + 1); z++)
+      for (let y = Math.max(0, R.y0 - 1); y <= Math.min(Y - 1, R.y1 + 1); y++)
+        for (let x = Math.max(0, R.x0 - 1); x <= Math.min(X - 1, R.x1 + 1); x++) {
+          const l = L.labels[(z * Y + y) * X + x];
+          if (l >= 0) touched.add(l);
+        }
+    let b = { ...R };
+    for (const k of touched) {
+      const c = L.comps[k].bbox;
+      b = { x0: Math.min(b.x0, c.x0), x1: Math.max(b.x1, c.x1), y0: Math.min(b.y0, c.y0), y1: Math.max(b.y1, c.y1), z0: Math.min(b.z0, c.z0), z1: Math.max(b.z1, c.z1) };
+    }
+    return boxSize(b);
+  };
+  type OpOf = (s: EditState) => Op;
+  // 切斷 fin 之後哪一段留著 fin.key 由投票決定：從留著的那一段往缺口推，兩段才會併回一塊
+  const pushBack: OpOf = (s) => {
+    const c = s.L.comps.find((x) => x.key === fin.key)!;
+    return { kind: 'push', keys: [fin.key], scope: { axis: 'z', lo: 60, hi: 64 }, dir: c.bbox.z0 > 64 ? [0, 0, -1] : [0, 0, 1], n: 5, follow: false, backfill: 'orig' };
+  };
+  const cases: { name: string; ops: (Op | OpOf)[]; sNotF?: boolean; moves?: boolean; shrink?: boolean }[] = [
+    { name: 'fin 長高 1、只改 z 40～50（只是相鄰的大結構不再進快照）', ops: [{ kind: 'push', keys: [fin.key], scope: { axis: 'z', lo: 40, hi: 50 }, dir: [0, -1, 0], n: 1, follow: true, backfill: 'orig' }], shrink: true },
+    { name: 'poly 底部削掉 2 格露出 STI（回填空氣）', ops: [{ kind: 'push', keys: [poly[1].key], scope: full, dir: [0, 1, 0], n: -2, follow: false, backfill: 0 }] },
+    { name: '兩個結構併成一個（merged-away 的外框不在 F 裡，S ≠ F）', ops: [{ kind: 'material', keys: [fin.key], scope: { axis: 'z', lo: 60, hi: 64 }, m: 0 }, pushBack], sNotF: true },
+    { name: '整個結構換成空氣（步驟 8 有搬動）', ops: [{ kind: 'material', keys: [fin.key], scope: full, m: 0 }], moves: true, shrink: true },
+  ];
+  for (const c of cases)
+    it(`${c.name}：和 applyOp 相同、before === 改前 labels 在 S 的裁片、快照 === F ≤ S`, () => {
+      let a: EditState = base;
+      let sa = 1000;
+      let grew = false;
+      let moved = false;
+      let shrunk = false;
+      for (const op0 of c.ops) {
+        const op = typeof op0 === 'function' ? op0(a) : op0;
+        let sb = sa;
+        const labelsBefore = a.L.labels;
+        const ref = applyOp(a, op, { orig: vol, matName, newKey: () => `c${sb++}` });
+        const got = applyOpLocal(a, op, { orig: vol, matName, newKey: () => `c${sa++}` });
+        const { snapshot, F, S } = relabelStats;
+        expect(diffCount(got.state.vol.data, ref.vol.data)).toBe(0);
+        sameStructures(got.state.L, ref.L);
+        expect(got.step.data).not.toBeNull();
+        const lp = got.step.labels!;
+        expect(lp.box).toEqual(S);
+        expect(diffCount(lp.before, cropArr(labelsBefore, vol, lp.box))).toBe(0);
+        expect(snapshot).toBe(boxSize(F!));
+        expect(boxSize(F!)).toBeLessThanOrEqual(boxSize(S!));
+        if (boxSize(S!) > boxSize(F!)) grew = true;
+        if (lp.moves.length) moved = true;
+        // 快照不會比舊算法（Smax）大；刻意挑的案例要小一個數量級以上
+        const smax = smaxOf(a.L, got.step.data!.box);
+        expect(snapshot).toBeLessThanOrEqual(smax);
+        if (snapshot * 10 < smax) shrunk = true;
+        // 補丁往回貼回到改前
+        const back = applyStep(got.state, got.step, 'back');
+        expect(diffCount(back.L.labels, a.L.labels)).toBe(0);
+        expect(back.L.comps).toEqual(a.L.comps);
+        a = got.state;
+      }
+      if (c.sNotF) expect(grew).toBe(true);
+      if (c.moves) expect(moved).toBe(true);
+      if (c.shrink) expect(shrunk).toBe(true);
+    }, 30_000);
 });

@@ -165,3 +165,155 @@ describe('單本帳簿的 Worker 協定（plan v9 §4.2）', () => {
     expect(sidOf({ vol: { ...v, data: new Uint8Array(8) } })).not.toBe(sidOf(s1));
   });
 });
+
+describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview 不送 comps', () => {
+  const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+  const pv = { cap: Infinity, hidden: new Uint8Array(256), palette: new Float32Array(768).fill(0.5), showDiff: false, seq: 1, mesh: false };
+
+  it('每個 handler 之後 diffBoxOfAxes === tightBox（apply／derive／fork／replay／put／restore）', async () => {
+    const { diffBoxOfAxes, tightBox } = await import('./patch');
+    const { applyStepInPlace } = await import('./patch');
+    const { extractPatch } = await import('../splits/lifecycle');
+    const { orig, own, step } = await setup();
+    const checkAll = () => {
+      for (const [o, b] of core.inspect().books) if (o !== 'base') expect(diffBoxOfAxes(b.axes)).toEqual(b.diffCount ? tightBox(orig.vol, b.diff!, b.touch) : null);
+    };
+    let s = own('ax', orig);
+    await tick();
+    checkAll();
+    const poly = s.L.comps.find((c) => c.mat === 6)!;
+    const fin = s.L.comps.find((c) => c.mat === 3)!;
+    const full = { axis: 'z' as const, lo: 0, hi: s.vol.Z - 1 };
+    const steps: Step[] = [];
+    for (const op of [
+      { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' },
+      { kind: 'translate', keys: [fin.key], scope: { axis: 'z', lo: 40, hi: 90 }, d: [2, 0, 0], backfill: 'orig', follow: true },
+      { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: -2, follow: true, backfill: 'orig' },
+    ] as Op[]) {
+      const r = await step(s, op);
+      s = r.next;
+      steps.push(r.step);
+      checkAll();
+    }
+    // 復原兩步、重做一步
+    let cur = s;
+    for (let k = steps.length - 1; k >= 1; k--) {
+      const to = client.newVersion();
+      await client.deriveIn(cur, to, steps[k], 'back');
+      applyStepInPlace(cur.vol, cur.vol.data, cur.L.labels, steps[k], 'back');
+      cur = { ...cur, version: to };
+      checkAll();
+    }
+    // fork、replay
+    void client.forkIn('ax2', cur, client.newVersion());
+    await tick();
+    checkAll();
+    await client.replayIn('ax3', orig, { ops: [{ kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 3, follow: true, backfill: 'orig' }], matNames, keyCounter: 1000 });
+    checkAll();
+    // restore（parked → live）
+    const b = core.inspect().books.get('ax3')!;
+    const patch = extractPatch(orig.vol, b.data, b.labels, orig.vol.data, orig.L.labels, b.touch, core.inspect().compsOf.get('ax3')!);
+    await client.restoreIn('ax4', client.newVersion(), patch);
+    checkAll();
+    // put（帳簿掉了之後補送）
+    client.dropOwners(['ax']);
+    await tick();
+    cur = (await step(cur, { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 1, follow: true, backfill: 'orig' })).next;
+    expect(sent.some((m) => m.type === 'put')).toBe(true);
+    checkAll();
+  }, 30_000);
+
+  it('apply 回的 report 已摘要（C7）：cells 是 Int32Array、≤ BLOCKED_CAP；slices 的 blocked 總和 === total.blocked；applyParked 同', async () => {
+    const { BLOCKED_CAP } = await import('./report');
+    const { orig, own } = await setup();
+    const s = own('rp', orig);
+    const fin = s.L.comps.find((c) => c.mat === 3)!;
+    const full = { axis: 'z' as const, lo: 0, hi: s.vol.Z - 1 };
+    const op: Op = { kind: 'level', keys: [fin.key], scope: full, dir: [0, -1, 0], to: fin.bbox.y0, local: { center: [40, 30, 64], radius: null }, backfill: 'orig', follow: false };
+    const r = await client.applyIn(s, { op, matNames, keyCounter: 1000 });
+    const rep = r.report;
+    expect(rep.total.blocked).toBeGreaterThan(0);
+    expect(rep.cells).toBeInstanceOf(Int32Array);
+    expect(rep.cells.length).toBe(Math.min(rep.total.blocked, BLOCKED_CAP));
+    expect(rep.slices.reduce((n, x) => n + x.blocked, 0)).toBe(rep.total.blocked);
+    expect(rep.axis).toBe('z');
+    // 被擋的格子都在改前是 TiN／HfO₂（4、5）
+    const bad = Array.from(rep.cells).filter((i) => orig.vol.data[i] !== 4 && orig.vol.data[i] !== 5).length;
+    expect(bad).toBe(0);
+    const pk = await client.applyParkedIn({ patch: { box: null, data: new Uint8Array(0), labels: new Int32Array(0), comps: orig.L.comps }, ops: [op], matNames, keyCounter: 2000 });
+    expect(pk.reports[0].cells).toBeInstanceOf(Int32Array);
+    expect(pk.reports[0].total.blocked).toBe(rep.total.blocked);
+  }, 30_000);
+
+  it('VOID 層（A5）：全量不呼叫 boxOf，chunk 集合 === 逐 chunk 暴力找 VOID；一步產生新的 VOID 之後一樣', async () => {
+    const { chunkBox, chunkCount, gridOf } = await import('./chunks');
+    const { VOID } = await import('./volume');
+    const vol = demoVolume();
+    core.handle('load', { sid: 300, vol: { ...vol, data: vol.data.slice() } });
+    const brute = (data: Uint8Array) => {
+      const g = gridOf(vol);
+      const out: number[] = [];
+      for (let k = 0; k < chunkCount(g); k++) {
+        const b = chunkBox(vol, g, k);
+        let any = false;
+        for (let z = b.z0; z <= b.z1 && !any; z++) for (let y = b.y0; y <= b.y1 && !any; y++) for (let x = b.x0; x <= b.x1; x++) if (data[(z * vol.Y + y) * vol.X + x] === VOID) { any = true; break; }
+        if (any) out.push(k);
+      }
+      return out;
+    };
+    const layerOf = (sid: number) => {
+      const n = core.scanStats.boxOf;
+      const [r] = core.handle('layer', { sid, key: 'void', filter: { mat: VOID }, tint: [0, 0, 0], inflate: 0.01 }) as [{ full: boolean; items: { k: number; m: { quads: number } }[] }, unknown];
+      expect(core.scanStats.boxOf).toBe(n);
+      expect(r.full).toBe(true);
+      return r.items.filter((it) => it.m.quads > 0).map((it) => it.k).sort((a, b) => a - b);
+    };
+    expect(core.inspect().origVoidBox).not.toBeNull();
+    expect(layerOf(300)).toEqual(brute(vol.data));
+    // 一步把一根 poly 換成 VOID（新的 VOID 在 touch 裡）
+    const L = initialLabeled(vol, matName);
+    const poly = L.comps.filter((c) => c.mat === 6)[1];
+    core.handle('fork', { owner: 'v', src: 'base', sid: 300 });
+    const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+    core.handle('apply', { owner: 'v', from: 300, to: 301, comps: L.comps, op: { kind: 'material', keys: [poly.key], scope: full, m: VOID }, matNames, keyCounter: 1000 });
+    const b = core.inspect().books.get('v')!;
+    expect(layerOf(301)).toEqual(brute(b.data));
+    // 其他材質仍走 boxOf（對照）
+    const n = core.scanStats.boxOf;
+    core.handle('layer', { sid: 301, key: 'm6', filter: { mat: 6 }, tint: [0, 0, 0] });
+    expect(core.scanStats.boxOf).toBe(n + 1);
+    // mesh 的 {mat: VOID} 路徑也不掃
+    core.handle('mesh', { sid: 301, hidden: new Uint8Array(256), only: { mat: VOID }, palette: new Float32Array(768) });
+    expect(core.scanStats.boxOf).toBe(n + 1);
+  }, 30_000);
+
+  it('previewIn 不送 comps（§10）：Worker 用自己存的 compsOf；結果和帶 comps 相同；原始經 compsIn、掉帳簿經 put 都有', async () => {
+    const { previewOp } = await import('./preview');
+    const { orig, own, step } = await setup();
+    let s = own('pc', orig);
+    const poly = s.L.comps.find((c) => c.mat === 6)!;
+    const full = { axis: 'z' as const, lo: 0, hi: s.vol.Z - 1 };
+    const push: Op = { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' };
+    s = (await step(s, push)).next;
+    sent.length = 0;
+    const a = (await client.previewIn(s, { op: push, ...pv })) as { box: unknown; data: Uint8Array };
+    expect(sent.map((m) => m.type)).toEqual(['preview']);
+    expect('comps' in sent[0].req).toBe(false);
+    const [b] = core.handle('preview', { sid: s.version!, comps: s.L.comps, op: push, ...pv }) as [{ box: unknown; data: Uint8Array }, unknown];
+    expect(a.box).toEqual(b.box);
+    expect(same(a.data, b.data)).toBe(true);
+    const p = previewOp(s, orig.vol, push)!;
+    expect(same(a.data, p.data)).toBe(true);
+    // 原始：主執行緒命名後 compsIn 一次
+    await client.compsIn('base', orig.L.comps);
+    const c = (await client.previewIn(orig, { op: push, ...pv })) as { data: Uint8Array };
+    expect(same(c.data, previewOp(orig, orig.vol, push)!.data)).toBe(true);
+    // 帳簿掉了：下一步 put 帶 comps，之後 preview 照常
+    client.dropOwners(['pc']);
+    await tick();
+    s = (await step(s, push)).next;
+    expect(sent.find((m) => m.type === 'put')!.req.comps).toBeTruthy();
+    const d = (await client.previewIn(s, { op: push, ...pv })) as { data: Uint8Array };
+    expect(same(d.data, previewOp(s, orig.vol, push)!.data)).toBe(true);
+  }, 30_000);
+});

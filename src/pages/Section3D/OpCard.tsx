@@ -546,8 +546,9 @@ export function DefectCard({ ed, compact }: { ed: Editor; compact?: boolean }) {
  * 卡片（長／縮、方頭／圓頭、移動、材質、缺陷）與範圍控制 render 期間會讀的 ed 欄位（plan v15 B2）：
  * 掛著卡片的 memoEd 元件（EditToolbar、FloatingToolbar、Inspector）把它併進 uses。
  */
+/** 卡片 render 會讀的 ed 欄位（memoEd 的 uses）。`cursor` 不在這裡：只有圓頭卡片讀它，它自己是 memoEd（換 cursor 時 Inspector／工具列不必跟著 render，plan v15 §7 e2e 2）。 */
 export const CARD_USES: readonly EdKey[] = [
-  'L', 'vol', 'comps', 'materials', 'matName', 'origByKey', 'sel', 'selComps', 'selBox', 'selMask', 'selRange', 'scope', 'scopeMode', 'customRange', 'editAxis', 'cursor',
+  'L', 'vol', 'comps', 'materials', 'matName', 'origByKey', 'sel', 'selComps', 'selBox', 'selMask', 'selRange', 'scope', 'scopeMode', 'customRange', 'editAxis',
   'busy', 'queued', 'report', 'follow', 'backfill', 'mirror', 'pushPolicy', 'nmPerVoxel', 'hidden',
   'pushOp', 'cdOp', 'dilateOp', 'taperOp', 'translateOp', 'materialOp', 'levelOp', 'defectOp', 'commit',
 ];

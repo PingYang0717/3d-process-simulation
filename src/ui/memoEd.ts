@@ -24,6 +24,10 @@ interface Holder {
 
 const DEV = import.meta.env.DEV;
 
+/** Proxy → 它的 holder：memoEd 元件裡再放一個 memoEd 元件（例如 Inspector 裡的 RoundCard）時，內層要讀原始的 Editor，不經外層的 Proxy（否則外層會把內層讀的欄位算成自己的）。 */
+const holderOf = new WeakMap<Editor, Holder>();
+export const rawEd = (ed: Editor): Editor => holderOf.get(ed)?.ed ?? ed;
+
 /** DEV：每個元件 commit 幾次（perf.cjs、e2e 讀 window.__rendersBy；呼叫端放在 useLayoutEffect 裡才不會被 StrictMode 的雙 render 算兩次）。 */
 export function countRender(name: string) {
   if (!DEV || typeof window === 'undefined') return;
@@ -39,7 +43,7 @@ export function liveEd(holder: Holder): Editor {
     holder.warned.add(k);
     console.error(`memoEd：${holder.name} 讀了 ed.${k} 但沒列在 uses`);
   };
-  return new Proxy({} as Editor, {
+  const proxy = new Proxy({} as Editor, {
     get: (_, k) => {
       warn(k);
       return holder.ed[k as EdKey];
@@ -52,6 +56,8 @@ export function liveEd(holder: Holder): Editor {
     },
     set: () => false,
   });
+  holderOf.set(proxy, holder);
+  return proxy;
 }
 
 type Inner<P> = P & { __vals: readonly unknown[]; __holder: Holder };
@@ -85,13 +91,14 @@ export function memoEd<P extends { ed: Editor }>(Component: ComponentType<P>, us
   Memo.displayName = `memoEd(${name})`;
   const Outer = (props: P) => {
     const ref = useRef<{ holder: Holder; live: Editor } | null>(null);
+    const raw = rawEd(props.ed);
     if (!ref.current) {
-      const holder: Holder = { ed: props.ed, rendering: false, name, uses: usesSet, warned: new Set() };
+      const holder: Holder = { ed: raw, rendering: false, name, uses: usesSet, warned: new Set() };
       ref.current = { holder, live: liveEd(holder) };
     }
     const { holder, live } = ref.current;
-    holder.ed = props.ed;
-    const vals = uses.map((k) => props.ed[k]);
+    holder.ed = raw;
+    const vals = uses.map((k) => raw[k]);
     return createElement(Memo, { ...props, ed: live, __vals: vals, __holder: holder } as Inner<P>);
   };
   Outer.displayName = name;

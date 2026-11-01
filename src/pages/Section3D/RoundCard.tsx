@@ -6,6 +6,7 @@ import type { Axis } from '../../volume/volume';
 import { type Scope, axisIndex, boxRange, fullScope, planeAxes } from '../../volume/scope';
 import { type CornerId, type RoundGesture, roundBuild, roundOutline } from '../../slice/round';
 import { type Editor, slicesWith } from './editor';
+import { memoEd } from '../../ui/memoEd';
 import { CardShell, wordsOf } from './OpCard';
 import { longestAxis, nearestSlice } from './PositionBar';
 import { whoText } from './opWords';
@@ -36,7 +37,17 @@ export function roundFrame(ed: Pick<Editor, 'editAxis' | 'cursor' | 'selMask' | 
   return { axis, at, scope };
 }
 
-export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact?: boolean; plane?: Axis; initial?: Partial<RoundGesture> }) {
+/**
+ * 圓頭卡片是唯一在 render 讀 `ed.cursor` 的卡片（參考片跟著十字），所以自己 memoEd（plan v15 B2）：
+ * 換 cursor 只有它重 render，Inspector／工具列的 `CARD_USES` 不含 cursor。清單＝`CARD_USES`（不能 import，和 OpCard 互相引用）＋ `cursor`。
+ */
+export const RoundCard = memoEd(RoundCardImpl, [
+  'L', 'vol', 'comps', 'materials', 'matName', 'origByKey', 'sel', 'selComps', 'selBox', 'selMask', 'selRange', 'scope', 'scopeMode', 'customRange', 'editAxis', 'cursor',
+  'busy', 'queued', 'report', 'follow', 'backfill', 'mirror', 'pushPolicy', 'nmPerVoxel', 'hidden',
+  'pushOp', 'cdOp', 'dilateOp', 'taperOp', 'translateOp', 'materialOp', 'levelOp', 'defectOp', 'commit',
+], 'RoundCard');
+
+function RoundCardImpl({ ed, compact, plane, initial }: { ed: Editor; compact?: boolean; plane?: Axis; initial?: Partial<RoundGesture> }) {
   const [corners, setCorners] = useState<Record<CornerId, CornerKind>>(() => {
     const c: Record<CornerId, CornerKind> = { ul: 'none', ur: 'none', ll: 'none', lr: 'none' };
     for (const x of initial?.corners ?? [{ id: 'ul' }, { id: 'ur' }]) c[x.id] = x.concave ? 'concave' : 'convex';

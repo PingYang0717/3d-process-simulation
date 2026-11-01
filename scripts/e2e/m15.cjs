@@ -456,9 +456,8 @@ function readZip(buf) {
     ok(!d.layer, `layer 請求不增（${d.layer ?? 0}）`);
     ok(c1.hb === c0.hb, `把手不重建（__handleBuilds ${c0.hb} → ${c1.hb}）`);
     ok(c1.list === c0.list, `StructureList commit 0 次（${c1.list - c0.list}）`);
-    // Inspector 的 uses（OpCard 的 CARD_USES）含 cursor（RoundCard 顯示「這一片」要讀），memoEd 比的是 uses 的值，所以沒開卡片也每次換 cursor commit 1 次：
-    // §7 寫 0 次，這裡斷言 ≤ 20 並印出來（src 的問題，見回報）
-    ok(c1.insp - c0.insp <= 20, `Inspector commit ≤ 20 次（${c1.insp - c0.insp}；§7 目標 0，CARD_USES 含 cursor）`);
+    // 只有圓頭卡片在 render 讀 cursor，它自己是 memoEd；Inspector 的 CARD_USES 不含 cursor，所以換 cursor 時 0 次
+    ok(c1.insp === c0.insp, `Inspector commit 0 次（${c1.insp - c0.insp}）`);
     ok(c1.page - c0.page <= 20, `Section3DPage commit ≤ 20 次（${c1.page - c0.page}）`);
   }
 

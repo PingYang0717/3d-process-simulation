@@ -164,7 +164,7 @@
 | 每步 `diffBox`（主執行緒），在相隔兩角各改一次之後 | **10.3 / 34.8**（touch 撐到 X×Z 全幅後每步掃 ∝ touch；沒撐開時 1.5 / 4.9） | **< 1**（O(X+Y+Z)） | `bench.ts step --corners` 印 diffBox ms | ✓ **0.02 / 0.02**（最大 0.04；沒撐開時 0.05 / 0.03；對照 `tightBox` 10.7 / 34.8，10 步 0 次不同） |
 | relabel 快照位元組（fin 在基板上長高 1） | **fin 左右搬 1（R±1 碰到基板）：48.8 MB / 143 MB／步**；poly 長高 1：4.9 / 16.4 MB／步（S 的 before 只有 0.4～23 MB） | **≤ F 的大小**（≈ R ∪ lost bbox；×3 < 2 MB） | `bench.ts step` 印 PS bytes | ✗ fin 左右搬 1：**29.3 / 23.3 MB**（基線 48.8 / 143；PF ＝ F，F 仍包含整根 fin 的 lost bbox 與 R±1 碰到的襯層）；poly 長高 1：4.5 / 15.1 MB（S ＝ F，和基線同）；A3 的省只在 S ≠ F 的步驟 |
 | 一步 Worker apply（×3，fin 長高 1） | poly 長高 1：162～342；fin 左右搬 1：629～1,056（含 143 MB 快照 memcpy） | **< 500**（A3 省掉的 memcpy＋D5） | `bench.ts step 3` | ✗ fin 左右搬 1 **563～895**（基線 629～1,056；主執行緒貼補丁 25～50）；poly 長高 1 146～166、縮 1 340～460 |
-| 開 X-ray／切 split 後空洞層開始 mesh 前的掃描 | `layer {mat: VOID}` 全量 129 / 234（整陣列 closure 掃描佔大半；增量 23 / 77）；頁面往返 145（×2） | **< 5**（只看 voidBox ∩ touch） | `bench.ts layer void`、`perf.cjs` `__posts.layer` 時間 | 掃描 ✓ 0（不再掃整陣列；全量 35～71 / 82～106 全是 mesh）；增量 21～38 / 80～88；**非相鄰版本（寬 touch 之後）236 / 659 ✗**（基線 84 / 208；`voidBoxOf`＝origVoidBox ∪ touch 是鬆外框，見 §11.3） |
+| 開 X-ray／切 split 後空洞層開始 mesh 前的掃描 | `layer {mat: VOID}` 全量 129 / 234（整陣列 closure 掃描佔大半；增量 23 / 77）；頁面往返 145（×2） | **< 5**（只看 voidBox ∩ touch） | `bench.ts layer void`、`perf.cjs` `__posts.layer` 時間 | 掃描 ✓ 0（不再掃整陣列；全量 35～71 / 82～106 全是 mesh）；增量 21～38 / 80～88；非相鄰版本 36 / 65 ✓（基線 84 / 208；M15.7 追加改成三軸 VOID 直方圖的貼合外框，見 §11.1、§11.3） |
 | 點切面換 cursor 一次：Worker `layer` 請求、把手重建次數 | **1 次／（把手：待 M15.2 加 `__handleBuilds`）**；另整頁 render 4 次、20 次共 50 個 long task（×2） | **0 / 0** | `perf.cjs`：`__posts.layer` 差、`__handleBuilds` 差 | 協調者補（`perf.cjs --v15 --only=2`） |
 | 拖欄寬 60 個 pointermove：整頁 render 次數 | **240**（每個 pointermove 4 次）＋ 3D 重畫 120 幀、153 個 long task（×2） | **≤ 耗時幀數**（rAF 合併，headless 約 10～20） | `perf.cjs` React Profiler commit 計數 | 協調者補（`perf.cjs --v15 --only=1`） |
 | 一步之後 `Section3DPage` 以外的重 render（StructureList／Inspector／SplitPicker／EditToolbar） | 待 M15.2 加 `__renders[元件]`（整頁 `__renders` 一步 ≈ 4～6 次） | **只有讀到的欄位變了才 render**（Profiler 每步 ≤ 2 次） | `perf.cjs` `__renders` 按元件計數 | 協調者補（`__rendersBy`） |
@@ -688,7 +688,7 @@ DEV 計數器（`__selMaskMs`、`__diffBoxMs`、`__handleBuilds`、`__bvhBuilds`
 | 頁面層級（`layer` 請求數、把手重建、`__rendersBy`、hover long task／`__bvhStats`、拖欄寬 commit、上傳／匯出 heap、hover 60 次的 `__overlayMs`） | 協調者補 | 協調者補 | 協調者補 | `perf.cjs --v15`、`m15.cjs` |
 | 測試 | 261 → **369**（44 個檔） | | | `npx vitest run` |
 
-和基線比，一句話：每步的主執行緒固定成本（selMask 長高步、diffBox、stairs／verify、hist）與 2D 每幀都到目標；PS 快照、解碼、VOID 層非相鄰版本、Worker apply ×3 沒到（§11.3）。
+和基線比，一句話：每步的主執行緒固定成本（selMask 長高步、diffBox、stairs／verify、hist）與 2D 每幀都到目標；PS 快照、解碼、Worker apply ×3 沒到（§11.3；VOID 層非相鄰版本在 M15.7 追加修正後已到）。
 
 ### 11.3 沒達到的目標與理由
 

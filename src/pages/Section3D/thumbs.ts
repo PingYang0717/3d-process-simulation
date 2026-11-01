@@ -143,8 +143,13 @@ export function thumbStore(key: string, b: ImageBitmap | HTMLCanvasElement) {
 /** 開發模式量測：快取了幾張。 */
 export const thumbCount = () => bitmaps.size;
 
+/** 選取描邊的顏色（antd 的 colorPrimary）。 */
+export const SEL_EDGE: Vec3 = [22, 119, 255];
+
 /**
- * 結構縮圖（plan v12 §5.4 設計區第 1 步，120 px）：結構用選取藍、其他半透明（混白）；face＝滑過六面小方塊的那一面（橘線）。
+ * 結構縮圖（plan v12 §5.4 設計區第 1 步，120 px）：選到的結構畫材質原色、外圈 1 px 選取藍描邊（plan v14 §5.5：
+ * 不再混藍，紅色 Poly 才不會變紫、和 SiN 撞色），其他半透明（混白）；face＝滑過六面小方塊的那一面（橘線）。
+ * on＝slab.L.comps 裡選到的編號。
  */
 export function structThumbRGBA(
   slab: Slab,
@@ -167,6 +172,7 @@ export function structThumbRGBA(
   // 切面像素是 (u, v) 列優先；slab 是法線軸長 1 的假 Volume，YZ（法線 x）那一片的格子 index 是 z*Y + y＝u*Y + v，不是 v*W + u
   const { X: SX, Y: SY } = slab.vol;
   const vi = slab.axis === 'x' ? (u: number, v: number) => u * SY + v : (u: number, v: number) => v * SX + u;
+  const selPx = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) {
     const v = crop.v0 + Math.min(CH - 1, Math.floor(y / s));
     for (let x = 0; x < W; x++) {
@@ -174,13 +180,26 @@ export function structThumbRGBA(
       const p4 = (v * full.W + u) * 4;
       const o = (y * W + x) * 4;
       const sel = on.has(lab[vi(u, v)]);
+      if (sel) selPx[y * W + x] = 1;
       for (let c = 0; c < 3; c++) {
         const p = full.data[p4 + c];
-        out[o + c] = sel ? (p + [22, 119, 255][c]) >> 1 : Math.round(p * 0.35 + 255 * 0.65);
+        out[o + c] = sel ? p : Math.round(p * 0.35 + 255 * 0.65);
       }
       out[o + 3] = 255;
     }
   }
+  // 描邊：選到的像素、四鄰有沒選到的（畫面邊緣不算）
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const k = y * W + x;
+      if (!selPx[k]) continue;
+      const edge = (x > 0 && !selPx[k - 1]) || (x < W - 1 && !selPx[k + 1]) || (y > 0 && !selPx[k - W]) || (y < H - 1 && !selPx[k + W]);
+      if (!edge) continue;
+      const o = k * 4;
+      out[o] = SEL_EDGE[0];
+      out[o + 1] = SEL_EDGE[1];
+      out[o + 2] = SEL_EDGE[2];
+    }
   if (box && face) {
     const a = face[0] ? 0 : face[1] ? 1 : 2;
     const [ua, va] = uvAxes(slab.axis);

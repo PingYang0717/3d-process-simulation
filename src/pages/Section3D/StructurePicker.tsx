@@ -7,7 +7,7 @@ import { Button, Segmented, Select, Slider, Tooltip, Typography } from 'antd';
 import { EyeOutlined } from '@ant-design/icons';
 import { type Axis, type BBox, type Vec3, hexToRgb, unionBBox } from '../../volume/volume';
 import type { Factor } from '../../volume/factors';
-import type { Editor } from './editor';
+import type { Editor, Split } from './editor';
 import { slabOf } from './slabs';
 import { autoAxis, structThumbRGBA, thumbCrop, thumbScale } from './thumbs';
 import { usePersisted } from '../../ui/persist';
@@ -215,7 +215,10 @@ function drawMarks(g: CanvasRenderingContext2D, W: number, H: number, axis: Axis
 const STAGE_MIN = 140;
 const STAGE_MAX = 560;
 
-export function StructPreview({ ed, keys, face, marks, onOpen3D }: { ed: Editor; keys: string[]; face?: Vec3 | null; marks: Mark[]; onOpen3D?: () => void }) {
+/**
+ * start（plan v14 §5.5）：「從哪裡開始」選的那個 split（null＝原始）——縮圖畫的是產生時真正要算的那個底；沒給＝目前的 split。
+ */
+export function StructPreview({ ed, keys, face, marks: allMarks, onOpen3D, start }: { ed: Editor; keys: string[]; face?: Vec3 | null; marks: Mark[]; onOpen3D?: () => void; start?: Split | null }) {
   const img = useRef<HTMLCanvasElement>(null);
   const over = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
@@ -234,21 +237,38 @@ export function StructPreview({ ed, keys, face, marks, onOpen3D }: { ed: Editor;
   const [axisMode, setAxisMode] = useState<'auto' | Axis>('auto');
   const [atBy, setAtBy] = useState<Partial<Record<Axis, number>>>({});
   const [notes, setNotes] = useState<string[]>([]);
+  // 舞台在畫面上才畫（plan v14 P7）：捲出去、被收起時不重畫
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const el = stage.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [keys.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+  const base = start === undefined ? ed.active : start;
   const L = ed.L;
-  const box = useMemo(() => unionBBox(L.comps.filter((c) => keys.includes(c.key))), [L, keys]);
+  // 外框用數字當 key：每一步編輯 L 都換，外框沒變就不必重畫
+  const box0 = unionBBox(L.comps.filter((c) => keys.includes(c.key)));
+  const boxSig = box0 ? `${box0.x0},${box0.y0},${box0.z0},${box0.x1},${box0.y1},${box0.z1}` : '';
+  const box = useMemo(() => box0, [boxSig]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 只標和目前選取有關的變數（plan v14 §5.5）
+  const marks = useMemo(() => allMarks.filter((m) => m.f.keys.some((k) => keys.includes(k))), [allMarks, keys]);
   const rgb = useMemo(() => new Map(ed.materials.map((m) => [m.id, hexToRgb(m.color)])), [ed.materials]);
   const axis: Axis = axisMode === 'auto' ? (autoAxis(box) ?? 'z') : axisMode;
   const a = AXI[axis];
   const range: [number, number] = box ? [lo(box)[a], hi(box)[a]] : [0, 0];
-  const at = Math.min(range[1], Math.max(range[0], atBy[axis] ?? (range[0] + range[1]) >> 1));
+  // 切片：使用者自己拖過就照拖的，否則跟著十字（plan v14 §5.5）
+  const at = Math.min(range[1], Math.max(range[0], atBy[axis] ?? ed.cursor[a]));
   const marksSig = marks.map((m) => `${m.f.id}|${m.f.op}|${JSON.stringify(m.f.template)}|${m.color}|${m.hot ? 1 : 0}`).join(';');
 
   useEffect(() => {
     const cv = img.current;
     const ov = over.current;
-    if (!cv || !ov || !box) return;
-    const slab = slabOf(ed.orig, ed.active, axis, at);
-    const on = new Set(L.comps.flatMap((c, i) => (keys.includes(c.key) ? [i] : [])));
+    if (!cv || !ov || !box || !visible) return;
+    const slab = slabOf(ed.orig, base, axis, at);
+    // slab 的編號是那個狀態自己的（原始和目前的 split 不同）：用 key 對
+    const on = new Set(slab.L.comps.flatMap((c, i) => (keys.includes(c.key) ? [i] : [])));
     const crop = thumbCrop(axis, [box], ed.vol, 10);
     // 倍率：塞進舞台（寬、高都不超過），且最多 8 倍；structThumbRGBA 只吃「長邊上限」，換算回去
     const CW = crop.u1 - crop.u0 + 1;
@@ -264,7 +284,7 @@ export function StructPreview({ ed, keys, face, marks, onOpen3D }: { ed: Editor;
     setNotes(drawMarks(ov.getContext('2d')!, pic.W, pic.H, axis, crop, thumbScale(crop, max), box, marks));
     // marks 的內容走 marksSig
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [box, rgb, ed.hidden, face, ed.orig, ed.active, ed.vol, L, keys, maxW, maxH, axis, at, marksSig]);
+  }, [box, rgb, ed.hidden, face, ed.orig, base, ed.vol, keys, maxW, maxH, axis, at, marksSig, visible]);
 
   if (!box)
     return (
@@ -343,7 +363,7 @@ export function StructPreview({ ed, keys, face, marks, onOpen3D }: { ed: Editor;
   );
 }
 
-export function StructurePicker({ ed, face, marks, onOpen3D }: { ed: Editor; face?: Vec3 | null; marks: Mark[]; onOpen3D?: () => void }) {
+export function StructurePicker({ ed, face, marks, onOpen3D, start }: { ed: Editor; face?: Vec3 | null; marks: Mark[]; onOpen3D?: () => void; start?: Split | null }) {
   const keys = useMemo(() => [...ed.sel], [ed.sel]);
   const options = useMemo(() => {
     const byMat = new Map<number, typeof ed.comps>();
@@ -394,7 +414,7 @@ export function StructurePicker({ ed, face, marks, onOpen3D }: { ed: Editor; fac
             ? `${keys.length} 個結構會一起改 · 和編輯頁的選取同步`
             : '可以多選；和編輯頁的選取同步'}
       </Text>
-      <StructPreview ed={ed} keys={keys} face={face} marks={marks} onOpen3D={keys.length ? onOpen3D : undefined} />
+      <StructPreview ed={ed} keys={keys} face={face} marks={marks} onOpen3D={keys.length ? onOpen3D : undefined} start={start} />
     </div>
   );
 }

@@ -239,7 +239,7 @@ export function DesignPanel({ ed, onMade, onOpen3D, onOpenStructure, title = tru
       </header>
 
       <Sec n={1} title="結構" state={st(0)} meta={ed.sel.size > 1 ? `${ed.sel.size} 個` : undefined}>
-        <StructurePicker ed={ed} face={face} marks={marks} onOpen3D={onOpenStructure} />
+        <StructurePicker ed={ed} face={face} marks={marks} onOpen3D={onOpenStructure} start={draft.from === 'active' ? ed.active : null} />
       </Sec>
 
       <Sec n={2} title="變數" state={st(1)} meta={draft.factors.length ? `${draft.factors.length} 個` : undefined}>

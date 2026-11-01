@@ -7,7 +7,7 @@ import type { Op } from '../../volume/ops';
 import { type SplitPatch, type SplitStats, busiestSlice, patchSliceCounts, slabOfArrays, slabOfPatch } from '../../splits/lifecycle';
 import { contourOf } from './overlay';
 import { DIFF_EDGE_RGB, REMOVED_RGB } from './drawSlice';
-import { LOOP_RGB, autoAxis, longestAxisOf, structThumbRGBA, thumbAt, thumbCrop, thumbRGBA, unionBoxes } from './thumbs';
+import { LOOP_RGB, SEL_EDGE, autoAxis, longestAxisOf, structThumbRGBA, thumbAt, thumbCrop, thumbRGBA, unionBoxes } from './thumbs';
 
 const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
 const rgb = new Map<number, Vec3>(MATERIALS.map((m) => [m.id, hexToRgb(m.color)]));
@@ -58,7 +58,7 @@ describe('結構縮圖（設計區 ①）', () => {
   const origLabels = (handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } })[0] as { labels: Int32Array }).labels;
   const p2 = comp('Poly-Si 2');
   const on = new Set(base.L.comps.flatMap((c, i) => (c.key === p2.key ? [i] : [])));
-  it('三個軸都把結構本身塗成選取藍（像素 ↔ 格子用明寫的 (x, y, z) 對照；YZ 那一片的格子 index 是 z*Y + y）', () => {
+  it('三個軸都把結構本身畫成原色＋選取藍描邊（plan v14 §5.5；像素 ↔ 格子用明寫的 (x, y, z) 對照；YZ 那一片的格子 index 是 z*Y + y）', () => {
     for (const axis of ['x', 'y', 'z'] as const) {
       const at = thumbAt(axis, null, p2.bbox, vol);
       const slab = slabOfArrays(vol, vol.data, origLabels, base.L.comps, vol.data, axis, at);
@@ -70,8 +70,8 @@ describe('結構縮圖（設計區 ①）', () => {
       const { X, Y } = slab.vol;
       const idx = (x: number, y: number, z: number) => (z * Y + y) * X + x;
       const b2 = rgb.get(p2.mat)!;
-      const blue: Vec3 = [(b2[0] + 22) >> 1, (b2[1] + 119) >> 1, (b2[2] + 255) >> 1];
       let want = 0;
+      let edge = 0;
       let mismatch = 0;
       for (let py = 0; py < img.H; py++)
         for (let px = 0; px < img.W; px++) {
@@ -80,11 +80,14 @@ describe('結構縮圖（設計區 ①）', () => {
           const i = axis === 'z' ? idx(u, v, 0) : axis === 'y' ? idx(u, 0, v) : idx(0, v, u);
           const sel = on.has(slab.L.labels[i]);
           const o = (py * img.W + px) * 4;
-          const isBlue = img.data[o] === blue[0] && img.data[o + 1] === blue[1] && img.data[o + 2] === blue[2];
+          const is = (c: Vec3) => img.data[o] === c[0] && img.data[o + 1] === c[1] && img.data[o + 2] === c[2];
           if (sel) want++;
-          if (sel !== isBlue) mismatch++;
+          if (sel && is(SEL_EDGE)) edge++;
+          if (sel !== (is(b2) || is(SEL_EDGE))) mismatch++;
         }
       expect(want).toBeGreaterThan(0);
+      expect(edge).toBeGreaterThan(0);
+      expect(edge).toBeLessThan(want);
       expect(mismatch).toBe(0);
     }
   });

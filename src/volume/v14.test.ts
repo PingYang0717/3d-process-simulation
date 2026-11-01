@@ -12,6 +12,9 @@ import { describeOp } from '../pages/Section3D/opWords';
 import { roundFrame } from '../pages/Section3D/RoundCard';
 import { EMPTY_DRAFT, nextDraft } from '../pages/Section3D/draft';
 import { makeFactor, presetLevels } from './factors';
+import { SEL_EDGE, structThumbRGBA } from '../pages/Section3D/thumbs';
+import { slabOfArrays } from '../splits/lifecycle';
+import { hexToRgb } from './volume';
 
 const matName = matNameOf(MATERIALS);
 
@@ -199,5 +202,25 @@ describe('設計區草稿與預設水平（plan v14 §5.4）', () => {
     // 寬 10 格＝5 nm；5% 不到一格 → 1 格 = 0.5 nm
     expect(presetLevels(cd, 0.5)[0].values).toEqual([4.5, 5, 5.5]);
     expect(presetLevels({ ...cd, size: 60 }, 0.5)[0].values).toEqual([3.5, 5, 6.5]);
+  });
+});
+
+describe('結構縮圖描邊（plan v14 §5.5）', () => {
+  it('選到的內部像素＝材質原色、邊界＝選取藍；沒選到的淡化', () => {
+    const s = gate();
+    const poly = s.L.comps.findIndex((c) => c.mat === 6);
+    const slab = slabOfArrays(s.vol, s.vol.data, s.L.labels, s.L.comps, s.vol.data, 'z', 2);
+    const rgb = new Map(MATERIALS.map((m) => [m.id, hexToRgb(m.color)]));
+    // 裁切＝整片（u 0..19、v 0..11），1 格 = 1 px
+    const pic = structThumbRGBA(slab, { u0: 0, v0: 0, u1: 19, v1: 11 }, rgb, new Set(), new Set([poly]), null, null, 20);
+    expect([pic.W, pic.H]).toEqual([20, 12]);
+    const px = (x: number, y: number) => [...pic.data.slice((y * pic.W + x) * 4, (y * pic.W + x) * 4 + 3)];
+    // Poly x 4..13、y 3..8：(8, 5) 在裡面、(4, 5) 在邊上
+    expect(px(8, 5)).toEqual(hexToRgb('#e8604c'));
+    expect(px(4, 5)).toEqual(SEL_EDGE);
+    expect(px(8, 3)).toEqual(SEL_EDGE);
+    // 基板（沒選）：淡化＝混白
+    const si = hexToRgb('#ddd8cb');
+    expect(px(8, 10)).toEqual(si.map((p) => Math.round(p * 0.35 + 255 * 0.65)));
   });
 });

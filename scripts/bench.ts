@@ -7,7 +7,22 @@
 //       npx vite-node scripts/bench.ts diff [scale ...]：差異模式（plan v12 §5.2）舊 diffMesh（整個陣列）vs layer diff（只算 diff 外框碰到的 chunk）
 //       npx vite-node scripts/bench.ts splits [scale ...]：產生 20 個 split（plan v12 §5.3）：Worker scratch 重播只回補丁的時間、補丁總量、
 //         heap 增量（對照舊的每個 split 6N＋6N）、restore 一個的時間
-import { MATERIALS, demoVolume, greedyMesh, initialLabeled, unionBBox } from '../src/volume/volume';
+//       plan v15 M15.0（§3 每一列的量法；旗標可以疊加）：
+//       npx vite-node scripts/bench.ts step [scale ...] [--sel substrate] [--corners] [--op translate-substrate]
+//         每步多印：PS 快照位元組（relabel 的 Int32 快照，apply 期間最大的一次 Int32 配置）、move bytes、主執行緒 diffBox（tightBox 掃整個 touch）ms、
+//         復原堆疊累計位元組（stepBytes）；--sel substrate＝選到基板時每步主執行緒 maskOf＋maskInScope 的 ms 與配置位元組；
+//         --corners＝先在基板相隔兩角各推一下（touch 撐到整個陣列）再量每步 diffBox；--op translate-substrate＝基板級 translate 連做（hist 位元組）
+//       npx vite-node scripts/bench.ts mem [scale ...] [--op translate-substrate]：同 step，50 步
+//       npx vite-node scripts/bench.ts drag2 [scale ...]：2D 拖基板頂邊 60 步（也跑 Poly 整層；「對應」開著）：每幀 ms、算 Op 的次數／幀數、
+//         profileDelta 次數／幀數（由 deltaOf 的 Int8Array 配置推算）、位元組相同的 Op 重算比例；每步 stairs（boundaryLoops）與 verifyKey 次數與 ms；
+//         50 個版本後 ModelStore 快照位元組（估計）
+//       npx vite-node scripts/bench.ts export [scale ...]：合成壓縮比例陣列 .vti（8 個 Float32、zlib、appended raw、32 KB 一塊）：decodeVti ms、
+//         encodeVtiLike 改 2 萬格的 ms（碰到的 block／總 block）、encodeVti（vti1）ms、zipStore 20 個 split 的 MB/s 與記憶體
+//       npx vite-node scripts/bench.ts decode [scale ...]：同上只量解碼
+//       npx vite-node scripts/bench.ts overlay [scale] [n=200]：n 個 split 疊圖換片一次（contourOf＋sliceDiff）總 ms；legend 滑過 60 次（重算 lines）每次 ms
+//       npx vite-node scripts/bench.ts thumbs [scale ...]：thumbRGBA 一張的 ms 與配置位元組
+//       npx vite-node scripts/bench.ts layer void [scale ...]：Worker layer {mat: VOID}（X-ray）全量、增量（base＝上一步）、非相鄰版本的 ms
+import { type BBox, MATERIALS, VOID, type Vec3, demoVolume, greedyMesh, initialLabeled, unionBBox } from '../src/volume/volume';
 import { type EditState, type Op, applyOp, matNameOf } from '../src/volume/ops';
 import { applyOpLocal } from '../src/volume/apply';
 import { applyStep } from '../src/volume/patch';
@@ -24,10 +39,22 @@ import { opOfGesture, sliceContext } from '../src/pages/Section3D/handleOps';
 const matName = matNameOf(MATERIALS);
 const ms = (t: number) => `${(performance.now() - t).toFixed(0)} ms`;
 const args = process.argv.slice(2);
-const mode = ['drag', 'step', 'mem', 'draw', 'diff', 'splits'].includes(args[0]) ? args[0] : 'old';
+const mode = ['drag', 'step', 'mem', 'draw', 'diff', 'splits', 'drag2', 'export', 'decode', 'overlay', 'thumbs', 'layer'].includes(args[0]) ? args[0] : 'old';
 const dragMode = mode === 'drag';
-const rest = mode === 'old' ? args : args.slice(1);
+// plan v15 旗標：--sel substrate、--corners、--op translate-substrate；`layer void` 的 void 當子命令
+const flags: Record<string, string | true> = {};
+const rest: string[] = [];
+for (let i = mode === 'old' ? 0 : 1; i < args.length; i++) {
+  const a = args[i];
+  if (a.startsWith('--')) {
+    const v = args[i + 1];
+    if (v && !v.startsWith('--') && Number.isNaN(Number(v))) flags[a.slice(2)] = v, i++;
+    else flags[a.slice(2)] = true;
+  } else if (!(mode === 'layer' && a === 'void')) rest.push(a);
+}
 const scales = rest.length ? rest.map(Number) : [1, 2, 3];
+const STEP_OPS = ['translate-substrate', 'push-fin', 'translate-fin'] as const;
+const stepOpts = { sel: flags.sel === 'substrate', corners: flags.corners === true, op: (STEP_OPS as readonly string[]).includes(String(flags.op)) ? (flags.op as (typeof STEP_OPS)[number]) : null };
 
 // 整陣列複製計數器（只在 bench 開）：長度 ≥ minCopy 的 typed array .slice() 都算
 let copied = 0;
@@ -41,11 +68,70 @@ for (const T of [Uint8Array, Int32Array, Float64Array, Float32Array, Uint16Array
   } as typeof orig;
 }
 const mb = (n: number) => `${(n / 2 ** 20).toFixed(1)} MB`;
+const q = (xs: number[], f: number) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(f * s.length))]?.toFixed(1) ?? '-';
+};
 
-/** 一步的全流程（plan v9 §2）：Worker 原地 apply → 主執行緒原地貼補丁＋差量 diff → chunk（只回髒的）。 */
-async function benchStep(scale: number, steps: number) {
+/**
+ * typed array 配置計數器（plan v15 M15.0）：fn 期間把全域建構子換成會計數的 Proxy，連 prototype.constructor 也換掉
+ * （volume.ts 的 cropBox、patch.ts 的 cropArr 走 `new (src.constructor)(n)`，relabel 的 PS 快照就是這樣配的）。
+ * 只算真的配置（長度或來源陣列），不算 `new Uint8Array(buffer, …)` 的 view。src 不用加任何 hook。
+ */
+interface AllocLog {
+  bytes: number;
+  n: number;
+  /** 每種型別最大的一次配置（PS 快照＝apply 期間最大的 Int32Array）。 */
+  max: Record<string, number>;
+  by: Record<string, number>;
+  /** 每種型別配置了幾次（deltaOf 每次呼叫配兩個 Int8Array → profileDelta 次數）。 */
+  cnt: Record<string, number>;
+}
+const ALLOC_CTORS = ['Uint8Array', 'Int8Array', 'Int32Array', 'Uint8ClampedArray', 'Float32Array', 'Float64Array', 'Uint16Array', 'Uint32Array'] as const;
+function withAlloc<T>(fn: () => T): { out: T; log: AllocLog } {
+  const log: AllocLog = { bytes: 0, n: 0, max: {}, by: {}, cnt: {} };
+  const g = globalThis as unknown as Record<string, unknown>;
+  const saved: [string, { prototype: object }, PropertyDescriptor | undefined][] = [];
+  for (const name of ALLOC_CTORS) {
+    const Orig = g[name] as { prototype: object } & (new (...a: unknown[]) => { byteLength: number });
+    const proxy: unknown = new Proxy(Orig, {
+      construct(target, a, newTarget) {
+        const out = Reflect.construct(target, a, newTarget === proxy ? target : newTarget) as { byteLength: number };
+        if (!(a[0] instanceof ArrayBuffer)) {
+          log.bytes += out.byteLength;
+          log.n++;
+          log.by[name] = (log.by[name] ?? 0) + out.byteLength;
+          log.max[name] = Math.max(log.max[name] ?? 0, out.byteLength);
+          log.cnt[name] = (log.cnt[name] ?? 0) + 1;
+        }
+        return out;
+      },
+    });
+    saved.push([name, Orig, Object.getOwnPropertyDescriptor(Orig.prototype, 'constructor')]);
+    g[name] = proxy;
+    Object.defineProperty(Orig.prototype, 'constructor', { value: proxy, writable: true, configurable: true });
+  }
+  try {
+    return { out: fn(), log };
+  } finally {
+    for (const [name, Orig, d] of saved) {
+      g[name] = Orig;
+      if (d) Object.defineProperty(Orig.prototype, 'constructor', d);
+    }
+  }
+}
+
+/**
+ * 一步的全流程（plan v9 §2）：Worker 原地 apply → 主執行緒原地貼補丁＋差量 diff → chunk（只回髒的）。
+ * plan v15 M15.0 每步多量：PS 快照位元組（apply 期間最大的 Int32 配置＝relabelInPlace 的 cropBox(labels, Smax)）、move bytes、
+ * 主執行緒 diffBox（tightBox 掃整個 touch）ms、復原堆疊累計位元組；旗標見檔頭。
+ */
+async function benchStep(scale: number, steps: number, o = stepOpts) {
   const core = await import('../src/volume/workerCore');
-  const { applyStepInPlace, carryStepStats, stepBytes } = await import('../src/volume/patch');
+  const { applyStepInPlace, carryStepStats, stepBytes, tightBox, unionBox, boxSize } = await import('../src/volume/patch');
+  const { stepTouch } = await import('../src/splits/lifecycle');
+  const { maskOf } = await import('../src/volume/volume');
+  const { maskInScope } = o.sel ? await import('../src/pages/Section3D/editor') : { maskInScope: null };
   const vol = demoVolume(scale);
   const N = vol.data.length;
   const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
@@ -57,10 +143,11 @@ async function benchStep(scale: number, steps: number) {
   copied = 0;
   // own：主執行緒與 Worker 各複製一次（唯一的整陣列複製）
   core.handle('fork', { owner: 's1', src: 'base', sid: 1 });
-  const buf = { data: vol.data.slice(), labels: ld.labels.slice(), diff: new Uint8Array(N), diffCount: 0, counts: new Float64Array(256) };
-  console.log(`\n範例 ×${scale}（${(N / 1e6).toFixed(1)} M voxels）：own（主執行緒＋Worker 各一份）複製 ${mb(copied)}`);
+  const buf = { data: vol.data.slice(), labels: ld.labels.slice(), diff: new Uint8Array(N), diffCount: 0, counts: new Float64Array(256), touch: null as BBox | null };
+  console.log(`\n範例 ×${scale}（${(N / 1e6).toFixed(1)} M voxels）：own（主執行緒＋Worker 各一份）複製 ${mb(copied)}${o.sel ? '｜--sel substrate' : ''}${o.corners ? '｜--corners' : ''}${o.op ? `｜--op ${o.op}` : ''}`);
   let comps = L.comps;
   const poly = comps.find((c) => c.mat === 6)!;
+  const fin = comps.find((c) => c.mat === 3)!;
   const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
   let sid = 1;
   let shown = 1;
@@ -75,20 +162,60 @@ async function benchStep(scale: number, steps: number) {
   let selShown = sid;
   const mem0 = process.memoryUsage();
   let patch = 0;
+  let hist = 0;
   const rows: string[] = [];
-  for (let k = 0; k < steps; k++) {
-    copied = 0;
-    const op: Op = { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: k % 2 ? -1 : 1, follow: true, backfill: 'orig' };
+  type Step = import('../src/volume/patch').Step;
+  /** 一步：Worker apply（量 Int32 配置）→ 主執行緒貼補丁＋diff＋touch。 */
+  const doStep = (op: Op, k: number) => {
     let t = performance.now();
-    const [r] = core.handle('apply', { owner: 's1', from: sid, to: sid + 1, comps, op, matNames, keyCounter: 1000 + k * 10 }) as [{ step: import('../src/volume/patch').Step }, unknown];
+    const { out, log } = withAlloc(() => core.handle('apply', { owner: 's1', from: sid, to: sid + 1, comps, op, matNames, keyCounter: 1000 + k * 10 }) as [{ step: Step }, unknown]);
     const tApply = performance.now() - t;
-    if (!r.step.data) continue;
+    const [r] = out;
+    if (!r.step.data) return null;
     sid++;
     t = performance.now();
     comps = applyStepInPlace(vol, buf.data, buf.labels, r.step, 'fwd') ?? comps;
     buf.diffCount = carryStepStats(vol, buf.data, vol.data, buf.diff, buf.diffCount, buf.counts, r.step, 'fwd');
+    buf.touch = unionBox(buf.touch, stepTouch(r.step));
     const tMain = performance.now() - t;
-    t = performance.now();
+    return { step: r.step, tApply, tMain, ps: log.max.Int32Array ?? 0 };
+  };
+  const subTop = sub.bbox.y0;
+  if (o.corners) {
+    // 相隔兩角各推一下（基板頂面的角落、筆刷 3 格）：touch 撐到整個 X×Z，之後每步 diffBox 都掃整個 touch
+    for (const [name, center] of [
+      ['左前角', [1, subTop, 1]],
+      ['右後角', [vol.X - 2, subTop, vol.Z - 2]],
+    ] as const) {
+      const op: Op = { kind: 'push', keys: [sub.key], scope: full, dir: [0, -1, 0], n: 1, follow: false, backfill: 'orig', local: { center: [...center] as Vec3, radius: 3 * scale, shape: 'square' } };
+      const r = doStep(op, 100 + name.length);
+      const tb = r && r.step.data ? r.step.data.box : null;
+      console.log(`  --corners ${name}：${r ? `Worker apply ${r.tApply.toFixed(0)} ms、補丁外框 ${tb ? `${tb.x1 - tb.x0 + 1}×${tb.y1 - tb.y0 + 1}×${tb.z1 - tb.z0 + 1}` : '-'}` : '沒改到'}`);
+    }
+    const tc = buf.touch!;
+    console.log(`  --corners 之後 touch ＝ ${tc.x1 - tc.x0 + 1}×${tc.y1 - tc.y0 + 1}×${tc.z1 - tc.z0 + 1}（${(boxSize(tc) / 1e6).toFixed(1)} M 格，整個陣列的 ${((boxSize(tc) / N) * 100).toFixed(0)}%）`);
+  }
+  const selSet = new Set([sub.key]);
+  const sliceScope = { axis: 'z' as const, lo: vol.Z >> 1, hi: vol.Z >> 1 };
+  const selMs: number[] = [];
+  const diffMs: number[] = [];
+  const psList: number[] = [];
+  const mvList: number[] = [];
+  for (let k = 0; k < steps; k++) {
+    copied = 0;
+    // 預設 poly 長高／縮 1；--op translate-substrate＝基板整塊左右搬 1（復原堆疊一筆最大）；push-fin＝fin 長高 1；
+    // translate-fin＝fin 左右搬 1（R±1 碰到基板 → relabel 的 Smax 把整個基板 bbox 包進來）
+    const op: Op =
+      o.op === 'translate-substrate'
+        ? { kind: 'translate', keys: [sub.key], scope: full, d: [k % 2 ? -1 : 1, 0, 0], backfill: 'orig' }
+        : o.op === 'push-fin'
+          ? { kind: 'push', keys: [fin.key], scope: full, dir: [0, -1, 0], n: k % 2 ? -1 : 1, follow: true, backfill: 'orig' }
+          : o.op === 'translate-fin'
+            ? { kind: 'translate', keys: [fin.key], scope: full, d: [k % 2 ? -1 : 1, 0, 0], backfill: 'orig', follow: true }
+            : { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: k % 2 ? -1 : 1, follow: true, backfill: 'orig' };
+    const r = doStep(op, k);
+    if (!r) continue;
+    let t = performance.now();
     const [ch] = core.handle('chunks', { sid, key: 'k', hidden, diff: true, palette, base: shown }) as [{ items: unknown[] }, unknown];
     shown = sid;
     const tChunks = performance.now() - t;
@@ -98,13 +225,45 @@ async function benchStep(scale: number, steps: number) {
     const [ly] = core.handle('layer', { sid, key: 'sel', filter: { comps: selIdx, scope: full, box: unionBBox(selIdx.map((i) => comps[i]))! }, tint: [0, 0, 1], inflate: 0.02, base: selShown }) as [{ items: unknown[] }, unknown];
     selShown = sid;
     const tLayer = performance.now() - t;
-    patch += stepBytes(r.step);
+    // A2：主執行緒每步 statsOf → buffersStats → tightBox(dims, diff, touch)，掃整個累積的 touch
+    t = performance.now();
+    tightBox(vol, buf.diff, buf.touch);
+    const tDiff = performance.now() - t;
+    diffMs.push(tDiff);
+    // A1：選到基板時每步 selMask（maskOf 掃選取外框、配 N）＋ affMask（scope 不是整段時 maskInScope 再配 N）
+    let selCol = '';
+    if (o.sel && maskInScope) {
+      const L2 = { labels: buf.labels, comps };
+      const box = unionBBox(comps.filter((c) => selSet.has(c.key)));
+      t = performance.now();
+      const a = withAlloc(() => maskOf(L2, selSet, vol)!);
+      const tMask = performance.now() - t;
+      t = performance.now();
+      const b = withAlloc(() => maskInScope(a.out, vol, sliceScope, box));
+      const tAff = performance.now() - t;
+      selMs.push(tMask + tAff);
+      selCol = `｜selMask ${tMask.toFixed(1)} ms（配 ${mb(a.log.bytes)}）＋affMask(scope 一片) ${tAff.toFixed(1)} ms（配 ${mb(b.log.bytes)}）`;
+    }
+    const sb = stepBytes(r.step);
+    patch += sb;
+    hist += sb;
+    const mv = r.step.labels?.moves.reduce((s, m) => s + boxSize(m.box) * 4, 0) ?? 0;
+    psList.push(r.ps);
+    mvList.push(mv);
+    const tc = buf.touch!;
     if (k < 10)
       rows.push(
-        `  第 ${k + 1} 步：Worker apply ${tApply.toFixed(0)} ms｜主執行緒貼補丁＋diff ${tMain.toFixed(1)} ms｜chunk ${ch.items.length} 個 ${tChunks.toFixed(0)} ms｜選取層 ${ly.items.length} 個 chunk ${tLayer.toFixed(0)} ms｜整陣列複製 ${mb(copied)}`,
+        `  第 ${k + 1} 步：Worker apply ${r.tApply.toFixed(0)} ms｜主執行緒貼補丁＋diff ${r.tMain.toFixed(1)} ms｜chunk ${ch.items.length} 個 ${tChunks.toFixed(0)} ms｜選取層 ${ly.items.length} 個 chunk ${tLayer.toFixed(0)} ms｜整陣列複製 ${mb(copied)}` +
+          `\n      PS 快照 ${mb(r.ps)}（S 的 before ${mb(r.step.labels?.before.byteLength ?? 0)}）｜move ${mb(mv)}｜diffBox ${tDiff.toFixed(1)} ms（touch ${(boxSize(tc) / 1e6).toFixed(1)} M 格）｜hist 累計 ${mb(hist)}${selCol}`,
       );
   }
   console.log(rows.join('\n'));
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
+  console.log(
+    `  小結：PS 快照 平均 ${mb(avg(psList))}、最大 ${mb(Math.max(0, ...psList))}｜move 平均 ${mb(avg(mvList))}｜diffBox 中位數 ${q(diffMs, 0.5)} ms、最大 ${q(diffMs, 1)} ms` +
+      (o.sel ? `｜selMask＋affMask 中位數 ${q(selMs, 0.5)} ms、最大 ${q(selMs, 1)} ms` : '') +
+      `｜復原堆疊 ${steps} 步 ${mb(hist)}（每筆平均 ${mb(hist / Math.max(1, steps))}）`,
+  );
   const mem1 = process.memoryUsage();
   const grew = mem1.heapUsed + mem1.arrayBuffers - mem0.heapUsed - mem0.arrayBuffers;
   if (steps > 10) console.log(`  ${steps} 步後記憶體增量 ${mb(grew)}（補丁總量 ${mb(patch)}；目標 < 補丁 ＋ 20 MB；GC 時機不定，只供參考）`);
@@ -352,7 +511,380 @@ async function benchSplits(scale: number) {
   );
 }
 
+// ---- plan v15 M15.0：§3 的量法 ----
+
+/**
+ * 2D 拖基板頂邊 60 步（plan v15 B3、A4）：和 SliceEditor.tick() 每個 rAF 做的事相同——opOfGesture（「對應」開著 → mirroredOp）
+ * → 第 1 級 previewOp（主切面這一片）；第 2 級（Worker）另外量。也跑 Poly 整層（Poly-Si 1 橫跨整片）的頂邊。
+ * 每步（A4）：stairs（每個已選 key 的 boundaryLoops）、ModelStore.get 的 verifyKey（版本變了就每個 key 驗證一次，就算這一步沒碰這一片）、
+ * sliceContext（每個 key 掃 bbox 算 area）；50 個版本後估 ModelStore 快照位元組。
+ */
+async function benchDrag2(scale: number) {
+  const { boundaryLoops } = await import('../src/slice/trace');
+  const { sliceOfKey } = await import('../src/slice/model');
+  const vol = demoVolume(scale);
+  const L = initialLabeled(vol, matName);
+  const s: EditState = { vol, L, version: 1 };
+  const sub = L.comps.reduce((a, c) => (c.count > a.count ? c : a));
+  const sti = L.comps.find((c) => c.mat === 2)!;
+  const poly = L.comps.find((c) => c.label === 'Poly-Si 1') ?? L.comps.find((c) => c.mat === 6)!;
+  const fins = L.comps.filter((c) => c.mat === 3);
+  const z = (poly.bbox.z0 + poly.bbox.z1) >> 1;
+  const opts = { scope: { axis: 'z' as const, lo: 0, hi: vol.Z - 1 }, follow: true, backfill: 'orig' as const, nm: 0.5 };
+  console.log(`\n範例 ×${scale}（切面 ${vol.X}×${vol.Y}，z = ${z}）：`);
+  type SliceModel = import('../src/slice/model').SliceModel;
+  /** ModelStore 快照位元組（估計：XY 32 B、頂點 64 B、id 16 B、Map／Set 項 32 B）。 */
+  const modelBytes = (m: SliceModel) =>
+    Object.keys(m.vertices).length * 64 +
+    m.rings.reduce((t, r) => t + r.loop.length * 16, 0) +
+    [...m.exact.values()].reduce((t, v) => t + v.length * 32 + 64, 0) +
+    (m.handles.size + m.removed.size + m.custom.size + m.edited.size) * 32 +
+    Object.keys(m.origin).length * 80;
+  for (const [name, key, selKeys] of [
+    ['基板頂邊', sub.key, [sub.key, sti.key, ...fins.map((c) => c.key)]],
+    ['Poly 整層頂邊', poly.key, [poly.key, sti.key, ...fins.map((c) => c.key)]],
+  ] as const) {
+    const store = new ModelStore();
+    let t = performance.now();
+    const m = store.get(L, vol, 'z', z, [...selKeys], 1).model;
+    const rings = ringsOf(m, [...selKeys]);
+    const ctx = { ...sliceContext(L, vol, 'z', z, [...selKeys], opts, rings), model: m };
+    const build = ms(t);
+    const r = rings.get(key)![0];
+    // 頂邊：v 最小的那條水平邊（最長的）
+    let edge = -1;
+    let best = -Infinity;
+    const vmin = Math.min(...r.pts.map((p) => p[1]));
+    for (let i = 0; i < r.pts.length; i++) {
+      const a = r.pts[i];
+      const b = r.pts[(i + 1) % r.pts.length];
+      if (a[1] === vmin && b[1] === vmin && Math.abs(a[0] - b[0]) > best) (best = Math.abs(a[0] - b[0])), (edge = i);
+    }
+    console.log(`  ${name}（已選 ${selKeys.length} 個，對應開著）：建立幾何層 ${build}`);
+    // 兩種把手：整條頂邊（軸向、最外側、橫跨整個結構 → gestureToOp 早退成 push）；頂邊左端的角節點（→ profileDelta：掃 key 所有環的聯集 bbox、rasterize、BFS ×2、RLE）
+    for (const [hname, h, diag] of [
+      ['拖頂邊（→ push）', { kind: 'edge' as const, key, ring: 0, index: edge }, false],
+      ['拖頂邊左端角節點（→ profile）', { kind: 'node' as const, key, ring: 0, index: edge }, true],
+    ] as const) {
+      const frames: number[] = [];
+      const opMs: number[] = [];
+      const l2: number[] = [];
+      let pdCalls = 0;
+      const kinds = new Map<string, number>();
+      const seen = new Set<string>();
+      let same = 0;
+      let none = 0;
+      const cache = ringCache();
+      const ringsFor = (k: string, tt: number, make: () => TracedHandle) => cache.get(`${k}|${tt}`, make);
+      for (let k = 1; k <= 60; k++) {
+        const delta: [number, number] = [diag ? (k * 3 * scale) / 60 : 0, -(k * 3 * scale) / 60];
+        t = performance.now();
+        const { out, log } = withAlloc(() => opOfGesture(ctx, h, delta, false, true));
+        const tOp = performance.now() - t;
+        pdCalls += (log.cnt.Int8Array ?? 0) / 2;
+        const op = out.op;
+        if (op) {
+          const one = { ...op, scope: { axis: 'z' as const, lo: z, hi: z } } as Op;
+          previewOp(s, vol, one, 2_000_000, newReport());
+        } else none++;
+        frames.push(performance.now() - t);
+        opMs.push(tOp);
+        if (op) {
+          const j = JSON.stringify(op);
+          if (seen.has(j)) same++;
+          seen.add(j);
+          kinds.set(op.kind, (kinds.get(op.kind) ?? 0) + 1);
+          t = performance.now();
+          previewOp(s, vol, op, Infinity, newReport(), ringsFor);
+          l2.push(performance.now() - t);
+        }
+      }
+      console.log(
+        `    ${hname}：主執行緒每幀（opOfGesture＋第 1 級）中位數 ${q(frames, 0.5)} ms、p95 ${q(frames, 0.95)} ms、最大 ${q(frames, 1)} ms` +
+          `｜opOfGesture 本身 中位數 ${q(opMs, 0.5)} ms、最大 ${q(opMs, 1)} ms`,
+      );
+      console.log(
+        `      算 Op 的次數／幀數 ${(60 / 60).toFixed(2)}（每個 rAF 都算，和 tick() 相同）｜profileDelta 次數／幀數 ${(pdCalls / 60).toFixed(2)}｜Op 種類 ${[...kinds].map(([k, n]) => `${k}×${n}`).join('、') || '無'}` +
+          `｜位元組相同的 Op 重算 ${same}／${60 - none} 幀（${(((60 - none) ? same / (60 - none) : 0) * 100).toFixed(0)}%）｜第 2 級（Worker）中位數 ${q(l2, 0.5)} ms`,
+      );
+    }
+    // A4：每步（版本變了、這一步沒碰這一片）
+    const stairsMs: number[] = [];
+    const getMs: number[] = [];
+    const sctxMs: number[] = [];
+    let version = 1;
+    for (let step = 1; step <= 5; step++) {
+      version++;
+      t = performance.now();
+      let loops = 0;
+      for (const k of selKeys) {
+        const sl = sliceOfKey(L, vol, 'z', z, k);
+        if (sl) loops += boundaryLoops((u, v) => u >= sl.u0 && v >= sl.v0 && u <= sl.u1 && v <= sl.v1 && sl.inside(u, v), sl.u0, sl.v0, sl.u1, sl.v1).length;
+      }
+      stairsMs.push(performance.now() - t);
+      t = performance.now();
+      const got = store.get(L, vol, 'z', z, [...selKeys], version, step);
+      getMs.push(performance.now() - t);
+      t = performance.now();
+      sliceContext(L, vol, 'z', z, [...selKeys], opts, ringsOf(got.model, [...selKeys]));
+      sctxMs.push(performance.now() - t);
+      if (step === 1) console.log(`    每步（沒碰這一片）：stairs 描 ${selKeys.length} 個 key（${loops} 條迴圈）、verifyKey ${selKeys.length} 次（重描 ${got.fixed.length} 個）、sliceContext 1 次`);
+    }
+    console.log(`    每步 ms：stairs 中位數 ${q(stairsMs, 0.5)}｜ModelStore.get（verify＋snapshot）中位數 ${q(getMs, 0.5)}｜sliceContext 中位數 ${q(sctxMs, 0.5)}`);
+    for (; version < 50; ) store.get(L, vol, 'z', z, [...selKeys], ++version, version);
+    const snaps = (store as unknown as { snaps: Map<string, SliceModel> }).snaps;
+    let bytes = 0;
+    for (const sm of snaps.values()) bytes += modelBytes(sm);
+    console.log(`    50 個版本後 ModelStore 快照 ${snaps.size} 份 ≈ ${mb(bytes)}（估計；SNAP_LIMIT ${ModelStore.SNAP_LIMIT} → 上限 ≈ ${mb((bytes / Math.max(1, snaps.size)) * ModelStore.SNAP_LIMIT)}）`);
+  }
+}
+/**
+ * 合成壓縮比例陣列 .vti（plan v15 C1、C4）：PointData 8 個 Float32（material_1～7、material_254），zlib、appended raw、
+ * header UInt32、32 KB 一塊（VTK 預設）。值＝demoVolume 的材質 one-hot。回傳位元組與每個陣列的 block 數。
+ */
+async function synthVti(vol: Volume) {
+  const zlib = await import('node:zlib');
+  const ids = [1, 2, 3, 4, 5, 6, 7, VOID];
+  const N = vol.data.length;
+  const BS = 32768;
+  const enc = new TextEncoder();
+  const u32 = (...v: number[]) => new Uint8Array(new Uint32Array(v).buffer);
+  const app: Uint8Array[] = [];
+  const tags: string[] = [];
+  let off = 0;
+  let blocks = 0;
+  for (const id of ids) {
+    const f = new Float32Array(N);
+    for (let i = 0; i < N; i++) if (vol.data[i] === id) f[i] = 1;
+    const raw = new Uint8Array(f.buffer);
+    const nb = Math.ceil(raw.length / BS);
+    const parts: Uint8Array[] = [];
+    for (let k = 0; k < nb; k++) parts.push(new Uint8Array(zlib.deflateSync(raw.subarray(k * BS, Math.min(raw.length, (k + 1) * BS)))));
+    const head = u32(nb, BS, raw.length - (nb - 1) * BS, ...parts.map((p) => p.length));
+    tags.push(`<DataArray type="Float32" Name="material_${id}" NumberOfComponents="1" format="appended" offset="${off}"/>`);
+    app.push(head, ...parts);
+    off += head.length + parts.reduce((t, p) => t + p.length, 0);
+    blocks += nb;
+  }
+  const ext = `0 ${vol.X - 1} 0 ${vol.Y - 1} 0 ${vol.Z - 1}`;
+  const xml = `<?xml version="1.0"?>
+<VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt32" compressor="vtkZLibDataCompressor">
+  <ImageData WholeExtent="${ext}" Origin="0 0 0" Spacing="0.5 0.5 0.5">
+    <Piece Extent="${ext}">
+      <PointData Scalars="material_1">
+        ${tags.join('\n        ')}
+      </PointData>
+      <CellData>
+      </CellData>
+    </Piece>
+  </ImageData>
+  <AppendedData encoding="raw">
+   _`;
+  const head = enc.encode(xml);
+  const tail = enc.encode('\n  </AppendedData>\n</VTKFile>\n');
+  const out = new Uint8Array(head.length + off + tail.length);
+  out.set(head);
+  let at = head.length;
+  for (const p of app) (out.set(p, at), (at += p.length));
+  out.set(tail, at);
+  return { bytes: out, blocks, perArray: Math.ceil((N * 4) / BS), BS, ids };
+}
+type Volume = import('../src/volume/volume').Volume;
+
+/** 解碼（C4）：decodeVti 在主執行緒的 ms（序列 inflate ＋ argmax O(N·k)）與記憶體。decodeOnly＝decode 模式。 */
+async function benchExport(scale: number, decodeOnly: boolean) {
+  const { decodeVti, encodeVtiLike, encodeVti } = await import('../src/volume/vti');
+  const { zipStore } = await import('../src/volume/zip');
+  const vol = demoVolume(scale);
+  const N = vol.data.length;
+  let t = performance.now();
+  const f = await synthVti(vol);
+  console.log(`\n範例 ×${scale}（${(N / 1e6).toFixed(1)} M 點）：合成 .vti ${mb(f.bytes.length)}（8 個 Float32 × ${mb(N * 4)} 原始、${f.blocks} 個 32 KB block）${ms(t)}`);
+  (globalThis as { gc?: () => void }).gc?.();
+  const m0 = process.memoryUsage();
+  t = performance.now();
+  const { vol: dec, info } = await decodeVti(f.bytes.slice().buffer);
+  const tDec = performance.now() - t;
+  const m1 = process.memoryUsage();
+  let diff = 0;
+  for (let i = 0; i < N; i++) if (dec.data[i] !== vol.data[i]) diff++;
+  console.log(`  decodeVti ${tDec.toFixed(0)} ms（${info.fractions?.length} 個比例陣列、${diff} 格不同）｜heap＋arrayBuffers 增量 ${mb(m1.heapUsed + m1.arrayBuffers - m0.heapUsed - m0.arrayBuffers)}（原檔 ${mb(f.bytes.length)} 另常駐）`);
+  if (decodeOnly) return;
+  // 同格式匯出（C1）：改 2 萬格（poly 裡一塊 40×25×20 → SiN）
+  const poly = initialLabeled(vol, matName).comps.find((c) => c.label === 'Poly-Si 1')!;
+  const data = vol.data.slice();
+  const b = poly.bbox;
+  let chg = 0;
+  const touched = new Set<number>();
+  for (let z = b.z0 + 2; z < b.z0 + 22 && z <= b.z1; z++)
+    for (let y = b.y0 + 2; y < b.y0 + 27 && y <= b.y1; y++)
+      for (let x = b.x0 + 2; x < b.x0 + 42 && x <= b.x1; x++) {
+        const i = (z * vol.Y + y) * vol.X + x;
+        if (data[i] === 7) continue;
+        data[i] = 7;
+        chg++;
+        touched.add(Math.floor((i * 4) / f.BS));
+      }
+  const mats = MATERIALS.map((m) => ({ id: m.id, name: m.name, color: m.color }));
+  (globalThis as { gc?: () => void }).gc?.();
+  const m2 = process.memoryUsage();
+  t = performance.now();
+  const out = await encodeVtiLike(f.bytes, info.fractions!, data, vol.data, mats);
+  const tEnc = performance.now() - t;
+  const m3 = process.memoryUsage();
+  console.log(
+    `  encodeVtiLike 改 ${chg} 格：${tEnc.toFixed(0)} ms → ${mb(out.length)}｜碰到的 block ${touched.size}／${f.perArray}（每陣列）× 8 陣列＝重壓 ${touched.size * 8}／${f.blocks}；現在全部 ${f.blocks} 塊都 inflate＋deflate` +
+      `｜heap＋arrayBuffers 增量 ${mb(m3.heapUsed + m3.arrayBuffers - m2.heapUsed - m2.arrayBuffers)}`,
+  );
+  // vti1（單一 UInt8 編號）＋ zipStore 20 個 split（C2）
+  t = performance.now();
+  const one = await encodeVti(vol);
+  const tOne = performance.now() - t;
+  const entries = Array.from({ length: 20 }, (_, k) => ({ name: `split_${k + 1}.vti`, data: one }));
+  const total = one.length * 20;
+  (globalThis as { gc?: () => void }).gc?.();
+  const m4 = process.memoryUsage();
+  t = performance.now();
+  const zip = zipStore(entries);
+  const tZip = performance.now() - t;
+  const m5 = process.memoryUsage();
+  console.log(
+    `  encodeVti（vti1）${tOne.toFixed(0)} ms → ${mb(one.length)}｜zipStore 20 個（共 ${mb(total)}）${tZip.toFixed(0)} ms ＝ ${(total / 2 ** 20 / (tZip / 1000)).toFixed(0)} MB/s（主執行緒 crc32 逐位元組）→ ${mb(zip.length)}` +
+      `｜arrayBuffers 增量 ${mb(m5.arrayBuffers - m4.arrayBuffers)}、rss 增量 ${mb(m5.rss - m4.rss)}（尖峰 ≈ files[] ＋ 一整塊輸出 ＝ 2× 總量）`,
+  );
+}
+
+/** n 個 split 的補丁（push poly 1～10 格，輪流三根 poly）：Worker scratch 重播只回補丁（和實驗頁產生 split 同一條路）。 */
+async function makeSplits(scale: number, n: number) {
+  const core = await import('../src/volume/workerCore');
+  const vol = demoVolume(scale);
+  const L = initialLabeled(vol, matName);
+  const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
+  const [ld] = core.handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } }) as [{ labels: Int32Array; counts: Float64Array }, unknown];
+  const polys = L.comps.filter((c) => c.mat === 6);
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  type SplitPatch = import('../src/splits/lifecycle').SplitPatch;
+  const t = performance.now();
+  const pats: { patch: SplitPatch; keys: string[] }[] = [];
+  for (let k = 0; k < n; k++) {
+    const p = polys[k % polys.length];
+    const ops: Op[] = [{ kind: 'push', keys: [p.key], scope: full, dir: [0, -1, 0], n: 1 + (k % 10), follow: true, backfill: 'orig' }];
+    pats.push({ patch: (core.handle('replayPatch', { src: 'base', from: 1, comps: L.comps, ops, matNames, keyCounter: 1000 })[0] as { patch: SplitPatch }).patch, keys: [p.key] });
+  }
+  return { vol, L, labels: ld.labels, pats, gen: performance.now() - t, polys };
+}
+
+/**
+ * 疊圖（C5）：n 個 split 換片一次＝每個 split contourOf（描整片）＋ sliceDiff（整片比對）；legend 滑過一次＝OverlayView 重 render，
+ * lines 沒 memo → 每個 split 再跑 cache.get（命中）＋ sliceDiff。
+ */
+async function benchOverlay(scale: number, n: number) {
+  const { contourOf, contourCache, sliceDiff, overlayKey } = await import('../src/pages/Section3D/overlay');
+  const { slabOfPatch, slabOfArrays } = await import('../src/splits/lifecycle');
+  const { vol, L, labels, pats, gen, polys } = await makeSplits(scale, n);
+  const at = (polys[0].bbox.z0 + polys[0].bbox.z1) >> 1;
+  const base = slabOfArrays(vol, vol.data, labels, L.comps, vol.data, 'z', at);
+  let t = performance.now();
+  const slabs = pats.map((p) => slabOfPatch(vol, vol.data, labels, p.patch, 'z', at));
+  const tSlab = performance.now() - t;
+  const cache = contourCache();
+  const lines = () =>
+    slabs.map((sl, k) => ({
+      loops: cache.get(overlayKey(k + 2, 'z', at, pats[k].keys), () => contourOf(sl.L, sl.vol, pats[k].keys, 'z', 0)),
+      diff: sliceDiff(sl.vol.data, base.vol.data, sl.vol, 'z', 0),
+    }));
+  t = performance.now();
+  lines();
+  const tCold = performance.now() - t;
+  const hover: number[] = [];
+  for (let k = 0; k < 60; k++) {
+    t = performance.now();
+    lines();
+    hover.push(performance.now() - t);
+  }
+  t = performance.now();
+  for (const sl of slabs) contourOf(sl.L, sl.vol, pats[0].keys, 'z', 0);
+  const tContour = performance.now() - t;
+  t = performance.now();
+  for (const sl of slabs) sliceDiff(sl.vol.data, base.vol.data, sl.vol, 'z', 0);
+  const tDiff = performance.now() - t;
+  console.log(
+    `\n範例 ×${scale}（切面 ${vol.X}×${vol.Y}）${n} 個 split：產生 ${gen.toFixed(0)} ms、切片 ${tSlab.toFixed(0)} ms｜換片一次（contourOf＋sliceDiff 全部）${tCold.toFixed(0)} ms（其中描輪廓 ${tContour.toFixed(0)} ms、整片比對 ${tDiff.toFixed(0)} ms）` +
+      `｜legend 滑過 60 次：每次 中位數 ${q(hover, 0.5)} ms、最大 ${q(hover, 1)} ms（輪廓快取命中、sliceDiff 重算）｜快取 ${JSON.stringify(cache.stats())}（上限 400）`,
+  );
+}
+
+/** 縮圖（C6）：thumbRGBA 一張＝sliceRGBA 整片（W×H×4 配置）→ 裁 crop → nearest。 */
+async function benchThumbs(scale: number) {
+  const { thumbRGBA, thumbCrop } = await import('../src/pages/Section3D/thumbs');
+  const { contourOf } = await import('../src/pages/Section3D/overlay');
+  const { slabOfPatch, slabOfArrays, patchStats } = await import('../src/splits/lifecycle');
+  const { hexToRgb } = await import('../src/volume/volume');
+  const { vol, L, labels, pats, polys } = await makeSplits(scale, 1);
+  const at = (polys[0].bbox.z0 + polys[0].bbox.z1) >> 1;
+  const counts = new Float64Array(256);
+  const stats = patchStats(vol, pats[0].patch, vol.data, counts);
+  const slab = slabOfPatch(vol, vol.data, labels, pats[0].patch, 'z', at);
+  const base = slabOfArrays(vol, vol.data, labels, L.comps, vol.data, 'z', at);
+  const crop = thumbCrop('z', [stats.diffBox, polys[0].bbox], vol);
+  const rgb = new Map(MATERIALS.map((m) => [m.id, hexToRgb(m.color)] as const));
+  const loops = contourOf(base.L, base.vol, pats[0].keys, 'z', 0);
+  for (let k = 0; k < 3; k++) thumbRGBA(slab, crop, rgb, new Set(), loops);
+  const times: number[] = [];
+  let log: AllocLog | null = null;
+  for (let k = 0; k < 20; k++) {
+    const t = performance.now();
+    const r = withAlloc(() => thumbRGBA(slab, crop, rgb, new Set(), loops));
+    times.push(performance.now() - t);
+    log = r.log;
+  }
+  console.log(
+    `\n範例 ×${scale}（切面 ${vol.X}×${vol.Y} ＝ ${mb(vol.X * vol.Y * 4)} RGBA）：thumbRGBA 一張（裁切窗 ${crop.u1 - crop.u0 + 1}×${crop.v1 - crop.v0 + 1}）中位數 ${q(times, 0.5)} ms、最大 ${q(times, 1)} ms｜配置 ${mb(log!.bytes)}（${log!.n} 次；整片 RGBA ${mb(log!.max.Uint8ClampedArray ?? 0)}）`,
+  );
+}
+
+/** 空洞層（A5）：Worker layer {mat: VOID}（X-ray）全量＝boxOf 掃整個陣列（每格一個 closure）再 mesh；增量（base＝上一步）只看補丁外框；非相鄰版本又是全量。 */
+async function benchLayerVoid(scale: number) {
+  const core = await import('../src/volume/workerCore');
+  const vol = demoVolume(scale);
+  const N = vol.data.length;
+  const L = initialLabeled(vol, matName);
+  const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
+  core.handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } });
+  core.handle('fork', { owner: 's1', src: 'base', sid: 1 });
+  const req = (sid: number, base?: number) => ({ sid, key: 'void', filter: { mat: VOID }, tint: [0.15, 0.15, 0.15] as [number, number, number], base });
+  let t = performance.now();
+  const r0 = core.handle('layer', req(1))[0] as { items: unknown[]; full: boolean };
+  const tFull = performance.now() - t;
+  // 同樣的整陣列 closure 掃描在這裡重現（boxOf 沒有 export），估算掃描佔多少
+  const data = vol.data;
+  const test = (i: number) => data[i] === VOID;
+  t = performance.now();
+  let n = 0;
+  for (let i = 0; i < N; i++) if (test(i)) n++;
+  const tScan = performance.now() - t;
+  const poly = L.comps.find((c) => c.mat === 6)!;
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  const op: Op = { kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 1, follow: true, backfill: 'orig' };
+  core.handle('apply', { owner: 's1', from: 1, to: 2, comps: L.comps, op, matNames, keyCounter: 1000 });
+  t = performance.now();
+  const r1 = core.handle('layer', req(2, 1))[0] as { items: unknown[]; full: boolean };
+  const tInc = performance.now() - t;
+  t = performance.now();
+  const r2 = core.handle('layer', req(2))[0] as { items: unknown[]; full: boolean };
+  const tAgain = performance.now() - t;
+  console.log(
+    `\n範例 ×${scale}（${(N / 1e6).toFixed(1)} M voxels，VOID ${n} 格）：layer {mat: VOID} 全量 ${tFull.toFixed(0)} ms（${r0.items.length} 個 chunk；整陣列 closure 掃描本身 ≈ ${tScan.toFixed(0)} ms）` +
+      `｜一步後增量（base＝上一步）${tInc.toFixed(0)} ms（${r1.items.length} 個 chunk，full=${r1.full}）｜非相鄰版本（沒有 base）${tAgain.toFixed(0)} ms（${r2.items.length} 個 chunk）`,
+  );
+}
+
 if (mode === 'diff') for (const scale of scales) await benchDiff(scale);
+else if (mode === 'drag2') for (const scale of scales) await benchDrag2(scale);
+else if (mode === 'export' || mode === 'decode') for (const scale of scales) await benchExport(scale, mode === 'decode');
+else if (mode === 'overlay') await benchOverlay(Number(rest[0] ?? 1), Number(rest[1] ?? 200));
+else if (mode === 'thumbs') for (const scale of scales) await benchThumbs(scale);
+else if (mode === 'layer') for (const scale of scales) await benchLayerVoid(scale);
 else if (mode === 'splits') for (const scale of scales) await benchSplits(scale);
 else if (mode === 'draw') for (const scale of scales) await benchDraw(scale);
 else if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);

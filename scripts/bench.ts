@@ -1,6 +1,7 @@
 // Worker 核心的速度（plan v7 §8.6）：一步操作「只在外框裡算＋relabel 吃外框＋重算碰到的 chunk」對照舊的整個陣列重播。
 // 用法：npx vite-node scripts/bench.ts [scale ...]（預設 1 2 3）
-//       npx vite-node scripts/bench.ts drag [scale ...]：拖拉中每一幀主執行緒做的事（plan v8 §7.2、§8.4）
+//       npx vite-node scripts/bench.ts drag [scale ...]：拖拉中每一幀主執行緒做的事（plan v8 §7.2、§8.4）；
+//         另加 3D 圓角把手拖 Poly-Si 1（plan v14 §4）：主執行緒 roundOp、Worker 第 2 級，新範圍（結構那段）對照舊的整條軸
 //       npx vite-node scripts/bench.ts step [scale ...]：一步的全流程（plan v9 §2）：Worker 原地 apply、主執行緒貼補丁、
 //         chunk、整陣列複製位元組；mem [scale ...]：連做 50 步後的記憶體增量 vs 補丁總量
 //       npx vite-node scripts/bench.ts diff [scale ...]：差異模式（plan v12 §5.2）舊 diffMesh（整個陣列）vs layer diff（只算 diff 外框碰到的 chunk）
@@ -174,6 +175,41 @@ function benchDrag(scale: number) {
   );
 }
 
+/**
+ * 3D 圓角把手拖 Poly-Si 1（plan v14）：半徑 1→16 每一步＝一幀。主執行緒＝roundOp（參考片的 roundCells＋RLE）；
+ * Worker＝previewOp（上限 40 萬格，超過回 null＝3D 沒有預覽）。範圍：新（選取外框沿 x）vs 舊（整條 x）。
+ */
+async function benchDragRound(scale: number) {
+  const { roundOp } = await import('../src/slice/round');
+  const vol = demoVolume(scale);
+  const L = initialLabeled(vol, matName);
+  const s: EditState = { vol, L, version: 1 };
+  const poly = L.comps.find((c) => c.label === 'Poly-Si 1') ?? L.comps.find((c) => c.mat === 6)!;
+  const b = poly.bbox;
+  const at = (b.x0 + b.x1) >> 1;
+  const CAP = 400_000;
+  for (const [name, scope] of [
+    ['新：結構那段', { axis: 'x' as const, lo: b.x0, hi: b.x1 }],
+    ['舊：整條 x', { axis: 'x' as const, lo: 0, hi: vol.X - 1 }],
+  ] as const) {
+    const main: number[] = [];
+    const worker: number[] = [];
+    let none = 0;
+    for (let r = 1; r <= 16; r++) {
+      let t = performance.now();
+      const op = roundOp(L, vol, [poly.key], scope, at, { kind: 'round', corners: [{ id: 'ul' }], r, n: 2, mode: 'match' }, false, 'orig', 0.5);
+      main.push(performance.now() - t);
+      if (!op) continue;
+      t = performance.now();
+      const p = previewOp(s, vol, op, CAP, newReport());
+      if (!p) none++;
+      worker.push(performance.now() - t);
+    }
+    const q = (xs: number[], f: number) => (xs.sort((a, c) => a - c), xs[Math.min(xs.length - 1, Math.floor(f * xs.length))]?.toFixed(1) ?? '-');
+    console.log(`  圓角把手 Poly-Si 1（${name}）：主執行緒每幀 中位數 ${q(main, 0.5)} ms、最大 ${q(main, 1)} ms｜Worker 每幀 中位數 ${q(worker, 0.5)} ms、最大 ${q(worker, 1)} ms｜超過即時上限 ${none}／${worker.length} 幀`);
+  }
+}
+
 /** drawSlice（plan v9 P11）：LUT 版 vs 舊版（每像素 toVoxel／Map／Set、描邊每像素配陣列），三個軸各 20 次。 */
 async function benchDraw(scale: number) {
   const { sliceRGBA, SEL_RGB } = await import('../src/pages/Section3D/drawSlice');
@@ -320,7 +356,11 @@ if (mode === 'diff') for (const scale of scales) await benchDiff(scale);
 else if (mode === 'splits') for (const scale of scales) await benchSplits(scale);
 else if (mode === 'draw') for (const scale of scales) await benchDraw(scale);
 else if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);
-else if (dragMode) for (const scale of scales) benchDrag(scale);
+else if (dragMode)
+  for (const scale of scales) {
+    benchDrag(scale);
+    await benchDragRound(scale);
+  }
 else for (const scale of scales) {
   const vol = demoVolume(scale);
   const base: EditState = { vol, L: initialLabeled(vol, matName) };

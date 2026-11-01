@@ -194,7 +194,7 @@ const info = (msg) => console.log('· ' + msg);
   await panel.getByRole('button', { name: /加一個變數/ }).click();
   await page.locator('.op-menu .op-menu-item', { hasText: '圓頭半徑' }).click();
   const seeded = await panel.locator('.factor-card .level-chip:not(.add)').allInnerTexts();
-  ok(seeded.length === 3, `§3 圓頭標稱 0：預設 chips 2、4、6 格（${seeded.join('、')}）`);
+  ok(seeded.length === 3, `§3 圓頭標稱 0：預設 chips 依結構（半徑上限的 ¼、½、¾，plan v14）（${seeded.join('、')}）`);
   const card = panel.locator('.factor-card').first();
   await card.getByLabel('加一個水平').click();
   await card.getByLabel('輸入水平清單').fill('-5');

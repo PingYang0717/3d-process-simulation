@@ -2,6 +2,31 @@ import { useEffect, useState } from 'react';
 
 const PREFIX = 'se3d.v1.';
 
+/**
+ * 寫入合併到瀏覽器空閒時（plan v14 P6）：每次 state 變動只記下最新的值，JSON.stringify＋setItem 在 idle 時一次做；
+ * 卸載、離開頁面時立刻寫。
+ */
+const pending = new Map<string, unknown>();
+let scheduled = false;
+export function flushPersisted() {
+  scheduled = false;
+  for (const [k, v] of pending)
+    try {
+      localStorage.setItem(k, JSON.stringify(v));
+    } catch {
+      /* 寫不進去就算了 */
+    }
+  pending.clear();
+}
+function schedule() {
+  if (scheduled) return;
+  scheduled = true;
+  const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+  if (ric) ric(flushPersisted, { timeout: 500 });
+  else setTimeout(flushPersisted, 0);
+}
+if (typeof window !== 'undefined') window.addEventListener('pagehide', flushPersisted);
+
 /** 像 useState，但值會寫進 localStorage（欄寬、筆刷、顯示設定）；讀不到或格式不對就用預設。 */
 export function usePersisted<T>(key: string, initial: T, valid: (v: unknown) => v is T = isSameShape(initial)) {
   const [value, setValue] = useState<T>(() => {
@@ -17,12 +42,10 @@ export function usePersisted<T>(key: string, initial: T, valid: (v: unknown) => 
     return initial;
   });
   useEffect(() => {
-    try {
-      localStorage.setItem(PREFIX + key, JSON.stringify(value));
-    } catch {
-      /* 寫不進去就算了 */
-    }
+    pending.set(PREFIX + key, value);
+    schedule();
   }, [key, value]);
+  useEffect(() => () => flushPersisted(), []);
   return [value, setValue] as const;
 }
 

@@ -88,7 +88,7 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/SliceEditor.tsx` | 2D 編輯的主切面：縮放、平移、換片、縮放列（1:1／8×／適合／對準選取）、自動放大到選取 |
 | `src/pages/Section3D/PositionBar.tsx` | 位置列（第幾片、套用到哪裡、「這一片沒有…跳到最近的一片」）與範圍控制 `ScopeControl`（右欄共用）、自動選切面方向 |
 | `src/pages/Section3D/views.lazy.tsx` | `View3D`／`SliceView`／`SliceEditor` 的 lazy 包裝：three.js 等載入檔案後才抓，歡迎頁不用等 |
-| `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`m9.cjs`、`m10.cjs`、`m11.cjs`、`m12.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
+| `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`m9.cjs`、`m10.cjs`、`m11.cjs`、`m12.cjs`、`m14.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
 | `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、手勢 → Op）、`snap.ts`（拖法：浮點 ghost 與放開時的整數位移）、`model.ts`（持久幾何層：建立、位移、驗證、重描保留 id、每版本快照）、`relative.ts`、`mirror.ts` |
 | `src/pages/Section3D/SlicePreviewLayer.tsx` | 主切面的預覽層（只重畫預覽那一塊，拖拉中淡綠／淡紅） |
 | `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算（`applyOpInPlace` 原地）、補丁（`applyStepInPlace`、`carryStepStats`）、chunk 網格、profile Op、一步的報告 |
@@ -144,6 +144,16 @@ plan v12（`docs/plan-v12-splits-page.md`）：`npx vite-node scripts/bench.ts d
 | ×2 產生 20 個 split 後主執行緒 heap（e2e，每個改 3～30 萬格） | 每個 split 一本 94 MB | ＋213 MB（1 本 live＋20 個補丁），只有 1 個 live |
 | ×2 切到 parked split → 3D 換上網格（e2e） | —（v11 都是 live；第 4 個起要全量重網格） | 440～590 ms（從原始的網格增量） |
 | 200 個 split 的實驗頁（e2e ×1） | 一排頁籤；並排看一頁 200 張整片切面 | DOM 20～32 張卡；滑鼠移動 60 次整頁與卡片 render 0 次；點卡片 0 個 Worker 請求 |
+
+plan v14（`docs/plan-v14-round-scope-cloud-reset.md`）：`npx vite-node scripts/bench.ts drag 1 3`（最後兩行是 3D 圓角把手拖 Poly-Si 1，半徑 1→16）、`node scripts/e2e/m14.cjs`。
+
+| 項目（3D 圓角把手拖 Poly-Si 1） | v13 | v14 |
+| --- | --- | --- |
+| 主執行緒每幀（×1／×3，中位數） | 每個滑鼠事件都算 roundOp＋點雲（decodeRle、沿整條 x 擠出、配 Int32＋Float32＋BufferGeometry） | 0.5／3.7 ms，rAF 每幀最多一次，沒有點雲 |
+| Worker 第 2 級（×1） | 22 ms | 25 ms（外框 16 萬格，在即時上限內；e2e 拖拉中有 3D 預覽） |
+| ×3 外框 | 418 萬格 > 40 萬，回 none、畫點雲（殘留綠紅線） | 同一個外框（profileBox 本來就剪到結構那段），3D 寫「範圍太大，放開後才會在 3D 看到結果」；不設上限要 500 ms＋網格 300 ms |
+
+沒達到 plan v14 §4 的：×3 Poly-Si 1 拖拉時 3D 仍沒有即時預覽（外框 432×129×75），要做到需要另外的方法（例如只算靠近角的那幾排、或分 chunk 漸進），留給之後的計畫。
 
 ## 匯出
 

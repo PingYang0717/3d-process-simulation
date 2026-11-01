@@ -139,6 +139,8 @@ interface Ctx {
    * 增量更新時沒動到的 chunk 的 Mesh 在多組之間共用；釋放前確認沒有任何一組或目前畫的還在用（disposeOrphans）。
    */
   partsCache: Map<string, Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>>;
+  /** 釘住不擠出的那一組（原始的網格）。 */
+  pinned?: string;
   /** 差異模式（plan v12 §5.2）：改到的實色層與深藍邊，只有 diff 外框碰到的 chunk。「沒改」＝主網格換半透明灰材質。 */
   diffFill: Layer<Mesh>;
   diffEdges: Layer<LineSegments>;
@@ -289,7 +291,7 @@ const disposeOrphans = (c: Ctx, maps: Map<number, Mesh>[]) => {
   for (const m of maps) for (const p of m.values()) if (!alive.has(p)) p.geometry.dispose();
 };
 /** 換上一組主網格 chunk；cache＝存進快取（差異模式那一組不存）。 */
-const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>, shown: { sid: number; key: string } | null, cache: boolean) => {
+const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMaterial>>, shown: { sid: number; key: string } | null, cache: boolean, pin = false) => {
   const prev = c.parts;
   c.partGroup.clear();
   for (const p of map.values()) c.partGroup.add(p);
@@ -300,8 +302,10 @@ const showParts = (c: Ctx, map: Map<number, Mesh<BufferGeometry, MeshLambertMate
     const ck = `${shown.sid}|${shown.key}`;
     c.partsCache.delete(ck);
     c.partsCache.set(ck, map);
-    while (c.partsCache.size > PARTS_CACHE) {
-      const k = c.partsCache.keys().next().value!;
+    // 原始那一組釘住（plan v12 §5.3：restore 回來的 split 都從原始增量）
+    if (pin) c.pinned = ck;
+    while (c.partsCache.size > PARTS_CACHE + (c.pinned && c.partsCache.has(c.pinned) ? 1 : 0)) {
+      const k = [...c.partsCache.keys()].find((x) => x !== c.pinned)!;
       evicted.push(c.partsCache.get(k)!);
       c.partsCache.delete(k);
     }
@@ -1036,16 +1040,23 @@ export function View3D({
     // 快取裡有（看原始、切 split、復原）：直接換上，不必跟 Worker 要
     const hit = c.partsCache.get(`${sid}|${key}`);
     if (hit) {
-      showParts(c, hit, { sid, key }, true);
+      showParts(c, hit, { sid, key }, true, state.owner === 'base' || state.owner === undefined);
       done(0, false);
       req = Promise.resolve();
     } else {
-      const base = c.shown && c.shown.key === key ? c.shown.sid : undefined;
-      req = call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: false, palette: palette(materials), base }).then((r) => {
-        if (seq !== meshSeq.current || !ctxRef.current) return;
-        showParts(c, nextParts(c, r.full ? null : c.parts, r.items), { sid, key }, true);
-        done(r.items.length, r.full);
-      });
+      const pin = state.owner === 'base' || state.owner === undefined;
+      const fetch = (base: number | undefined, alts: number[]): Promise<void> =>
+        call('chunks', { sid, key, hidden: hiddenTable(hidden), diff: false, palette: palette(materials), base, alts }).then((r) => {
+          if (seq !== meshSeq.current || !ctxRef.current) return;
+          const from = r.full ? null : r.from === c.shown?.sid ? c.parts : (c.partsCache.get(`${r.from}|${key}`) ?? null);
+          // 底那一組剛好不在了：退回全量
+          if (!r.full && !from) return fetch(undefined, []);
+          showParts(c, nextParts(c, from, r.items), { sid, key }, true, pin);
+          done(r.items.length, r.full);
+        });
+      // 快取裡同畫法的其他版本：Worker 可以從其中一個增量（restore 回來的 split 從原始那一組）
+      const alts = [...c.partsCache.keys()].filter((k) => k.endsWith(`|${key}`) && k.indexOf('|') === k.length - key.length - 1).map((k) => Number(k.slice(0, k.indexOf('|'))));
+      req = fetch(c.shown && c.shown.key === key ? c.shown.sid : undefined, alts);
     }
     req.then(() => (setMeshing(false), kick())).catch(() => setMeshing(false));
   }, [state, materials, hidden]);

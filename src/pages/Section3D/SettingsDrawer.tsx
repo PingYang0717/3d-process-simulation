@@ -66,6 +66,14 @@ export function SettingsDrawer({
             <Switch checked={ed.stepFlash} onChange={ed.setStepFlash} />
           </Row>
         </Section>
+        <Section title="Split 與記憶體">
+          <Row
+            label="同時保留在記憶體的 split"
+            sub={`其他的只留改到的那一小塊（parked），要看或要改時再載入；0＝依模型大小自動（現在 ${ed.liveLimit} 個）。原始與目前的永遠在記憶體`}
+          >
+            <InputNumber min={0} max={64} value={ed.liveK} onChange={(v) => v !== null && ed.setLiveK(Math.round(v))} style={{ width: 90 }} />
+          </Row>
+        </Section>
         <Section title="2D 剖面">
           <Row label="選到結構時自動放大到它" sub="2D 剖面的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />

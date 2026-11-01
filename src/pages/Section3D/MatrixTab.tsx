@@ -6,7 +6,7 @@ import { DownloadOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
 import { bboxDims } from '../../volume/volume';
 import { signed } from '../../ui/format';
 import { download } from '../../ui/download';
-import { type Editor, useSplitDiffs } from './editor';
+import { type Editor, changedOf } from './editor';
 import { factorsOf, levelCell, matrixCsv } from './matrix';
 import { CATEGORY } from './ExperimentTab';
 
@@ -18,7 +18,6 @@ export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (
   const focus = ed.selComps[0];
   const was = focus ? ed.origByKey.get(focus.key) : undefined;
   const base = was ? bboxDims(was.bbox) : null;
-  const diffs = useSplitDiffs(ed);
   const factors = useMemo(() => factorsOf(ed.designs), [ed.designs]);
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
@@ -26,7 +25,7 @@ export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (
   const rows = ed.splits.map((s) => {
     const c = focus ? s.cur.L.comps.find((x) => x.key === focus.key) : undefined;
     const d = c ? bboxDims(c.bbox) : null;
-    return { key: s.id, name: s.name, h: d?.h, w: d?.w, dd: d?.d, diff: diffs.get(s.id)?.count, blocked: s.blocked, tags: s.tags ?? [], levels: s.levels ?? {} };
+    return { key: s.id, name: s.name, h: d?.h, w: d?.w, dd: d?.d, diff: changedOf(s), blocked: s.blocked, tags: s.tags ?? [], levels: s.levels ?? {}, parked: s.state === 'parked' };
   });
   type Row = (typeof rows)[number];
   const dim = (k: 'h' | 'w' | 'dd') => (_: unknown, r: Row) => {
@@ -44,7 +43,7 @@ export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (
   const csv = () => {
     const name = (s: { name: string }) => (fileOf ? fileOf(s) : `${safeName(s.name)}.vti`);
     const text = matrixCsv(
-      ed.splits.filter((s) => !ed.exportOff.has(s.id)).map((s) => ({ ...s, changedVoxels: s.buf?.diffCount ?? 0 })),
+      ed.splits.filter((s) => !ed.exportOff.has(s.id)).map((s) => ({ ...s, changedVoxels: changedOf(s) })),
       factors,
       name,
     );

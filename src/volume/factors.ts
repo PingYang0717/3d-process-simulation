@@ -41,6 +41,8 @@ export interface Design {
   from: 'base' | 'active' | 'all';
   /** 每個變數一段，多變數用 '_' 連；可用 {id}、{name}、{value}、{unit}、{n}。 */
   nameTemplate: string;
+  /** 產生的時間（實驗頁的分組標題，plan v12 §5.4）。 */
+  at?: number;
 }
 
 export const DEFAULT_NAME_TEMPLATE = '{id}={value}{unit}';

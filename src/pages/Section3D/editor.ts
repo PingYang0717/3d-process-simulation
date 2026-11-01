@@ -75,8 +75,9 @@ export interface Brush {
 }
 /** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
-import { applyIn, deriveIn, dropOwners, forkIn, loadOrig, newVersion, replayIn, sidOf } from '../../volume/client';
-import { type Step, applyStepInPlace, carryStepStats } from '../../volume/patch';
+import { applyIn, applyParkedIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf } from '../../volume/client';
+import { type Step, applyStepInPlace, carryStepStats, unionBox } from '../../volume/patch';
+import { type SplitPatch, type SplitStats, buffersStats, defaultLiveK, extractPatch, restoreBuffers, stepTouch, toPark } from '../../splits/lifecycle';
 import { type OpReport, blockedPhrase, summarize } from '../../volume/report';
 import { boxVoxels } from '../../volume/preview';
 import { clipBox as clipScopeBox } from '../../volume/scope';
@@ -107,18 +108,31 @@ export interface SplitBuffers {
   diff: Uint8Array;
   diffCount: number;
   counts: Float64Array;
+  /** 所有改過的範圍（寬鬆聯集；plan v12 §5.3）：park 時只掃這裡，外面和原始逐位元組相同。 */
+  touch: BBox | null;
 }
 
 export interface Split {
   id: string;
   name: string;
   ops: Op[];
-  /** 規則：改 buf 內容的同一個 tick 一定換一個新的 cur（新版本號），以 cur／vol／L 身分當 deps 的 memo 才會重算。 */
+  /**
+   * 規則：改 buf 內容的同一個 tick 一定換一個新的 cur（新版本號），以 cur／vol／L 身分當 deps 的 memo 才會重算。
+   * parked 的 cur 只有 comps 與版本號是它自己的（陣列是原始的，不要讀；切面用 slabOf、摘要用 statsOf）。
+   */
   cur: EditState;
   hist: HistEntry[];
   future: HistEntry[];
-  /** null＝還沒改過，借用原始的陣列。 */
+  /** null＝還沒改過，借用原始的陣列（或 parked）。 */
   buf: SplitBuffers | null;
+  /** plan v12 §5.3：live＝有帳簿（主執行緒＋Worker 各一本，或借用原始）；parked＝只有補丁。 */
+  state: 'live' | 'parked';
+  /** parked 才有：和原始不同的外框裡的 data／labels。 */
+  patch: SplitPatch | null;
+  /** parked 才有（live 由帳簿算，statsOf）。 */
+  stats?: SplitStats;
+  /** 產生順序（排序用）。 */
+  seq?: number;
   /** 這個 split 是哪些水平（以 factor.unit 記；plan v11 §4.1）。標註，不影響重播。 */
   levels?: Record<string, number>;
   /** 哪一次產生（Design.id）。 */
@@ -165,9 +179,27 @@ const HISTORY_LIMIT = 50;
 export const QUEUE_MAX = 3;
 const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] }, version: 0 };
 
-/** split 和原始的 diff（主執行緒差量更新，不再跟 Worker 要，§4.4）。 */
+/** split 和原始的 diff（主執行緒差量更新，不再跟 Worker 要，§4.4）；parked 沒有整個陣列的 mask。 */
 export const splitDiff = (s: Pick<Split, 'buf'>): Diff => (s.buf ? { mask: s.buf.diff, count: s.buf.diffCount } : NO_DIFF);
 const NO_DIFF: Diff = { mask: new Uint8Array(0), count: 0 };
+
+/** live split 的摘要快取（同一個 cur 只算一次）。 */
+const statsCache = new WeakMap<EditState, SplitStats>();
+/** 兩種狀態都有的摘要（改了幾格、diff 外框、體積帳；plan v12 §5.3）。原始＝0。 */
+export function statsOf(s: Split, origCounts: Float64Array | null): SplitStats {
+  if (s.state === 'parked' && s.stats) return s.stats;
+  if (!s.buf) return { changed: 0, diffBox: null, counts: origCounts ?? new Float64Array(256) };
+  let st = statsCache.get(s.cur);
+  if (!st) {
+    st = buffersStats(s.cur.vol, s.buf);
+    statsCache.set(s.cur, st);
+  }
+  return st;
+}
+/** 改了幾格（兩種狀態都有）。 */
+export const changedOf = (s: Split) => (s.state === 'parked' ? (s.stats?.changed ?? 0) : (s.buf?.diffCount ?? 0));
+/** parked 的 cur：只有 comps 與版本號是自己的。 */
+const stubOf = (o: EditState, id: string, comps: Comp[], version: number): EditState => ({ vol: o.vol, L: { labels: o.L.labels, comps }, version, owner: id });
 
 /** 帳簿 buf 的某個版本的 wrapper（每一步新物件，陣列身分不變）。 */
 const wrap = (owner: string, buf: SplitBuffers, comps: Comp[], version: number, dims: { X: number; Y: number; Z: number }): EditState => ({
@@ -199,6 +231,8 @@ export interface MenuState {
 export function useEditor() {
   const { message, modal } = App.useApp();
   const [materials, setMaterials] = useState<Material[]>([]);
+  const materialsRef = useRef(materials);
+  materialsRef.current = materials;
   const [meta, setMeta] = useState<Meta>({ format: 'demo' });
   const [origState, setOrig] = useState<EditState | null>(null);
   // 一開始只有「原始」；第一次在原始上調整會自動建立 Split 1
@@ -217,10 +251,18 @@ export function useEditor() {
     splitsRef.current = next;
     setSplitsState(next);
   }, []);
-  const setActiveId = useCallback((id: string) => {
+  /** 直接切（目標一定是 live 或原始）；對外的 setActiveId 會先 restore parked（plan v12 §5.3）。 */
+  const setActiveRaw = useCallback((id: string) => {
     activeRef.current = id;
     setActiveIdState(id);
+    touchLru(id);
   }, []);
+  /** 最近用過的 split（最近的在前）：live 集合的 LRU。 */
+  const lru = useRef<string[]>([]);
+  const touchLru = (id: string) => {
+    if (id === BASE_ID) return;
+    lru.current = [id, ...lru.current.filter((x) => x !== id)].slice(0, 64);
+  };
   /** 最近一步的報告（被擋的片、格子）。 */
   const [report, setReport] = useState<StepReport | null>(null);
   /** 排隊等 Worker 的步驟數（不含正在算的那一步）。 */
@@ -273,6 +315,12 @@ export function useEditor() {
   const previewHook = useRef<((op: Op) => void) | null>(null);
   /** 剛做了什麼：訊息＋那一步改到的外框（改後模式畫橘色虛線外框淡出，plan v12 §5.1 D1）。 */
   const [last, setLast] = useState<{ text: string; at: number; box?: BBox } | null>(null);
+  /** 同時 live 幾個 split（plan v12 §10 D4）：0＝依大小自動（8／3／1）。 */
+  const [liveKSetting, setLiveK] = usePersisted('liveK', 0, (v): v is number => typeof v === 'number' && v >= 0 && v <= 64);
+  /** 產生中可以取消（已產生的留著）。 */
+  const cancelGen = useRef(false);
+  /** 產生進度（實驗頁顯示 k／N）。 */
+  const [genProgress, setGenProgress] = useState<{ done: number; total: number; designId: string } | null>(null);
   /** 套用一步後閃橘色虛線外框（設定可關）。 */
   const [stepFlash, setStepFlash] = usePersisted('stepFlash', true);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -352,6 +400,8 @@ export function useEditor() {
   const affMask = useMemo(() => (selMask ? maskInScope(selMask, vol, scope, selBox) : null), [selMask, scope, vol, selBox]);
   const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
 
+  /** 目前 split 和原始不同的外框（「對準差異」、縮圖；plan v12 §5.2）。 */
+  const diffBox = useMemo(() => (active ? statsOf(active, origCounts).diffBox : null), [active, cur, origCounts]); // eslint-disable-line react-hooks/exhaustive-deps
   /** 目前 split 的 diff 與體積帳：讀帳簿（cur 每一步換新，所以這裡每一步重算）。 */
   const diff: Diff = useMemo(() => (active ? splitDiff(active) : NO_DIFF), [active, cur]);
   const counts = useMemo(
@@ -435,7 +485,7 @@ export function useEditor() {
       try {
         const r = await replayIn(owner, from, { ops, matNames, keyCounter: keySeq.current });
         keySeq.current = r.keyCounter;
-        const buf: SplitBuffers = { data: r.data, labels: r.labels, diff: r.diff, diffCount: r.diffCount, counts: r.counts };
+        const buf: SplitBuffers = { data: r.data, labels: r.labels, diff: r.diff, diffCount: r.diffCount, counts: r.counts, touch: r.touch };
         return { cur: wrap(owner, buf, r.comps, r.version, from.vol), buf, blocked: r.blocked };
       } catch (e) {
         dropOwners([owner]);
@@ -455,9 +505,10 @@ export function useEditor() {
    */
   const own = (sp: Split): Split => {
     if (sp.buf) return sp;
+    if (sp.state === 'parked') throw new Error(`split ${sp.name} 還沒載入（parked）`);
     const o = origRef.current!;
     const oc = origCountsRef.current!;
-    const buf: SplitBuffers = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice() };
+    const buf: SplitBuffers = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null };
     const version = sidOf(sp.cur);
     void forkIn(sp.id, sp.cur).catch(() => {});
     return { ...sp, buf, cur: wrap(sp.id, buf, sp.cur.L.comps, version, o.vol) };
@@ -473,6 +524,7 @@ export function useEditor() {
       if (!r.step.data) return { next: null, step: r.step, report: r.report };
       const comps = applyStepInPlace(from.vol, buf.data, buf.labels, r.step, 'fwd');
       buf.diffCount = carryStepStats(from.vol, buf.data, origRef.current!.vol.data, buf.diff, buf.diffCount, buf.counts, r.step, 'fwd');
+      buf.touch = unionBox(buf.touch, stepTouch(r.step));
       const next = wrap(sp.id, buf, comps ?? from.L.comps, r.version, from.vol);
       return { next, step: r.step, report: r.report };
     } catch (e) {
@@ -488,7 +540,7 @@ export function useEditor() {
     const active = splitsRef.current.find((x) => x.id === activeRef.current) ?? null;
     // 原始保持唯讀：在原始上調整就先開一個新 split（有改到才留下）
     const fresh = !active;
-    const sp = own(active ?? { id: newSplitId(), name: '', cur: o, ops: [], hist: [], future: [], buf: null });
+    const sp = own(active ?? { id: newSplitId(), name: '', cur: o, ops: [], hist: [], future: [], buf: null, state: 'live', patch: null, seq: genSeq.current++ });
     if (active) setSplits((all) => all.map((x) => (x.id === sp.id ? sp : x)));
     const from = sp.cur;
     const r = await applyOne(sp, op);
@@ -510,7 +562,8 @@ export function useEditor() {
     if (fresh) {
       const name = `Split ${splitsRef.current.length + 1}`;
       setSplits((all) => [...all, { ...sp, name, cur: next, ops: [op], hist: [entry], future: [] }]);
-      setActiveId(sp.id);
+      setActiveRaw(sp.id);
+      enforceK();
       keepSel(next);
       setLast({ text: `原始保持不變，已自動建立 ${name}：${headText(op, o)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
       return;
@@ -608,6 +661,7 @@ export function useEditor() {
     void deriveIn(act.cur, h.version, h.step, dir).catch(() => {});
     const comps = applyStepInPlace(o.vol, buf.data, buf.labels, h.step, dir);
     buf.diffCount = carryStepStats(o.vol, buf.data, o.vol.data, buf.diff, buf.diffCount, buf.counts, h.step, dir);
+    buf.touch = unionBox(buf.touch, stepTouch(h.step));
     return wrap(act.id, buf, comps ?? act.cur.L.comps, h.version, o.vol);
   };
 
@@ -671,16 +725,97 @@ export function useEditor() {
 
   // ---- split ----
 
+  /** 產生順序（排序用）。 */
+  const genSeq = useRef(1);
+  const liveKRef = useRef(liveKSetting);
+  liveKRef.current = liveKSetting;
+  /** live 上限 K（plan v12 §5.3、§10 D4）：設定 0＝依大小自動。 */
+  const liveLimit = () => liveKRef.current || defaultLiveK(origRef.current?.vol.data.length ?? 0);
+
+  /** park：裁補丁（O(touch)）、丟帳簿與復原記錄（ops 留著，§10 D3），Worker drop。 */
+  const parkOne = (id: string) => {
+    const sp = splitsRef.current.find((x) => x.id === id);
+    const o = origRef.current;
+    if (!sp || !o || sp.state === 'parked' || !sp.buf || id === activeRef.current) return;
+    const buf = sp.buf;
+    const patch = extractPatch(o.vol, buf.data, buf.labels, o.vol.data, o.L.labels, buf.touch, sp.cur.L.comps);
+    const st = buffersStats(o.vol, buf);
+    const stats: SplitStats = { ...st, counts: st.counts.slice() };
+    dropOwners([id]);
+    setSplits((all) => all.map((x) => (x.id === id ? { ...x, state: 'parked', buf: null, patch, stats, hist: [], future: [], cur: stubOf(o, id, sp.cur.L.comps, sidOf(sp.cur)) } : x)));
+  };
+  /** live（有帳簿的）超過 K 個就 park 最久沒用的；目前的與 pinned 不 park。 */
+  const enforceK = (pinned: string[] = []) => {
+    const live = splitsRef.current.filter((x) => x.state === 'live' && x.buf).map((x) => x.id);
+    for (const id of toPark(live, lru.current, liveLimit(), activeRef.current, pinned)) parkOne(id);
+  };
+  /**
+   * parked → live（plan v12 §5.3）：Worker 原始複本＋貼補丁、主執行緒同樣；比重播快，而且不依賴重播。
+   * busy 列「正在載入 {name}…」。已經是 live 回 true。
+   */
+  const ensureLive = async (id: string): Promise<boolean> => {
+    const sp = splitsRef.current.find((x) => x.id === id);
+    const o = origRef.current;
+    const oc = origCountsRef.current;
+    if (!sp || !o || !oc) return false;
+    if (sp.state !== 'parked' || !sp.patch) return true;
+    const patch = sp.patch;
+    const v = newVersion();
+    const was = running.current;
+    running.current = true;
+    setBusy(`正在載入 ${sp.name}…`);
+    try {
+      await restoreIn(id, v, patch);
+    } catch (e) {
+      message.error(`載入 ${sp.name} 失敗：${(e as Error)?.message ?? e}`);
+      return false;
+    } finally {
+      setBusy(null);
+      running.current = was;
+    }
+    if (!splitsRef.current.some((x) => x.id === id && x.state === 'parked')) return true;
+    const buf: SplitBuffers = restoreBuffers(o.vol, o.vol.data, o.L.labels, oc, patch);
+    setSplits((all) => all.map((x) => (x.id === id ? { ...x, state: 'live', buf, patch: null, stats: undefined, cur: wrap(id, buf, patch.comps, v, o.vol) } : x)));
+    return true;
+  };
+  /**
+   * 設為目前（plan v12 §5.3）：parked 先 restore（非同步；切之前 cur 仍是上一個，3D 不會閃空畫面），之後超過 K 的 park。
+   */
+  const setActiveId = useCallback(
+    async (id: string) => {
+      if (id === activeRef.current) return;
+      if (id !== BASE_ID) {
+        const sp = splitsRef.current.find((x) => x.id === id);
+        if (!sp) return;
+        if (sp.state === 'parked') {
+          if (running.current) {
+            message.warning({ key: 'queue', content: '還在算，等一下再切' });
+            return;
+          }
+          if (!(await ensureLive(id))) return;
+          if (sp.ops.length) message.info({ key: 'restore', content: `已載入 ${sp.name}（復原記錄已釋放，ops 仍可重播）` });
+        }
+      }
+      setActiveRaw(id);
+      enforceK();
+    },
+    // ensureLive／enforceK 只讀 ref
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [message],
+  );
+
   const addSplit = useCallback(
     async (name?: string, ops: Op[] = []) => {
       if (running.current) return;
       const id = newSplitId();
       const made = ops.length ? await run(id, orig, ops, '重播中…') : { cur: orig, buf: null };
       if (!made) return;
-      setSplits((all) => [...all, { id, name: name ?? `Split ${all.length + 1}`, cur: made.cur, buf: made.buf, ops, hist: [], future: [] }]);
-      setActiveId(id);
+      setSplits((all) => [...all, { id, name: name ?? `Split ${all.length + 1}`, cur: made.cur, buf: made.buf, ops, hist: [], future: [], state: 'live', patch: null, seq: genSeq.current++ }]);
+      setActiveRaw(id);
+      enforceK();
       return id;
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [orig, run],
   );
 
@@ -688,20 +823,31 @@ export function useEditor() {
     (id: string) => {
       if (running.current) return;
       const src = splitsRef.current.find((s) => s.id === id);
-      if (!src) return;
+      const o = origRef.current;
+      if (!src || !o) return;
       const nid = newSplitId();
+      const base = { ...src, id: nid, name: `${src.name} 複本`, hist: [], future: [], seq: genSeq.current++ };
+      if (src.state === 'parked' && src.patch) {
+        // parked：複製補丁（O(外框)），不 restore、不切過去
+        const patch: SplitPatch = { ...src.patch, data: src.patch.data.slice(), labels: src.patch.labels.slice() };
+        setSplits((all) => [...all, { ...base, patch, cur: stubOf(o, nid, patch.comps, newVersion()) }]);
+        return nid;
+      }
       // 各自一本：有帳簿就複製一份（新版本號，Worker 也 fork 一份），借用中的照樣借用
       let cur = src.cur;
       let buf: SplitBuffers | null = null;
       if (src.buf) {
-        buf = { data: src.buf.data.slice(), labels: src.buf.labels.slice(), diff: src.buf.diff.slice(), diffCount: src.buf.diffCount, counts: src.buf.counts.slice() };
+        buf = { data: src.buf.data.slice(), labels: src.buf.labels.slice(), diff: src.buf.diff.slice(), diffCount: src.buf.diffCount, counts: src.buf.counts.slice(), touch: src.buf.touch && { ...src.buf.touch } };
         const v = newVersion();
         void forkIn(nid, src.cur, v).catch(() => {});
         cur = wrap(nid, buf, src.cur.L.comps, v, src.cur.vol);
       }
-      setSplits((all) => [...all, { ...src, id: nid, name: `${src.name} 複本`, cur, buf, hist: [], future: [] }]);
-      setActiveId(nid);
+      setSplits((all) => [...all, { ...base, cur, buf }]);
+      setActiveRaw(nid);
+      enforceK();
+      return nid;
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
@@ -710,16 +856,22 @@ export function useEditor() {
     [],
   );
 
-  const removeSplit = useCallback(
-    (id: string) => {
+  /** 刪掉一批 split（刪除勾選的、撤銷這次產生）；目前的被刪就切到第一個 live 的（沒有就原始）。 */
+  const removeSplits = useCallback(
+    (ids: string[]) => {
       if (running.current) return;
-      const rest = splitsRef.current.filter((s) => s.id !== id);
-      dropOwners([id]);
+      const gone = new Set(ids);
+      const rest = splitsRef.current.filter((s) => !gone.has(s.id));
+      dropOwners(splitsRef.current.filter((s) => gone.has(s.id) && s.buf).map((s) => s.id));
+      lru.current = lru.current.filter((x) => !gone.has(x));
       setSplits(rest);
-      if (activeRef.current === id) setActiveId(rest[0]?.id ?? BASE_ID);
+      setExportOff((prev) => new Set([...prev].filter((x) => !gone.has(x))));
+      if (gone.has(activeRef.current)) setActiveRaw(rest.find((s) => s.state === 'live')?.id ?? BASE_ID);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
+  const removeSplit = useCallback((id: string) => removeSplits([id]), [removeSplits]);
 
   /** 實驗設計用的情境（opsOfCombo）：從哪個狀態量、全域的襯層／回填／policy。 */
   const factorCtx = useCallback(
@@ -727,17 +879,48 @@ export function useEditor() {
     [nmPerVoxel, follow, backfill, pushPolicy],
   );
 
+  /** 寫進 manifest 的一步結果摘要（重播時忽略，§11）。 */
+  const withReport = (op0: Op, r: Parameters<typeof summarize>[0], vol: Volume, changed: number) => {
+    const t = summarize(r, op0, vol).total;
+    return { ...op0, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed } } as unknown as Op;
+  };
+
   /**
    * 對指定的 split 依序 commit 一串 Op（不必是目前的 split；每個 Op 一步復原）。levels 合併進去。
+   * parked 的在 Worker 的 scratch 上算、不 restore（plan v12 §5.3 applyParked）。
    * 回傳這幾步被擋的格數；失敗回 null。plan v11 §4.2「套用到所有現有 split」用。
    */
   const commitTo = async (splitId: string, ops: Op[], levels?: Record<string, number>, designId?: string) => {
     let sp = splitsRef.current.find((x) => x.id === splitId);
-    if (!sp) return null;
+    const o = origRef.current;
+    if (!sp || !o) return null;
+    let blocked = 0;
+    if (sp.state === 'parked' && sp.patch) {
+      let r;
+      try {
+        r = await applyParkedIn({ patch: sp.patch, ops, matNames, keyCounter: keySeq.current });
+      } catch (e) {
+        message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
+        return null;
+      }
+      keySeq.current = r.keyCounter;
+      const added = ops.flatMap((op0, k) => {
+        blocked += r.reports[k].blocked;
+        return r.changed[k] ? [withReport(op0, r.reports[k], o.vol, r.changed[k])] : [];
+      });
+      const res = r;
+      setSplits((all) =>
+        all.map((x) =>
+          x.id === splitId
+            ? { ...x, patch: res.patch, stats: res.stats, ops: [...x.ops, ...added], cur: stubOf(o, splitId, res.patch.comps, newVersion()), levels: { ...x.levels, ...levels }, designId: x.designId ?? designId, blocked: (x.blocked ?? 0) + blocked }
+            : x,
+        ),
+      );
+      return blocked;
+    }
     sp = own(sp);
     const owned = sp;
     setSplits((all) => all.map((x) => (x.id === owned.id ? owned : x)));
-    let blocked = 0;
     for (const op0 of ops) {
       const cur = splitsRef.current.find((x) => x.id === splitId)!;
       const from = cur.cur;
@@ -745,9 +928,7 @@ export function useEditor() {
       if (!r) return null;
       blocked += r.report.blocked;
       if (!r.next) continue;
-      const rep = summarize(r.report, op0, from.vol);
-      const t = rep.total;
-      const op = { ...op0, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed: changedCount(r.step) } } as unknown as Op;
+      const op = withReport(op0, r.report, from.vol, changedCount(r.step));
       const entry: HistEntry = { step: r.step, ops: cur.ops, version: sidOf(from) };
       const next = r.next;
       setSplits((all) => all.map((x) => (x.id === splitId ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)));
@@ -761,63 +942,115 @@ export function useEditor() {
   };
 
   /**
-   * 照實驗設計產生 split（plan v11 §4.2，取代 addSweep）：每個組合 → opsOfCombo → 一個 split（Worker 重播）。
-   * from 'base'／'active'：產生新 split；'all'：只允許單一組合，對每個現有 split 各 commit 一次同一組 Op（§9 D9）。
-   * 水平等於標稱的組合沒有 Op（對照組），仍佔一個 split。回傳產生（或改到）的 split id。
+   * 照實驗設計產生 split（plan v11 §4.2；v12 §5.3）：每個組合 → opsOfCombo → Worker 在 scratch 帳簿上重播、只回補丁
+   * → parked split（主執行緒不碰 O(N)）。水平等於標稱的組合沒有 Op（對照組），仍佔一個 split（借用原始，不佔記憶體）。
+   * 產生中可取消（已產生的留著）；完成後第一個設為目前（restore 成 live），不切頁、不切 3D（§10 D8）。
+   * from 'all'：只允許單一組合，對每個現有 split 各 commit 一次同一組 Op（parked 的不 restore）。
    */
   const addDesign = useCallback(
     async (design: Design, onProgress?: (done: number, total: number) => void): Promise<string[]> => {
-      if (running.current || !origRef.current) return [];
+      const o = origRef.current;
+      if (running.current || !o) return [];
       const combos = combosOf(design, nmPerVoxel);
       if (!combos.length) return [];
       const id = design.id ?? `d${designSeq.current++}`;
-      const d: Design = { ...design, id };
+      const d: Design = { ...design, id, at: design.at ?? Date.now() };
       setDesigns((all) => [...all.filter((x) => x.id !== id), d]);
+      cancelGen.current = false;
       if (design.from === 'all' && splitsRef.current.length) {
         if (combos.length !== 1) return [];
         const ids = splitsRef.current.map((x) => x.id);
         running.current = true;
         try {
           for (let k = 0; k < ids.length; k++) {
+            if (cancelGen.current) break;
             setBusy(`套用到 ${k + 1}／${ids.length} 個 split…`);
+            setGenProgress({ done: k, total: ids.length, designId: id });
             onProgress?.(k, ids.length);
-            const sp = splitsRef.current.find((x) => x.id === ids[k])!;
+            const sp = splitsRef.current.find((x) => x.id === ids[k]);
+            if (!sp) continue;
             await commitTo(sp.id, opsOfCombo(d, combos[0], factorCtx(sp.cur)), combos[0], id);
           }
         } finally {
           running.current = false;
           setBusy(null);
+          setGenProgress(null);
         }
         setLast({ text: `已套用到 ${ids.length} 個 split`, at: Date.now() });
         return ids;
       }
-      const act = design.from === 'active' ? splitsRef.current.find((x) => x.id === activeRef.current) ?? null : null;
-      const from = act ? act.cur : origRef.current;
+      const act = design.from === 'active' ? (splitsRef.current.find((x) => x.id === activeRef.current) ?? null) : null;
+      const from = act ? act.cur : o;
       const prefix = act ? act.ops : [];
       const ctx = factorCtx(from);
       const names = new Set(splitsRef.current.map((x) => x.name));
-      const made: Split[] = [];
-      for (let i = 0; i < combos.length; i++) {
-        const ops = opsOfCombo(d, combos[i], ctx);
-        let name = nameOfCombo(d, combos[i], i + 1);
-        for (let k = 2; names.has(name); k++) name = `${nameOfCombo(d, combos[i], i + 1)}_${k}`;
-        names.add(name);
-        const sid = newSplitId();
-        onProgress?.(i, combos.length);
-        const r = !ops.length && !act ? { cur: from, buf: null, blocked: 0 } : await run(sid, from, ops, `產生 ${name}（${i + 1}／${combos.length}）…`);
-        if (!r) break;
-        const cur = r.buf ? r.cur : from;
-        made.push({ id: sid, name, cur, buf: r.buf, ops: [...prefix, ...ops], hist: [], future: [], levels: { ...act?.levels, ...combos[i] }, designId: id, tags: ops.length ? [] : ['baseline'], blocked: r.blocked });
+      const made: string[] = [];
+      let cancelled = false;
+      running.current = true;
+      try {
+        for (let i = 0; i < combos.length; i++) {
+          if (cancelGen.current) {
+            cancelled = true;
+            break;
+          }
+          const ops = opsOfCombo(d, combos[i], ctx);
+          let name = nameOfCombo(d, combos[i], i + 1);
+          for (let k = 2; names.has(name); k++) name = `${nameOfCombo(d, combos[i], i + 1)}_${k}`;
+          names.add(name);
+          const sid = newSplitId();
+          setBusy(`產生 ${name}（${i + 1}／${combos.length}）…`);
+          setGenProgress({ done: i, total: combos.length, designId: id });
+          onProgress?.(i, combos.length);
+          const meta = { id: sid, name, ops: [...prefix, ...ops], hist: [], future: [], levels: { ...act?.levels, ...combos[i] }, designId: id, tags: ops.length ? [] : ['baseline'], seq: genSeq.current++ };
+          let sp: Split;
+          if (!ops.length && !act) sp = { ...meta, cur: o, buf: null, state: 'live', patch: null, blocked: 0 };
+          else {
+            let r;
+            try {
+              r = await replayPatchIn(from, { ops, matNames, keyCounter: keySeq.current });
+            } catch (e) {
+              message.error(`產生 ${name} 失敗：${(e as Error)?.message ?? e}`);
+              break;
+            }
+            keySeq.current = r.keyCounter;
+            sp = { ...meta, cur: stubOf(o, sid, r.patch.comps, newVersion()), buf: null, state: 'parked', patch: r.patch, stats: r.stats, blocked: r.blocked };
+          }
+          setSplits((all) => [...all, sp]);
+          made.push(sid);
+        }
+      } finally {
+        running.current = false;
+        setBusy(null);
+        setGenProgress(null);
       }
       if (!made.length) return [];
-      setSplits((all) => [...all, ...made]);
-      setActiveId(made[0].id);
-      setLast({ text: `已產生 ${made.length} 個 split`, at: Date.now() });
-      return made.map((x) => x.id);
+      // §10 D8：第一個設為目前（restore 成 live），不切頁、不切 3D
+      if (await ensureLive(made[0])) {
+        setActiveRaw(made[0]);
+        enforceK();
+      }
+      setLast({ text: `已產生 ${made.length} 個 split${cancelled ? `（已取消，其餘 ${combos.length - made.length} 個沒有產生）` : ''}`, at: Date.now() });
+      return made;
     },
     // commitTo／applyOne 每次 render 都換新的，只讀 ref 裡的最新狀態
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [nmPerVoxel, factorCtx, run],
+  );
+  /** 取消產生（已產生的留著）。 */
+  const cancelDesign = useCallback(() => {
+    cancelGen.current = true;
+  }, []);
+
+  /**
+   * 匯出一個 split 的位元組（plan v12 §5.3）：在 Worker 裡編碼；live 用它的帳簿、parked 用補丁、原始／借用中的用原始。
+   */
+  const exportBytes = useCallback(
+    (s: Split | null, req: { format: 'vti' | 'vti1' | 'npy'; spacing: number[]; origin: number[]; arrayName: string }) => {
+      const mats = materialsRef.current.map((m) => ({ id: m.id, name: m.name, color: m.color }));
+      if (s && s.state === 'parked' && s.patch) return exportIn({ patch: s.patch }, { ...req, materials: mats });
+      return exportIn({ state: s?.buf ? s.cur : undefined }, { ...req, materials: mats });
+    },
+    [],
   );
 
   const setSplitTags = useCallback((id: string, tags: string[]) => setSplits((all) => all.map((x) => (x.id === id ? { ...x, tags } : x))), [setSplits]);
@@ -1006,6 +1239,10 @@ export function useEditor() {
       setMeta(m);
       setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) }, version, owner: BASE_ID });
       setOrigCounts(oc);
+      // 匯出照原格式要的原檔（Worker 留一份；plan v12 §5.3 匯出搬進 Worker）
+      void exportMetaIn(m.raw && m.fractions ? m.raw : null, m.raw && m.fractions ? m.fractions : null).catch(() => {});
+      lru.current = [];
+      genSeq.current = 1;
       models.clear();
       keySeq.current = 1000;
       splitSeq.current = 1;
@@ -1050,6 +1287,7 @@ export function useEditor() {
         all.map((s) => ({
           ...s,
           cur: fix(s.cur),
+          patch: s.patch ? { ...s.patch, comps: fixComps(s.patch.comps) } : null,
           hist: s.hist.map(fixEntry),
           future: s.future.map(fixEntry),
         })),
@@ -1177,7 +1415,19 @@ export function useEditor() {
     duplicateSplit,
     renameSplit,
     removeSplit,
+    removeSplits,
+    ensureLive,
+    park: parkOne,
+    liveK: liveKSetting,
+    setLiveK,
+    liveLimit: liveLimit(),
+    stats: (s: Split) => statsOf(s, origCounts),
+    origCounts,
+    diffBox,
+    exportBytes,
     addDesign,
+    cancelDesign,
+    genProgress,
     commitTo,
     factorCtx,
     designs,
@@ -1284,9 +1534,3 @@ export function useEditor() {
 }
 
 export type Editor = ReturnType<typeof useEditor>;
-
-/** 每個 split 和原始的 diff（並排看各 split、總表用）：直接讀帳簿（§4.4）。 */
-export function useSplitDiffs(ed: Editor) {
-  const { splits } = ed;
-  return useMemo(() => new Map<string, Diff>(splits.map((s) => [s.id, splitDiff(s)])), [splits]);
-}

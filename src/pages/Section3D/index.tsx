@@ -24,12 +24,11 @@ import {
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { type Axis, type Vec3, type Volume, directionName, encodeNpy, hexToRgb, unionBBox } from '../../volume/volume';
-import { encodeVti, encodeVtiLike } from '../../volume/vti';
+import { type Axis, type Vec3, directionName, hexToRgb, unionBBox } from '../../volume/volume';
 import { zipStore } from '../../volume/zip';
 import { download } from '../../ui/download';
 import { MatLabel } from '../../ui/Swatch';
-import { type Op, type SelectMode, slicesWith, useEditor } from './editor';
+import { type Op, type SelectMode, type Split, changedOf, slicesWith, useEditor } from './editor';
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
 import { FloatingToolbar } from './FloatingToolbar';
 import { type CardHost, CardHostCtx, PushCard, ShapeCard } from './OpCard';
@@ -584,14 +583,12 @@ export default function Section3DPage() {
   const spacing = ed.meta.spacing ?? [ed.nmPerVoxel, ed.nmPerVoxel, ed.nmPerVoxel];
   const origin = ed.meta.origin ?? [0, 0, 0];
   const like = !!(ed.meta.raw && ed.meta.fractions);
-  const encode = async (v: Volume, fmt: Fmt): Promise<Uint8Array> => {
-    if (fmt === 'npy') return encodeNpy(v);
-    if (fmt === 'vti' && like) return encodeVtiLike(ed.meta.raw!, ed.meta.fractions!, v.data, ed.orig.vol.data, ed.materials);
-    return encodeVti(v, spacing, origin, ed.meta.arrayName && !like ? ed.meta.arrayName : 'material');
-  };
+  /** 編碼在 Worker 裡做（plan v12 §5.3）：live 用帳簿、parked 用補丁，一個一個來。 */
+  const encode = (s: Split | null, fmt: Fmt): Promise<Uint8Array> =>
+    ed.exportBytes(s, { format: fmt, spacing, origin, arrayName: ed.meta.arrayName && !like ? ed.meta.arrayName : 'material' });
   const exportOne = (fmt: Fmt = 'vti') => {
     const name = ed.isBase || !ed.active ? `${stem}.${ext(fmt)}` : `${stem}__${safeName(ed.active.name)}.${ext(fmt)}`;
-    encode(ed.vol, fmt)
+    encode(ed.isBase ? null : ed.active, fmt)
       .then((data) => download(data, name))
       .then((saved) => message.success(`已匯出 ${saved}`))
       .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
@@ -628,13 +625,18 @@ export default function Section3DPage() {
       onOk: () => exportAll(fmt),
     });
   };
-  const exportAll = async (fmt: Fmt = 'vti') => {
+  const exportAll = async (fmt: Fmt = 'vti', only?: string[]) => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
     const files: { name: string; data: Uint8Array }[] = [];
-    const chosen = ed.splits.filter((s) => !ed.exportOff.has(s.id));
+    const chosen = ed.splits.filter((s) => (only ? only.includes(s.id) : !ed.exportOff.has(s.id)));
     try {
-      for (const s of chosen) files.push({ name: fileOf(s), data: await encode(s.cur.vol, fmt) });
+      for (let k = 0; k < chosen.length; k++) {
+        message.open({ key: 'export', type: 'loading', duration: 0, content: `匯出中 ${k + 1}／${chosen.length}：${chosen[k].name}` });
+        files.push({ name: fileOf(chosen[k]), data: await encode(chosen[k], fmt) });
+      }
+      message.destroy('export');
     } catch (e) {
+      message.destroy('export');
       message.error(`匯出失敗：${(e as Error)?.message ?? e}`);
       return;
     }
@@ -648,7 +650,7 @@ export default function Section3DPage() {
       origin,
       nmPerVoxel: ed.nmPerVoxel,
       designs: ed.designs,
-      splits: chosen.map((s) => ({ ...s, changedVoxels: s.buf?.diffCount ?? 0 })),
+      splits: chosen.map((s) => ({ ...s, changedVoxels: changedOf(s) })),
       fileOf,
       opText: (op) => ed.opText(op, ed.orig.L),
     });

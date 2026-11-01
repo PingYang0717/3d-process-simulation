@@ -1,6 +1,6 @@
 // plan v12 §5.2：差異層 chunk 化。layer diff 的單位面 ≡ 舊 diffMesh.changed；只碰 diffBox 相交的 chunk；一步之後增量 ≡ 全量。
 import { describe, expect, it } from 'vitest';
-import { type MeshData, MATERIALS } from './volume';
+import { type BBox, type MeshData, MATERIALS } from './volume';
 import { type ChunkItem, handle, inspect } from './workerCore';
 import { chunksTouching, gridOf } from './chunks';
 import { diffMeshOld } from './ref/diffMeshOld';
@@ -37,7 +37,7 @@ describe('差異層（plan v12 §5.2）', () => {
       const old = diffMeshOld({ ...vol, data: b.data }, orig, b.diff, hidden, pal);
       expect(old.quads).toBeGreaterThan(0);
       expect([...unitFaces(meshes(r))].sort()).toEqual([...unitFaces([old])].sort());
-      const box = handle('diffBox', { sid: 2 })[0];
+      const box = handle('diffBox', { sid: 2 })[0] as BBox | null;
       const g = gridOf(vol);
       const allowed = new Set(chunksTouching(vol, g, box!));
       for (const it of r.items) expect(allowed.has(it.k)).toBe(true);

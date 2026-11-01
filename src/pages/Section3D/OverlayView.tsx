@@ -3,36 +3,38 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Flex, Switch, Typography } from 'antd';
 import { type Axis, type Vec3, hexToRgb } from '../../volume/volume';
-import { sidOf } from '../../volume/client';
 import { BASE_ID, type Editor } from './editor';
 import { drawSlice } from './drawSlice';
 import { CATEGORY } from './ExperimentTab';
 import { type UVBox, contourCache, contourOf, loopsPath, overlayKey, sliceDiff, sliceGeom, unionUV } from './overlay';
+import { slabOf, versionOf } from './slabs';
 
 const { Text } = Typography;
 const cache = contourCache();
 
-export function OverlayView({ ed, axis, at }: { ed: Editor; axis: Axis; at: number }) {
+/** ids＝要疊的 split（省略＝全部）；切面來源 slabOf（parked 不還原，plan v12 §5.3）；圖例點名字＝onOpen。 */
+export function OverlayView({ ed, axis, at, ids, onOpen }: { ed: Editor; axis: Axis; at: number; ids?: string[]; onOpen?: (id: string) => void }) {
   const baseSplit = ed.compareBase === BASE_ID ? null : ed.splits.find((s) => s.id === ed.compareBase) ?? null;
-  const base = baseSplit ? baseSplit.cur : ed.orig;
+  const base = slabOf(ed.orig, baseSplit, axis, at);
   const baseName = baseSplit ? baseSplit.name : '原始';
-  const splits = ed.splits.filter((s) => s.id !== baseSplit?.id);
+  const splits = ed.splits.filter((s) => s.id !== baseSplit?.id && (!ids || ids.includes(s.id)));
+  const open = onOpen ?? ((id: string) => void ed.setActiveId(id));
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<string | null>(null);
   const [zoom, setZoom] = useState(true);
   const { W, H } = sliceGeom(ed.vol, axis);
   // 輪廓的結構：選到的；沒選就用每個 split 改到的結構（ops 的 keys）聯集
   const keysOf = (ops: { keys: string[] }[]) => (ed.sel.size ? [...ed.sel] : [...new Set(ops.flatMap((o) => o.keys))]);
-  const allKeys = useMemo(() => keysOf(ed.splits.flatMap((s) => s.ops)), [ed.splits, ed.sel]); // eslint-disable-line react-hooks/exhaustive-deps
+  const allKeys = useMemo(() => keysOf(splits.flatMap((s) => s.ops)), [splits, ed.sel]); // eslint-disable-line react-hooks/exhaustive-deps
   const t0 = performance.now();
   const lines = splits.map((s, k) => {
     const keys = keysOf(s.ops).length ? keysOf(s.ops) : allKeys;
-    const v = sidOf(s.cur);
-    const loops = cache.get(overlayKey(v, axis, at, keys), () => contourOf(s.cur.L, s.cur.vol, keys, axis, at));
-    const d = sliceDiff(s.cur.vol.data, base.vol.data, ed.vol, axis, at);
+    const sl = slabOf(ed.orig, s, axis, at);
+    const loops = cache.get(overlayKey(versionOf(ed.orig, s), axis, at, keys), () => contourOf(sl.L, sl.vol, keys, axis, 0));
+    const d = sliceDiff(sl.vol.data, base.vol.data, sl.vol, axis, 0);
     return { s, k, loops, diff: d };
   });
-  const baseLoops = cache.get(overlayKey(sidOf(base), axis, at, allKeys), () => contourOf(base.L, base.vol, allKeys, axis, at));
+  const baseLoops = cache.get(overlayKey(versionOf(ed.orig, baseSplit), axis, at, allKeys), () => contourOf(base.L, base.vol, allKeys, axis, 0));
   const ms = performance.now() - t0;
   if (import.meta.env.DEV) (window as unknown as { __overlayMs?: number }).__overlayMs = ms;
   // 自動放大：差異聯集外框（＋4 格）；沒有差異就退到選取外框
@@ -55,8 +57,8 @@ export function OverlayView({ ed, axis, at }: { ed: Editor; axis: Axis; at: numb
     return m;
   }, [ed.materials]);
   useEffect(() => {
-    if (canvasRef.current) drawSlice(canvasRef.current, base.vol, axis, at, rgb, ed.hidden, null, null, null);
-  }, [base, axis, at, rgb, ed.hidden]);
+    if (canvasRef.current) drawSlice(canvasRef.current, base.vol, axis, 0, rgb, ed.hidden, null, null, null);
+  }, [base, axis, rgb, ed.hidden]);
   const fitRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 400, h: 300 });
   useEffect(() => {
@@ -119,7 +121,7 @@ export function OverlayView({ ed, axis, at }: { ed: Editor; axis: Axis; at: numb
                 setHidden(next);
               }}
             />
-            <Typography.Link onClick={() => ed.setActiveId(s.id)} style={{ fontSize: 12 }}>
+            <Typography.Link onClick={() => open(s.id)} style={{ fontSize: 12 }}>
               {s.name}
             </Typography.Link>
             <Text type="secondary" style={{ fontSize: 11, marginLeft: 'auto' }}>

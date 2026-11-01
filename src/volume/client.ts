@@ -189,3 +189,39 @@ export function deriveIn(from: EditState, to: number, step: Step, dir: 'fwd' | '
 export function previewIn(s: EditState, req: Omit<Requests['preview']['req'], 'sid' | 'comps'>) {
   return call('preview', { ...req, sid: sidOf(s), comps: s.L.comps });
 }
+
+// ---- split 生命週期（plan v12 §5.3） ----
+
+/** 產生 split：Worker 在 scratch 帳簿上從 from 重播，只回補丁與摘要（不留帳簿）。 */
+export function replayPatchIn(from: EditState, req: Omit<Requests['replayPatch']['req'], 'src' | 'from' | 'comps'>) {
+  const fromId = ensure(from);
+  return call('replayPatch', { ...req, src: ownerOf(from), from: fromId, comps: from.L.comps });
+}
+
+/** parked → live：Worker 開一本 owner 的帳簿（原始＋補丁），版本 sid。補丁陣列不 transfer（主執行緒也要貼）。 */
+export function restoreIn(owner: string, sid: number, patch: Requests['restore']['req']['patch']) {
+  heads.set(owner, sid);
+  return call('restore', { owner, sid, patch }).catch((e) => {
+    if (heads.get(owner) === sid) heads.delete(owner);
+    throw e;
+  });
+}
+
+/** 對 parked split 套一串 Op（scratch 上算，不留帳簿）。 */
+export function applyParkedIn(req: Requests['applyParked']['req']) {
+  return call('applyParked', req);
+}
+
+/** 匯出要的原檔（載入時送一次；Worker 留一份）。 */
+export function exportMetaIn(raw: ArrayBuffer | null, fractions: Requests['exportMeta']['req']['fractions']) {
+  return call('exportMeta', { raw: raw ? raw.slice(0) : null, fractions });
+}
+
+/** 匯出一個狀態：live 的帳簿（state）或 parked 的補丁；都沒有＝原始。 */
+export function exportIn(src: { state?: EditState; patch?: Requests['export']['req']['patch'] }, req: Omit<Requests['export']['req'], 'owner' | 'patch'>) {
+  if (src.state && ownerOf(src.state) !== 'base') {
+    ensure(src.state);
+    return call('export', { ...req, owner: ownerOf(src.state) });
+  }
+  return call('export', { ...req, ...(src.patch ? { patch: src.patch } : {}) });
+}

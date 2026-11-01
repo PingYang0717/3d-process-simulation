@@ -125,14 +125,18 @@ ${fr.map((v, k) => `        <DataArray type="Float32" Name="material_${k + 1}" f
     const ed = window.__ed;
     const [, b, c] = ed.splits;
     ed.setCompareBase(b.id);
+    // plan v12：並排是切面級（parked split 不還原），比這一片
+    const z = ed.cursor[2];
+    const sb = window.__slab(ed, b.id, 'z', z);
+    const sc = window.__slab(ed, c.id, 'z', z);
     let n = 0;
-    for (let i = 0; i < c.cur.vol.data.length; i++) if (c.cur.vol.data[i] !== b.cur.vol.data[i]) n++;
+    for (let i = 0; i < sc.vol.data.length; i++) if (sc.vol.data[i] !== sb.vol.data[i]) n++;
     return { n, name: c.name };
   });
   await page.locator('.compare .ant-segmented').first().getByText('並排').click();
   await page.waitForTimeout(500);
   const cardText = await page.locator('.cmp-card').filter({ hasText: pair.name }).locator('.pane-head').innerText();
-  ok(cardText.includes(`${pair.n.toLocaleString()} voxels 不同`), `§2 基準切到 split 2 時 split 3 的差異＝${pair.n}`);
+  ok(cardText.includes(`這片 ${pair.n.toLocaleString()} 格不同`), `§2 基準切到 split 2 時 split 3 這一片的差異＝${pair.n}`);
   await page.evaluate(() => window.__ed.setCompareBase('base'));
   // 關掉並排（Split 列上的切換鈕）
   await page.locator('.compare').waitFor();

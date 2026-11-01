@@ -123,7 +123,12 @@ describe('plan v12 §5.6：水平驗證與預設', () => {
     expect(ps.find((p) => p.v === -5)).toMatchObject({ level: 'error', msg: '半徑不能小於 0' });
     expect(ps.find((p) => p.v === 0)?.level).toBe('noop');
     expect(ps.some((p) => p.v === 6)).toBe(false);
-    expect(presetLevels(f, nm)[0].values).toEqual([2, 4, 6]);
+    // 沒有尺寸（舊的變數）：2、4、6 格；有尺寸（plan v14 §5.4）：半徑上限的 ¼、½、¾，固定的 2、4、6 格排第二
+    expect(presetLevels({ ...f, size: undefined }, nm)[0].values).toEqual([2, 4, 6]);
+    expect(f.size).toBeGreaterThan(0);
+    const q = [0.25, 0.5, 0.75].map((k) => Math.max(1, Math.floor(f.size! * k)));
+    expect(presetLevels(f, nm)[0].values).toEqual([...new Set(q)]);
+    expect(presetLevels(f, nm)[1].values).toEqual([2, 4, 6]);
   });
   it('移動超出陣列、推到 0 格、CD 寬度 0 被擋；±1 nm 預設', async () => {
     const { makeFactor, validateLevels, presetLevels, comboProblems } = await import('./factors');
@@ -134,7 +139,10 @@ describe('plan v12 §5.6：水平驗證與預設', () => {
     expect(validateLevels(push, [-(p2.bbox.z1 - p2.bbox.z0 + 1)], ctx)[0].msg).toBe('會把結構推到 0 格');
     const cd = { ...makeFactor(base.L, vol, [p2.key], 'cd', { axis: 2, anchor: 'center' }, matName, []), id: 'Lg' };
     expect(validateLevels(cd, [0], ctx)[0].msg).toBe('寬度會變成 0（最少 1 格）');
-    const pre = presetLevels(cd, nm);
+    const pre = presetLevels({ ...cd, size: undefined }, nm);
+    // 有尺寸：第一組 ±1 步、步距＝max(1, 寬 × 5%) 格（寬 24 格 → 1 格 = 0.5 nm）
+    expect(cd.size).toBe(24);
+    expect(presetLevels(cd, nm)[0].values).toEqual([11.5, 12, 12.5]);
     expect(pre[1].label).toBe('±1 nm（±2 格）');
     expect(pre[1].values).toEqual([11, 12, 13]);
     const design = { factors: [cd, tr], levels: {}, combine: 'full' as const, from: 'base' as const, nameTemplate: '' };

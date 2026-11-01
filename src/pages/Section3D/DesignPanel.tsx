@@ -2,7 +2,7 @@
 // ① 結構（下拉＋可換視角的預覽，預覽上標出每個變數會改的地方）→ ② 變數（一張卡一句話，操作可直接換、值可直接改）
 // → ③ 組合（三種方式各一句說明、組合表寫清楚每列狀態）→ ④ 產生（黏在底下）。
 // 產生時留在實驗頁、進度 k／N、可取消，完成後可「撤銷這次產生」。範本存在瀏覽器、可匯出／匯入 JSON。
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { App, Button, Dropdown, Input, Progress, Segmented, Typography } from 'antd';
 import { CheckOutlined, DownOutlined, FolderOpenOutlined } from '@ant-design/icons';
 import type { Vec3 } from '../../volume/volume';
@@ -19,17 +19,7 @@ import { whoText } from './opWords';
 
 const { Text } = Typography;
 
-/** 草稿：變數＋每個變數的水平（unit；mode 決定絕對或相對）＋組合設定（重新整理後還在）。 */
-interface Draft {
-  factors: Factor[];
-  levels: Record<string, number[]>;
-  combine: Design['combine'];
-  from: Design['from'];
-  nameTemplate: string;
-  picks: string[];
-}
-const EMPTY: Draft = { factors: [], levels: {}, combine: 'full', from: 'base', nameTemplate: DEFAULT_NAME_TEMPLATE, picks: [] };
-const isDraft = (v: unknown): v is Draft => !!v && typeof v === 'object' && Array.isArray((v as Draft).factors) && typeof (v as Draft).levels === 'object';
+import { type Draft, loadDraft, nextDraft, saveDraft } from './draft';
 const isTemplates = (v: unknown): v is DesignTemplate[] => Array.isArray(v);
 
 type StepState = 'done' | 'now' | 'todo';
@@ -66,7 +56,18 @@ const Row = ({ label, children }: { label: string; children: React.ReactNode }) 
 
 export function DesignPanel({ ed, onMade, onOpen3D, onOpenStructure, title = true }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void; onOpenStructure: () => void; title?: boolean }) {
   const { message, modal } = App.useApp();
-  const [draft, setDraft] = usePersisted<Draft>('designDraft2', EMPTY, isDraft);
+  // 草稿不持久化（plan v14 §5.4）：重新整理＝空的；切頁回來還在（draft.ts 的模組記憶體）
+  const [draft, setDraft] = useState<Draft>(loadDraft);
+  useEffect(() => saveDraft(draft), [draft]);
+  // 換成和變數無關的結構：變數清空（掛載時也檢查：在編輯頁換了選取再回來）
+  const selKey = [...ed.sel].sort().join(',');
+  useEffect(() => {
+    const n = nextDraft(draft, ed.sel);
+    if (n === draft) return;
+    setDraft(n);
+    message.info('換了結構，變數已清空');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selKey]);
   const [templates, setTemplates] = usePersisted<DesignTemplate[]>('factorTemplates', [], isTemplates);
   const [face, setFace] = useState<Vec3 | null>(null);
   const [hot, setHot] = useState<string | null>(null);

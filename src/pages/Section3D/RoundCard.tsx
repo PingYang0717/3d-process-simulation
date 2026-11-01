@@ -42,10 +42,18 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
     for (const x of initial?.corners ?? [{ id: 'ul' }, { id: 'ur' }]) c[x.id] = x.concave ? 'concave' : 'convex';
     return c;
   });
-  const [r, setR] = useState(initial?.r ?? 6);
+  // 半徑預設依結構（plan v14 §5.4）：剖面上半徑上限 min(半寬, 半高) 的 ¼，至少 1 格
+  const [r0] = useState(() => {
+    const b = ed.selBox;
+    if (!b) return 6;
+    const [ua, va] = planeAxes(roundFrame(ed, plane).axis);
+    const ext = [b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1];
+    return Math.max(1, Math.floor(Math.min(ext[ua], ext[va]) / 2 / 4));
+  });
+  const [r, setR] = useState(initial?.r ?? r0);
   const [asym, setAsym] = useState(initial?.ru !== undefined || initial?.rv !== undefined);
-  const [ru, setRu] = useState(initial?.ru ?? initial?.r ?? 6);
-  const [rv, setRv] = useState(initial?.rv ?? initial?.r ?? 6);
+  const [ru, setRu] = useState(initial?.ru ?? initial?.r ?? r0);
+  const [rv, setRv] = useState(initial?.rv ?? initial?.r ?? r0);
   const [n, setN] = useState(initial?.n ?? 2);
   const [mode, setMode] = useState<RoundGesture['mode']>(initial?.mode ?? 'match');
   // 圓頭預設不帶襯層（plan v14 §5.3）：襯層不在削的方向上，跟著搬只會在襯層環裡留洞；不讀全域的 ed.follow

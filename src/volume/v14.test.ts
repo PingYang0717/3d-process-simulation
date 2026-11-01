@@ -10,6 +10,8 @@ import type { Scope } from './scope';
 import { type RoundGesture, roundBuild, roundOp } from '../slice/round';
 import { describeOp } from '../pages/Section3D/opWords';
 import { roundFrame } from '../pages/Section3D/RoundCard';
+import { EMPTY_DRAFT, nextDraft } from '../pages/Section3D/draft';
+import { makeFactor, presetLevels } from './factors';
 
 const matName = matNameOf(MATERIALS);
 
@@ -161,5 +163,41 @@ describe('圓頭回填「上面那層」（plan v14 §5.3）', () => {
     const poly = s.L.comps.find((c) => c.mat === 6)!;
     const op = roundOp(s.L, s.vol, [poly.key], { axis: 'y', lo: 4, hi: 19 }, 10, gr, false, 'orig');
     if (op) expect(op.backfill).toBe('orig');
+  });
+});
+
+describe('設計區草稿與預設水平（plan v14 §5.4）', () => {
+  const s = gate();
+  const poly = s.L.comps.find((c) => c.mat === 6)!;
+  const si = s.L.comps.find((c) => c.mat === 1)!;
+  const f = { ...makeFactor(s.L, s.vol, [poly.key], 'round', { axis: 'x' }, matName, [], 'vx'), id: 'r' };
+
+  it('換成和變數無關的結構：變數清空，其他設定留著；有交集、沒選東西、空草稿：不動', () => {
+    const d = { ...EMPTY_DRAFT, factors: [f], levels: { r: [1, 2] }, combine: 'ofat' as const, picks: ['x'] };
+    const cleared = nextDraft(d, [si.key]);
+    expect(cleared.factors).toEqual([]);
+    expect(cleared.levels).toEqual({});
+    expect(cleared.picks).toEqual([]);
+    expect(cleared.combine).toBe('ofat');
+    expect(nextDraft(d, [poly.key, si.key])).toBe(d);
+    expect(nextDraft(d, [])).toBe(d);
+    expect(nextDraft(EMPTY_DRAFT, [si.key])).toBe(EMPTY_DRAFT);
+  });
+
+  it('圓頭預設：半徑上限的 ¼、½、¾（YZ 剖面 6×3 格 → 上限 1 格 → 1）；沒有尺寸＝舊的 2、4、6', () => {
+    // 閘極 YZ 剖面：y 3..8（6 格）、z 1..3（3 格）→ min(6, 3) / 2 = 1
+    expect(f.size).toBe(1);
+    expect(presetLevels(f, 0.5)[0].values).toEqual([1]);
+    expect(presetLevels({ ...f, size: undefined }, 0.5)[0].values).toEqual([2, 4, 6]);
+    const big = { ...f, size: 12 };
+    expect(presetLevels(big, 0.5)[0].values).toEqual([3, 6, 9]);
+  });
+
+  it('nm 類：±1 步、步距＝max(1 格, 尺寸 × 5%)', () => {
+    const cd = { ...makeFactor(s.L, s.vol, [poly.key], 'cd', { axis: 0, anchor: 'center' }, matName, []), id: 'w' };
+    expect(cd.size).toBe(10);
+    // 寬 10 格＝5 nm；5% 不到一格 → 1 格 = 0.5 nm
+    expect(presetLevels(cd, 0.5)[0].values).toEqual([4.5, 5, 5.5]);
+    expect(presetLevels({ ...cd, size: 60 }, 0.5)[0].values).toEqual([3.5, 5, 6.5]);
   });
 });

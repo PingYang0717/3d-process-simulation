@@ -27,6 +27,11 @@ export interface Factor {
   nominal: number;
   /** 水平輸入：有標稱可量的絕對、本質是位移的相對（§9 D4）。 */
   mode: 'absolute' | 'relative';
+  /**
+   * 結構沿這個變數的尺寸（格；plan v14 §5.4，預設水平依它）：圓頭＝半徑上限 min(半寬, 半高)、cd／移動＝沿軸寬、
+   * 長縮／方頭＝沿那一面法線的長、斜度＝沿那一面的寬、保形層＝最短的一邊；缺陷沒有。舊的變數沒有這一欄。
+   */
+  size?: number;
 }
 
 export interface Design {
@@ -391,8 +396,47 @@ export function makeFactor(L: Labeled, vol: Volume, keys: string[], op: FactorOp
   const id = defaultId(L, keys, op, template, matName, taken);
   const f: Factor = { id, name: id, keys, op, param: p, template, unit, nominal: 0, mode: d.mode };
   f.nominal = measureNominal(L, vol, f);
+  const size = factorSize(L, f);
+  if (size !== undefined) f.size = size;
   if (op === 'level' && template.ref) f.mode = 'absolute';
   return f;
+}
+
+const AXIS_OF: Record<string, 0 | 1 | 2> = { x: 0, y: 1, z: 2 };
+const dirAxis = (d: unknown): 0 | 1 | 2 | null => (Array.isArray(d) ? (d[0] ? 0 : d[1] ? 1 : d[2] ? 2 : null) : null);
+/** 見 Factor.size。 */
+export function factorSize(L: Labeled, f: Pick<Factor, 'keys' | 'op' | 'template'>): number | undefined {
+  const b = unionBBox(L.comps.filter((c) => f.keys.includes(c.key)));
+  if (!b) return undefined;
+  const ext = [b.x1 - b.x0 + 1, b.y1 - b.y0 + 1, b.z1 - b.z0 + 1];
+  const t = f.template;
+  const num = (a: unknown) => (typeof a === 'number' ? (a as 0 | 1 | 2) : typeof a === 'string' && a in AXIS_OF ? AXIS_OF[a] : null);
+  switch (f.op) {
+    case 'round': {
+      // 剖面法線＝axis（或 scope.axis）；半徑上限＝剖面上 min(半寬, 半高)
+      const n = num(t.axis) ?? num((t.scope as Scope | undefined)?.axis) ?? 2;
+      const plane = [0, 1, 2].filter((k) => k !== n);
+      return Math.max(1, Math.floor(Math.min(ext[plane[0]], ext[plane[1]]) / 2));
+    }
+    case 'cd':
+    case 'translate': {
+      const a = num(t.axis);
+      return a === null ? undefined : ext[a];
+    }
+    case 'push':
+    case 'level': {
+      const a = dirAxis(t.dir);
+      return a === null ? undefined : ext[a];
+    }
+    case 'taper': {
+      const a = dirAxis(t.face);
+      return a === null ? undefined : ext[a];
+    }
+    case 'dilate':
+      return Math.min(...ext);
+    default:
+      return undefined;
+  }
 }
 
 // ---- 範本（§4.3）----
@@ -460,7 +504,12 @@ export function fromTemplate(tpl: DesignTemplate, L: Labeled, vol: Volume, matNa
     }
     if (!ok) missing.push(f.id);
     const out: Factor = { ...f, template, keys: keys ?? [], nominal: 0 };
-    if (ok) out.nominal = measureNominal(L, vol, out);
+    delete out.size;
+    if (ok) {
+      out.nominal = measureNominal(L, vol, out);
+      const size = factorSize(L, out);
+      if (size !== undefined) out.size = size;
+    }
     return out;
   });
   return {
@@ -615,19 +664,31 @@ export function comboProblems(design: Design, combo: Record<string, number>, ctx
 /** 標稱量不到的操作（水平只能相對、從 0 起）：移動、斜度、缺陷大小。 */
 export const lockedNominal = (f: Pick<Factor, 'op' | 'param'>) => f.op === 'translate' || f.op === 'taper' || (f.op === 'defect' && !f.param.startsWith('center'));
 
-/** 預設水平按鈕（plan v12 §5.4 第 2 點）：用使用者的單位寫、括號附格數；值是這個 factor 的 unit＋mode。 */
-export function presetLevels(f: Factor, nm: number): { label: string; values: number[] }[] {
+/**
+ * 預設水平按鈕（plan v12 §5.4 第 2 點）：用使用者的單位寫、括號附格數；值是這個 factor 的 unit＋mode。
+ * size（格，預設 f.size；plan v14 §5.4）：有的話第一組依結構尺寸——圓頭 ¼、½、¾ 的半徑上限；
+ * 其他 ±1 步、步距＝max(1 格, 尺寸 × 5%)。固定的 2、4、6 格與 ±0.5／1／2 nm 留在後面。
+ */
+export function presetLevels(f: Factor, nm: number, size: number | undefined = f.size): { label: string; values: number[] }[] {
   if (isFraction(f)) return [{ label: '0.25、0.5、0.75', values: [0.25, 0.5, 0.75] }];
   const r1 = (v: number) => Math.round(v * 1e6) / 1e6;
   const nomU = f.mode === 'absolute' ? fromVx(f, f.nominal, nm) : 0;
   const vxOf = (u: number) => Math.round(toVx(f, u, nm));
   const around = (a: number) => [r1(nomU - a), r1(nomU), r1(nomU + a)];
+  const sized = size !== undefined && size > 0 && f.op !== 'defect';
   // 從 0 起的（半徑標稱 0、缺陷大小）：2, 4, 6 格
   if ((f.op === 'round' && Math.round(f.nominal) === 0) || (f.op === 'defect' && !f.param.startsWith('center'))) {
-    const vs = [2, 4, 6].map((k) => r1(fromVx(f, k, nm)));
-    return [{ label: '2、4、6 格', values: vs }, { label: '1、2、3 格', values: [1, 2, 3].map((k) => r1(fromVx(f, k, nm))) }];
+    const fixed = [{ label: '2、4、6 格', values: [2, 4, 6].map((k) => r1(fromVx(f, k, nm))) }, { label: '1、2、3 格', values: [1, 2, 3].map((k) => r1(fromVx(f, k, nm))) }];
+    if (f.op !== 'round' || !sized) return fixed;
+    const ks = [...new Set([0.25, 0.5, 0.75].map((q) => Math.max(1, Math.floor(size * q))))];
+    return [{ label: `${ks.join('、')} 格（依結構：半徑上限 ${size} 格）`, values: ks.map((k) => r1(fromVx(f, k, nm))) }, ...fixed];
   }
   const out: { label: string; values: number[] }[] = [];
+  if (sized && f.op !== 'round') {
+    const k = Math.max(1, Math.round(size * 0.05));
+    const a = r1(fromVx(f, k, nm));
+    out.push({ label: f.unit === 'nm' ? `±${a} nm（±${k} 格，依結構尺寸 ${size} 格的 5%）` : `±${k} 格（依結構尺寸 ${size} 格的 5%）`, values: around(a) });
+  }
   if (f.unit === 'nm') {
     for (const a of [0.5, 1, 2]) {
       const g = vxOf(a) - vxOf(0);

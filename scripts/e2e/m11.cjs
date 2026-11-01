@@ -68,7 +68,7 @@ ${fr.map((v, k) => `        <DataArray type="Float32" Name="material_${k + 1}" f
   await idle();
   const mats = await page.evaluate(() => window.__ed.materials.map((m) => m.name));
   ok(mats.includes('Si') && mats.includes('SiO2') && mats.includes('TiN'), `§0 左欄是 FieldData 的名字（${mats.join('、')}）`);
-  ok(await page.evaluate(() => window.__ed.meta.fractions?.length === 3 && !!window.__ed.meta.raw), '§0 留著原檔與比例陣列（匯出照原格式）');
+  ok(await page.evaluate(() => window.__ed.meta.fractions?.length === 3 && !!window.__ed.meta.hasRaw), '§0 留著原檔與比例陣列（匯出照原格式）');
 
   // ---- §1 實驗頁籤 ----
   await page.evaluate(() => window.__ed.demo(1));

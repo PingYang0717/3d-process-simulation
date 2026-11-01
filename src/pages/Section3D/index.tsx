@@ -74,11 +74,10 @@ import { SliceEditor, SliceView, View3D } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { Inspector, matOf } from './Inspector';
 import { ChangesTab } from './ChangesTab';
-import { MatrixTab } from './MatrixTab';
-import { ExperimentTab } from './ExperimentTab';
 import { buildManifest } from './matrix';
-import { SplitBar } from './SplitBar';
-import { AXIS_NAME, CompareView } from './CompareView';
+import { SplitPicker } from './SplitPicker';
+import { AXIS_NAME } from './CompareView';
+import { ExperimentPage } from './ExperimentPage';
 import { StructureList } from './StructureList';
 import { SettingsDrawer } from './SettingsDrawer';
 import { UploadPanel } from './UploadPanel';
@@ -182,6 +181,8 @@ export default function Section3DPage() {
   const [rightW, setRightW] = usePersisted('rightW', 350);
   const narrow = useMedia('(max-width: 1199px)');
   const tiny = useMedia('(max-width: 799px)');
+  /** 實驗頁：寬度 < 1100 px 時設計區變抽屜（plan v12 §5.4）。 */
+  const labNarrow = useMedia('(max-width: 1099px)');
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -217,8 +218,31 @@ export default function Section3DPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [compare, setCompare] = useState(false);
-  const [cmpAxis, setCmpAxis] = useState<Axis>('z');
+  /** 「在 3D 看」回到編輯頁後要對準差異（View3D 掛載、網格換上之後）。 */
+  const pendingFocus = useRef(false);
+  /** 實驗頁的「在 3D 看」（plan v12 §5.4、§10 D10）：設為目前（parked 先載入）→ 切到編輯頁 → 對準差異。 */
+  const open3D = async (id: string) => {
+    await ed.setActiveId(id);
+    pendingFocus.current = true;
+    ed.setPage('edit');
+  };
+  useEffect(() => {
+    if (ed.page !== 'edit' || !pendingFocus.current) return;
+    let tries = 0;
+    let t: ReturnType<typeof setTimeout>;
+    // View3D 是 lazy 載入、剛掛載：等它的 handle 出現再對準
+    const go = () => {
+      const v = view.current;
+      const b = look.current.ed.diffBox;
+      if (v && b) {
+        pendingFocus.current = false;
+        v.focusBox(b);
+      } else if (v && !b) pendingFocus.current = false;
+      else if (++tries < 40) t = setTimeout(go, 100);
+    };
+    t = setTimeout(go, 150);
+    return () => clearTimeout(t);
+  }, [ed.page, ed.activeId, ed.diffBox]);
   const tagRef = useRef<HTMLDivElement>(null);
   const view = useRef<View3DHandle | null>(null);
   /** 即時預覽：這一步在主執行緒裁切重算的結果；3D 與切面先畫它，Worker 的正式結果到了再換掉。 */
@@ -359,6 +383,11 @@ export default function Section3DPage() {
     const down = (e: KeyboardEvent) => {
       if (typingIn(e.target)) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // 實驗頁沒有 3D：單鍵只留 ?
+      if (ed.page === 'lab') {
+        if (e.key === '?' && !overlayOpen()) setHelpOpen(true);
+        return;
+      }
       // 說明、設定、Modal 開著時單鍵留給它們，不動 3D
       if (overlayOpen()) return;
       const k = e.key.toLowerCase();
@@ -380,6 +409,12 @@ export default function Section3DPage() {
         } else if (!ed.sel.size) message.info({ key: 'edit', content: '先選一個結構，再按 E 進入聚焦編輯' });
         else if (ed.focus) enterEdit();
         else enterFocus();
+        return;
+      }
+      if (k === 'g') {
+        // 對準差異（plan v12 §5.4）
+        if (ed.diffBox) view.current?.focusBox(ed.diffBox);
+        else message.info({ key: 'aim', content: '這個 split 還沒有改動' });
         return;
       }
       if (k === 'b') setMode((m) => (m === 'orig' ? 'now' : 'orig'));
@@ -521,7 +556,8 @@ export default function Section3DPage() {
 
   // 剛套用一步：訊息＋「復原」，3D 選取框閃一下
   useEffect(() => {
-    if (!ed.last) return;
+    // 實驗頁的訊息（已產生、撤銷這次產生）由設計區自己顯示
+    if (!ed.last || ed.page === 'lab') return;
     view.current?.flash();
     // 改後不標色（plan v12 §5.1 D1）：只在改到的外框畫橘色虛線，1.5 秒淡出
     if (ed.last.box && ed.stepFlash && mode === 'now') view.current?.stepBox(ed.last.box);
@@ -594,17 +630,18 @@ export default function Section3DPage() {
       .catch((e: { code?: string }) => e?.code !== 'declined' && message.error('匯出失敗'));
   };
   /** 全部匯出前先列出會打包哪些 split（名稱、步數、檔名），確認了才寫檔。 */
-  const confirmExportAll = (fmt: Fmt = 'vti') => {
+  const confirmExportAll = (fmt: Fmt = 'vti', only?: string[]) => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
+    const chosen = ed.splits.filter((s) => (only ? only.includes(s.id) : !ed.exportOff.has(s.id)));
     modal.confirm({
-      title: `打包 ${ed.splits.filter((s) => !ed.exportOff.has(s.id)).length} 個 split 成 zip（.${ext(fmt)}${fmt === 'vti1' ? '，單一編號' : ''}）`,
+      title: `打包 ${chosen.length} 個 split 成 zip（.${ext(fmt)}${fmt === 'vti1' ? '，單一編號' : ''}）`,
       icon: <DownloadOutlined style={{ color: 'var(--c-primary)' }} />,
       width: 520,
       okText: '匯出 zip',
       cancelText: '取消',
       content: (
         <Flex vertical gap={6} style={{ marginTop: 8 }}>
-          {ed.splits.filter((s) => !ed.exportOff.has(s.id)).map((s) => (
+          {chosen.map((s) => (
             <Flex key={s.id} justify="space-between" gap={12} style={{ fontSize: 13 }}>
               <span>
                 {s.name}
@@ -622,7 +659,7 @@ export default function Section3DPage() {
           </Text>
         </Flex>
       ),
-      onOk: () => exportAll(fmt),
+      onOk: () => exportAll(fmt, only),
     });
   };
   const exportAll = async (fmt: Fmt = 'vti', only?: string[]) => {
@@ -1147,6 +1184,11 @@ export default function Section3DPage() {
               </Button>
             </Tooltip>
           ))}
+          <Tooltip title="把這個 split 改到的地方放到畫面中央（G）">
+            <Button size="small" type="text" icon={<AimOutlined />} disabled={!ed.diffBox} onClick={() => ed.diffBox && view.current?.focusBox(ed.diffBox)}>
+              對準差異
+            </Button>
+          </Tooltip>
         </div>
         {clipOn && (
           <div className="sectionbar">
@@ -1297,36 +1339,6 @@ export default function Section3DPage() {
               </div>
             ),
           },
-          {
-            key: 'experiment',
-            label: '實驗',
-            children: (
-              <div className="insp-body">
-                <ExperimentTab ed={ed} onMade={() => setTab('splits')} />
-              </div>
-            ),
-          },
-          {
-            key: 'splits',
-            label: (
-              <Flex align="center" gap={6}>
-                矩陣
-                {ed.splits.length > 1 && <Badge count={ed.splits.length} size="small" color="var(--c-text-3)" />}
-              </Flex>
-            ),
-            children: (
-              <div className="insp-body">
-                <MatrixTab
-                  ed={ed}
-                  fileOf={(sp) => `${stem}__${safeName(sp.name)}.vti`}
-                  onCompare={(id) => {
-                    if (id) ed.setActiveId(id);
-                    setCompare(true);
-                  }}
-                />
-              </div>
-            ),
-          },
         ]}
       />
       <div className="insp-foot">
@@ -1365,7 +1377,7 @@ export default function Section3DPage() {
     <CardHostCtx.Provider value={cardHost}>
     <div className="app">
       <header className="topbar">
-        {narrow && (
+        {narrow && ed.page === 'edit' && (
           <Tooltip title="結構清單">
             <Button type="text" icon={<MenuOutlined />} onClick={() => setLeftOpen(true)} aria-label="結構清單" />
           </Tooltip>
@@ -1376,6 +1388,26 @@ export default function Section3DPage() {
           {ed.meta.name ?? '內建範例'} · {ed.vol.X}×{ed.vol.Y}×{ed.vol.Z}（{voxelCount(ed.vol.data.length)} voxels）
           {ed.meta.spacing ? ` · spacing ${ed.meta.spacing.join('×')} ${ed.meta.unit === 'um' ? 'µm' : 'nm'}` : ''}
         </Text>
+        <div className="grow" />
+        <Segmented
+          className="page-switch"
+          value={ed.page}
+          onChange={(v) => ed.setPage(v as 'edit' | 'lab')}
+          options={[
+            { label: <Tooltip title="編輯頁：3D、切面、改結構（Ctrl+1）">編輯</Tooltip>, value: 'edit' },
+            {
+              label: (
+                <Tooltip title="實驗頁：定義變數、一次產生多個 split、縮圖與比較（Ctrl+2）">
+                  <span>
+                    實驗{ed.splits.length > 0 && <span className="page-count">{ed.splits.length}</span>}
+                  </span>
+                </Tooltip>
+              ),
+              value: 'lab',
+            },
+          ]}
+          aria-label="頁面"
+        />
         <div className="grow" />
         <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)} aria-label="上傳 .vti">
           <span className="btn-text">上傳 .vti</span>
@@ -1403,7 +1435,7 @@ export default function Section3DPage() {
             <span className="btn-text">匯出</span>
           </Button>
         </Dropdown>
-        {tiny && (
+        {tiny && ed.page === 'edit' && (
           <Badge count={ed.sel.size} size="small" color="var(--c-primary)">
             <Button icon={<SlidersOutlined />} onClick={() => setRightOpen(true)}>
               調整
@@ -1418,6 +1450,10 @@ export default function Section3DPage() {
         </Tooltip>
       </header>
       <div className="body">
+        {ed.page === 'lab' ? (
+          <ExperimentPage ed={ed} onOpen3D={(id) => void open3D(id)} onExport={(ids) => confirmExportAll('vti', ids)} narrow={labNarrow} stem={stem} />
+        ) : (
+        <>
         {narrow ? (
           <Drawer placement="left" open={leftOpen} onClose={() => setLeftOpen(false)} width={280} styles={{ body: { padding: 0 } }} title={null} closeIcon={null}>
             <StructureList ed={ed} width={280} />
@@ -1429,22 +1465,18 @@ export default function Section3DPage() {
           </>
         )}
         <main className="stage" id="stage">
-          <SplitBar ed={ed} compare={compare} setCompare={setCompare} onSweep={() => setTab('experiment')} />
-          {!compare && ed.sel.size > 0 && <EditToolbar ed={ed} onTab={onTab} />}
+          <SplitPicker ed={ed} />
+          {ed.sel.size > 0 && <EditToolbar ed={ed} onTab={onTab} />}
           {ed.busy && (
             <div className="busy-bar" role="status">
               <span className="busy-dot" />
               {ed.busy}
             </div>
           )}
-          {compare ? (
-            <CompareView ed={ed} axis={cmpAxis} setAxis={setCmpAxis} />
-          ) : (
-            <div className={'canvas-area' + (focus ? ` editing focus-${focus}` : '')}>
-              {pane3d}
-              <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>
-            </div>
-          )}
+          <div className={'canvas-area' + (focus ? ` editing focus-${focus}` : '')}>
+            {pane3d}
+            <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>
+          </div>
         </main>
         {tiny ? (
           <Drawer
@@ -1467,6 +1499,8 @@ export default function Section3DPage() {
               {inspector}
             </aside>
           </>
+        )}
+        </>
         )}
       </div>
       <Modal title="上傳 .vti / .npy" open={uploadOpen} onCancel={() => setUploadOpen(false)} footer={null} width={640} destroyOnHidden>

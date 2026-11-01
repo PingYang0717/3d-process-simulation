@@ -8,13 +8,31 @@ import { signed } from '../../ui/format';
 import { download } from '../../ui/download';
 import { type Editor, changedOf } from './editor';
 import { factorsOf, levelCell, matrixCsv } from './matrix';
-import { CATEGORY } from './ExperimentTab';
+import { CATEGORY } from './colors';
+import { StateDot } from './SplitPicker';
 
 const { Text } = Typography;
 
 export const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
 
-export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (id?: string) => void; fileOf?: (s: { name: string }) => string }) {
+/**
+ * ids＝只列這些（實驗頁的篩選與排序後的順序）；onRow＝點一列（實驗頁：高亮，不切 split，plan v12 §10 D11）；highlight＝高亮哪一列。
+ */
+export function MatrixTab({
+  ed,
+  onCompare,
+  fileOf,
+  ids,
+  onRow,
+  highlight,
+}: {
+  ed: Editor;
+  onCompare?: (id?: string) => void;
+  fileOf?: (s: { name: string }) => string;
+  ids?: string[];
+  onRow?: (id: string) => void;
+  highlight?: string | null;
+}) {
   const focus = ed.selComps[0];
   const was = focus ? ed.origByKey.get(focus.key) : undefined;
   const base = was ? bboxDims(was.bbox) : null;
@@ -22,7 +40,8 @@ export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
   const [tagFor, setTagFor] = useState<string | null>(null);
-  const rows = ed.splits.map((s) => {
+  const list = ids ? ids.map((id) => ed.splits.find((s) => s.id === id)).filter((s): s is NonNullable<typeof s> => !!s) : ed.splits;
+  const rows = list.map((s) => {
     const c = focus ? s.cur.L.comps.find((x) => x.key === focus.key) : undefined;
     const d = c ? bboxDims(c.bbox) : null;
     return { key: s.id, name: s.name, h: d?.h, w: d?.w, dd: d?.d, diff: changedOf(s), blocked: s.blocked, tags: s.tags ?? [], levels: s.levels ?? {}, parked: s.state === 'parked' };
@@ -74,6 +93,12 @@ export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (
           aria-label={`匯出 ${r.name}`}
         />
       ),
+    },
+    {
+      title: '',
+      key: 'state',
+      width: 24,
+      render: (_: unknown, r: Row) => <StateDot s={ed.splits.find((x) => x.id === r.key)!} />,
     },
     {
       title: 'Split',
@@ -218,15 +243,15 @@ export function MatrixTab({ ed, onCompare, fileOf }: { ed: Editor; onCompare?: (
       <Table
         size="small"
         className="dim-table"
-        pagination={ed.splits.length > 50 ? { pageSize: 50, size: 'small' } : false}
+        pagination={rows.length > 50 ? { pageSize: 50, size: 'small' } : false}
         scroll={{ x: 'max-content' }}
         dataSource={rows}
-        rowClassName={(r) => (r.key === ed.activeId ? 'row-on' : '')}
-        onRow={(r) => ({ onClick: () => ed.setActiveId(r.key) })}
+        rowClassName={(r) => (r.key === (highlight ?? ed.activeId) ? 'row-on' : '')}
+        onRow={(r) => ({ onClick: () => (onRow ? onRow(r.key) : void ed.setActiveId(r.key)) })}
         columns={columns}
       />
       <Text type="secondary" style={{ fontSize: 12 }}>
-        點一列切到那個 split，雙擊名字改名；✓ 取消的 split 匯出時不打包。1 voxel = {ed.nmPerVoxel} nm。
+        {onRow ? '點一列高亮、雙擊名字改名' : '點一列切到那個 split，雙擊名字改名'}；✓ 取消的 split 匯出時不打包；實心點＝在記憶體、空心＝只留改到的那一小塊。1 voxel = {ed.nmPerVoxel} nm。
       </Text>
     </Flex>
   );

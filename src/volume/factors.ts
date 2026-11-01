@@ -470,3 +470,193 @@ export function fromTemplate(tpl: DesignTemplate, L: Labeled, vol: Volume, matNa
 
 /** 用來檢查：兩個方向相同。 */
 export { sameDir };
+
+// ---- plan v12 §5.6：水平的驗證與預設 ----
+
+/** 一個水平的問題：error＝不能產生（紅）；noop＝不改動（灰，對照組）。 */
+export interface Problem {
+  v: number;
+  level: 'error' | 'noop';
+  msg: string;
+}
+
+/** 驗證要的情境：結構、陣列大小、nm 比例。 */
+export interface CheckCtx {
+  L: Labeled;
+  dims: { X: number; Y: number; Z: number };
+  nm: number;
+}
+
+/**
+ * 每個水平先擋（plan v12 §5.6）：負半徑／負厚度、寬度變 0、超出陣列、推到 0 格、側壁削穿、缺陷大小 0、位置不在 0～1；
+ * 等於標稱（或改動 0）標「不改動」。純函式。
+ */
+export function validateLevels(f: Factor, levels: number[], ctx: CheckCtx): Problem[] {
+  const out: Problem[] = [];
+  const ks = new Set(f.keys);
+  const b = unionBBox(ctx.L.comps.filter((c) => ks.has(c.key)));
+  const dim = [ctx.dims.X, ctx.dims.Y, ctx.dims.Z];
+  const t = f.template;
+  for (const v of levels) {
+    const err = (msg: string) => out.push({ v, level: 'error', msg });
+    const noop = (msg: string) => out.push({ v, level: 'noop', msg });
+    if (!Number.isFinite(v)) {
+      err('不是數字');
+      continue;
+    }
+    if (!b) {
+      err('對不到結構，請重選');
+      continue;
+    }
+    const lo = loOf(b);
+    const hi = hiOf(b);
+    if (isFraction(f)) {
+      const c = f.mode === 'absolute' ? v : f.nominal + v;
+      if (c < 0 || c > 1) err('位置要在 0～1');
+      else if (deltaOf(f, v, ctx.nm) === 0) noop('等於標稱（不改動）');
+      continue;
+    }
+    const d = deltaOf(f, v, ctx.nm);
+    const nom = Math.round(f.nominal);
+    switch (f.op) {
+      case 'cd': {
+        const a = ((t.axis as number) ?? 0) as 0 | 1 | 2;
+        if (nom + d < 1) err('寬度會變成 0（最少 1 格）');
+        else if (!d) noop('等於標稱（不改動）');
+        else {
+          const anchor = (t.anchor as string) ?? 'center';
+          const grow = Math.max(0, d);
+          const [gl, gh] = anchor === 'center' ? [Math.floor(grow / 2), Math.ceil(grow / 2)] : anchor === 'lo' ? [0, grow] : [grow, 0];
+          if (lo[a] - gl < 0 || hi[a] + gh > dim[a] - 1) err('超出陣列');
+        }
+        break;
+      }
+      case 'push': {
+        const dir = t.dir as Vec3;
+        const a = axisOf(dir);
+        const n = f.mode === 'absolute' ? d * dir[a] : d;
+        if (!n) noop('等於標稱（不改動）');
+        else if (n < 0 && -n >= hi[a] - lo[a] + 1) err('會把結構推到 0 格');
+        else if (n > 0 && (dir[a] > 0 ? hi[a] + n > dim[a] - 1 : lo[a] - n < 0)) err('超出陣列');
+        break;
+      }
+      case 'translate': {
+        const a = ((t.axis as number) ?? 0) as 0 | 1 | 2;
+        if (!d) noop('不移動（對照組）');
+        else if (lo[a] + d < 0 || hi[a] + d > dim[a] - 1) err('超出陣列');
+        break;
+      }
+      case 'level': {
+        const dir = t.dir as Vec3;
+        const a = axisOf(dir);
+        if (!d) {
+          noop('等於標稱（不改動）');
+          break;
+        }
+        let to = nom + d;
+        if (t.ref) {
+          const r = levelRefTo(ctx.L, dir, { ...(t.ref as Omit<LevelRef, 'offset'>), offset: nom + d });
+          if (r === null) {
+            err('參照結構不見了');
+            break;
+          }
+          to = r;
+        }
+        if (to < 0 || to > dim[a] - 1) err('目標在陣列外');
+        break;
+      }
+      case 'round': {
+        const r = nom + d;
+        if (r < 0) err('半徑不能小於 0');
+        else if (!d || r === 0) noop(r === 0 ? '半徑 0＝方角（不改動）' : '等於標稱（不改動）');
+        break;
+      }
+      case 'dilate': {
+        const th = f.mode === 'absolute' ? nom + d : nom + d;
+        if (th < 0) err('厚度不能小於 0');
+        else if (!d) noop('等於標稱（不改動）');
+        break;
+      }
+      case 'taper': {
+        const face = (t.face as Vec3) ?? [1, 0, 0];
+        const a = axisOf(face);
+        const w = hi[a] - lo[a] + 1;
+        if (!d) noop('不傾斜（對照組）');
+        else if (Math.abs(d) >= (t.both ? Math.floor(w / 2) : w)) err('會把側壁削穿');
+        break;
+      }
+      case 'defect': {
+        if (d <= 0) {
+          if (!d) noop('大小 0（不改動）');
+          else err('大小要大於 0');
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** 一個組合的問題（每個變數的水平各自驗證）；全部是標稱＝對照組。 */
+export function comboProblems(design: Design, combo: Record<string, number>, ctx: CheckCtx): { errors: string[]; control: boolean } {
+  const errors: string[] = [];
+  let changes = 0;
+  for (const f of design.factors) {
+    const v = combo[f.id];
+    if (v === undefined) continue;
+    const ps = validateLevels(f, [v], ctx);
+    for (const p of ps) if (p.level === 'error') errors.push(`${f.name || f.id}：${p.msg}`);
+    if (!ps.some((p) => p.level === 'noop')) changes++;
+  }
+  return { errors, control: !errors.length && changes === 0 };
+}
+
+/** 標稱量不到的操作（水平只能相對、從 0 起）：移動、斜度、缺陷大小。 */
+export const lockedNominal = (f: Pick<Factor, 'op' | 'param'>) => f.op === 'translate' || f.op === 'taper' || (f.op === 'defect' && !f.param.startsWith('center'));
+
+/** 預設水平按鈕（plan v12 §5.4 第 2 點）：用使用者的單位寫、括號附格數；值是這個 factor 的 unit＋mode。 */
+export function presetLevels(f: Factor, nm: number): { label: string; values: number[] }[] {
+  if (isFraction(f)) return [{ label: '0.25、0.5、0.75', values: [0.25, 0.5, 0.75] }];
+  const r1 = (v: number) => Math.round(v * 1e6) / 1e6;
+  const nomU = f.mode === 'absolute' ? fromVx(f, f.nominal, nm) : 0;
+  const vxOf = (u: number) => Math.round(toVx(f, u, nm));
+  const around = (a: number) => [r1(nomU - a), r1(nomU), r1(nomU + a)];
+  // 從 0 起的（半徑標稱 0、缺陷大小）：2, 4, 6 格
+  if ((f.op === 'round' && Math.round(f.nominal) === 0) || (f.op === 'defect' && !f.param.startsWith('center'))) {
+    const vs = [2, 4, 6].map((k) => r1(fromVx(f, k, nm)));
+    return [{ label: '2、4、6 格', values: vs }, { label: '1、2、3 格', values: [1, 2, 3].map((k) => r1(fromVx(f, k, nm))) }];
+  }
+  const out: { label: string; values: number[] }[] = [];
+  if (f.unit === 'nm') {
+    for (const a of [0.5, 1, 2]) {
+      const g = vxOf(a) - vxOf(0);
+      if (g >= 1) out.push({ label: `±${a} nm（±${g} 格）`, values: around(a) });
+    }
+    // 比例小於 0.5 nm／格時 0.5 nm 不到一格：至少給 ±1 格
+    if (!out.length) out.push({ label: `±1 格（±${nm} nm）`, values: around(nm) });
+  } else
+    for (const a of [1, 2, 4]) out.push({ label: `±${a} 格`, values: around(a) });
+  if (!lockedNominal(f) && f.nominal > 0 && f.op !== 'push' && f.op !== 'level') {
+    const p = Math.max(1, Math.round(f.nominal * 0.1));
+    const a = fromVx(f, p, nm);
+    out.push({ label: `±10%（±${p} 格）`, values: f.mode === 'absolute' ? around(a) : [r1(-a), 0, r1(a)] });
+  }
+  return out;
+}
+
+/** n 個等距水平：標稱置中、間距 step（unit）。 */
+export function evenLevels(f: Factor, nm: number, n: number, step: number): number[] {
+  const nomU = f.mode === 'absolute' ? fromVx(f, f.nominal, nm) : 0;
+  const k0 = -Math.floor((n - 1) / 2);
+  return Array.from({ length: n }, (_, i) => Math.round((nomU + (k0 + i) * step) * 1e6) / 1e6);
+}
+
+/** 換顯示模式（絕對 ⇄ 相對）：格數位移不變，水平換算成另一種寫法（plan v12 §5.4：只是顯示切換）。 */
+export function switchMode(f: Factor, levels: number[], nm: number): { factor: Factor; levels: number[] } {
+  const mode: Factor['mode'] = f.mode === 'absolute' ? 'relative' : 'absolute';
+  return { factor: { ...f, mode }, levels: levels.map((v) => Math.round(otherColumn(f, v, nm) * 1e6) / 1e6) };
+}
+
+/** 設計的簽名（變數、水平、組合方式）：組合表的試算換了它就重來。 */
+export const levelsSig = (d: Design) =>
+  JSON.stringify([d.factors.map((f) => [f.id, f.keys, f.op, f.param, f.template, f.unit, f.nominal, f.mode]), d.levels, d.combine, d.picks ?? null, d.from]);

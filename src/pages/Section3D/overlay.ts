@@ -16,7 +16,8 @@ export interface UVBox {
 export function sliceGeom(vol: Pick<Volume, 'X' | 'Y' | 'Z'>, axis: Axis) {
   const { X, Y, Z } = vol;
   const [W, H] = axis === 'z' ? [X, Y] : axis === 'y' ? [X, Z] : [Z, Y];
-  const index = axis === 'z' ? (u: number, v: number, t: number) => (t * Y + v) * X + u : axis === 'y' ? (u: number, v: number, t: number) => (v * Y + t) * X + u : (u: number, v: number, t: number) => (v * Y + u) * X + t;
+  // YZ（axis x）：u＝z、v＝y，和 drawSlice 同一個方向（plan v12 修正：以前寫成 (v·Y＋u)·X，u／v 對調）
+  const index = axis === 'z' ? (u: number, v: number, t: number) => (t * Y + v) * X + u : axis === 'y' ? (u: number, v: number, t: number) => (v * Y + t) * X + u : (u: number, v: number, t: number) => (u * Y + v) * X + t;
   return { W, H, index };
 }
 

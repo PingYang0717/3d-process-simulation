@@ -46,3 +46,17 @@ describe('疊圖', () => {
     expect(n).toBe(ref);
   });
 });
+
+describe('sliceGeom 和 drawSlice 同方向（plan v12 修正 YZ）', () => {
+  it('三軸的 (u, v) → index 和 sliceRGBA 的像素一一對應', async () => {
+    const { sliceGeom } = await import('./overlay');
+    const { sliceRGBA } = await import('./drawSlice');
+    const vol = { X: 5, Y: 3, Z: 4, data: new Uint8Array(60).map((_, i) => i + 1) };
+    const rgb = new Map(Array.from({ length: 61 }, (_, m) => [m, [m, 0, 0] as [number, number, number]]));
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const { W, H, index } = sliceGeom(vol, axis);
+      const img = sliceRGBA(vol, axis, 1, rgb, new Set(), null, null);
+      for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) expect(img.data[(v * W + u) * 4]).toBe(vol.data[index(u, v, 1)]);
+    }
+  });
+});

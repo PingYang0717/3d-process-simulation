@@ -109,3 +109,45 @@ describe('factors', () => {
     expect(x.kind === 'defect' && x.size).toEqual([20, 2, 30]);
   });
 });
+
+describe('plan v12 §5.6：水平驗證與預設', () => {
+  const nm = 0.5;
+  const ctx = { L: base.L, dims: vol, nm };
+  it('圓頭半徑 −5 被擋、0 是不改動；預設 2、4、6 格', async () => {
+    const { makeFactor, validateLevels, presetLevels } = await import('./factors');
+    const p3 = base.L.comps.find((c) => c.label === 'Poly-Si 3')!;
+    const f = { ...makeFactor(base.L, vol, [p3.key], 'round', { axis: 'x', at: 10 }, matName, [], 'vx'), id: 'r' };
+    expect(f.mode).toBe('absolute');
+    expect(f.nominal).toBe(0);
+    const ps = validateLevels(f, [-5, 0, 6], ctx);
+    expect(ps.find((p) => p.v === -5)).toMatchObject({ level: 'error', msg: '半徑不能小於 0' });
+    expect(ps.find((p) => p.v === 0)?.level).toBe('noop');
+    expect(ps.some((p) => p.v === 6)).toBe(false);
+    expect(presetLevels(f, nm)[0].values).toEqual([2, 4, 6]);
+  });
+  it('移動超出陣列、推到 0 格、CD 寬度 0 被擋；±1 nm 預設', async () => {
+    const { makeFactor, validateLevels, presetLevels, comboProblems } = await import('./factors');
+    const p2 = base.L.comps.find((c) => c.label === 'Poly-Si 2')!;
+    const tr = { ...makeFactor(base.L, vol, [p2.key], 'translate', { axis: 2 }, matName, [], 'vx'), id: 't' };
+    expect(validateLevels(tr, [vol.Z], ctx)[0].msg).toBe('超出陣列');
+    const push = { ...makeFactor(base.L, vol, [p2.key], 'push', { dir: [0, 0, 1] }, matName, [], 'vx'), id: 'p' };
+    expect(validateLevels(push, [-(p2.bbox.z1 - p2.bbox.z0 + 1)], ctx)[0].msg).toBe('會把結構推到 0 格');
+    const cd = { ...makeFactor(base.L, vol, [p2.key], 'cd', { axis: 2, anchor: 'center' }, matName, []), id: 'Lg' };
+    expect(validateLevels(cd, [0], ctx)[0].msg).toBe('寬度會變成 0（最少 1 格）');
+    const pre = presetLevels(cd, nm);
+    expect(pre[1].label).toBe('±1 nm（±2 格）');
+    expect(pre[1].values).toEqual([11, 12, 13]);
+    const design = { factors: [cd, tr], levels: {}, combine: 'full' as const, from: 'base' as const, nameTemplate: '' };
+    expect(comboProblems(design, { Lg: 12, t: 0 }, ctx)).toEqual({ errors: [], control: true });
+    expect(comboProblems(design, { Lg: 0, t: 0 }, ctx).errors[0]).toContain('寬度');
+  });
+  it('絕對 ⇄ 相對只是顯示：格數位移不變', async () => {
+    const { makeFactor, switchMode, deltaOf } = await import('./factors');
+    const p2 = base.L.comps.find((c) => c.label === 'Poly-Si 2')!;
+    const cd = makeFactor(base.L, vol, [p2.key], 'cd', { axis: 2, anchor: 'center' }, matName, []);
+    const lv = [11, 12, 13];
+    const r = switchMode(cd, lv, nm);
+    expect(r.factor.mode).toBe('relative');
+    expect(r.levels.map((v) => deltaOf(r.factor, v, nm))).toEqual(lv.map((v) => deltaOf(cd, v, nm)));
+  });
+});

@@ -43,7 +43,11 @@ const ok = (cond, msg) => {
   };
   /** 3D 標題列的分段（改後／改前／差異）目前選哪一個。 */
   const viewMode = () => page.locator('.ant-segmented.tb .ant-segmented-item-selected').innerText();
-  const tab = (name) => page.locator('.split-tab', { has: page.locator('.split-name', { hasText: new RegExp(`^${name}$`) }) });
+  /** plan v12：Split 列改成可搜尋的下拉（SplitPicker）。 */
+  const pickSplit = async (name) => {
+    await page.locator('.split-picker-btn').click();
+    await page.locator('.picker-row', { has: page.locator('.picker-name', { hasText: new RegExp(`^${name}$`) }) }).click();
+  };
 
   await page.locator('.item-name', { hasText: /^Poly-Si 1$/ }).click();
   await grow();
@@ -54,9 +58,7 @@ const ok = (cond, msg) => {
   ok(a2 > a, `Split 1 再長高：${a2}`);
 
   // 複製 split 後各改
-  await tab('Split 1').locator('.split-more').click({ force: true }).catch(async () => {
-    await page.locator('.split-more').first().click({ force: true });
-  });
+  await page.getByRole('button', { name: '這個 split 的更多操作' }).click();
   await page.getByText('複製這個 split').click();
   await idle();
   ok((await changed()) === a2, `複本和來源相同（${a2}）`);
@@ -64,10 +66,10 @@ const ok = (cond, msg) => {
   await grow();
   const b = await changed();
   ok(b > a2, `複本再長高：${b}`);
-  await tab('Split 1').click();
+  await pickSplit('Split 1');
   await idle();
   const back = await changed();
-  ok(back === a2, `切回 Split 1：仍是 ${a2}（沒被複本污染）[${back}，作用中：${await page.locator('.split-tab.on .split-name').innerText()}]`);
+  ok(back === a2, `切回 Split 1：仍是 ${a2}（沒被複本污染）[${back}，作用中：${await page.locator('.split-picker-name').innerText()}]`);
   await page.keyboard.press('Control+z');
   await idle();
   ok((await changed()) === a, `Split 1 復原一步：${a}`);
@@ -79,7 +81,7 @@ const ok = (cond, msg) => {
   await page.keyboard.press('Control+y');
   await idle();
   ok((await changed()) === a2, `重做到底：${a2}`);
-  await tab('Split 1 複本').click();
+  await pickSplit('Split 1 複本');
   await idle();
   ok((await changed()) === b, `複本仍是 ${b}`);
 
@@ -92,7 +94,7 @@ const ok = (cond, msg) => {
   await page.locator('.item-name', { hasText: /^Poly-Si 1$/ }).click();
   await grow();
   ok((await changed()) === a, `丟掉所有改動後再長高：${a}（和第一次相同）`);
-  await tab('Split 1').click();
+  await pickSplit('Split 1');
   await idle();
   ok((await changed()) === a2, `Split 1 不受影響：${a2}`);
 

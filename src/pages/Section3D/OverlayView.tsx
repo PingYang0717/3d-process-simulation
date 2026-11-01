@@ -5,7 +5,7 @@ import { Flex, Switch, Typography } from 'antd';
 import { type Axis, type Vec3, hexToRgb } from '../../volume/volume';
 import { BASE_ID, type Editor } from './editor';
 import { drawSlice } from './drawSlice';
-import { CATEGORY } from './ExperimentTab';
+import { CATEGORY } from './colors';
 import { type UVBox, contourCache, contourOf, loopsPath, overlayKey, sliceDiff, sliceGeom, unionUV } from './overlay';
 import { slabOf, versionOf } from './slabs';
 

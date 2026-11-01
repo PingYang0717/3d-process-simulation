@@ -1,6 +1,6 @@
 // plan v11 §7 驗收（m11 §0～§4）：
 // §0 合成的 PointData 比例陣列＋FieldData .vti：上傳面板列出偵測結果、確認後左欄是 FieldData 的名字；
-// §1 「實驗」頁籤：Poly-Si 2 往上 push（相對 1／2／3 nm）× translate z（−1／+1 nm）全因子 6 個；名字、矩陣表 6 列 2 欄；
+// §1 「實驗」頁（plan v12 起是一頁，Ctrl+2）：Poly-Si 2 往上 push（相對 1／2／3 nm）× translate z（−1／+1 nm）全因子 6 個；名字、矩陣表 6 列 2 欄；
 // §2 疊圖 6 條線＋基準、自動放大；基準切到 split 2 時 split 3 的差異格數＝兩者 diff；CSV 行數＝split 數＋1；
 // §3 cd +2 後 W 24 → 26；Poly-Si 2 往下 5 預設被擋、STI 不變；
 // §4 預設沒有筆刷頁籤、沒有自由形變；fin 的換材質清單 TiN 不在「合理」裡。
@@ -78,30 +78,39 @@ ${fr.map((v, k) => `        <DataArray type="Float32" Name="material_${k + 1}" f
     const ed = window.__ed;
     ed.selectKeys([ed.comps.find((c) => c.label === 'Poly-Si 2').key]);
   });
-  await page.getByRole('tab', { name: '實驗' }).click();
-  const tab = page.locator('.experiment-tab');
+  // plan v12：實驗改成一頁（Ctrl+2），設計區在左、結果區在右
+  await page.keyboard.press('Control+2');
+  const tab = page.locator('.design-panel');
+  await tab.waitFor();
+  /** 自訂水平：打開「自訂…」輸入框、輸入、Enter。 */
+  const custom = async (k, text) => {
+    const card = tab.locator('.factor-card').nth(k);
+    await card.getByRole('button', { name: /自訂/ }).click();
+    await card.getByLabel('自訂水平').fill(text);
+    await card.getByLabel('自訂水平').press('Enter');
+  };
   // 變數 1：長／縮一面（上），相對 1／2／3 nm
-  await tab.getByRole('button', { name: /新增變數/ }).click();
+  await tab.getByRole('button', { name: /加一個變數/ }).click();
   await tab.locator('.factor-new .ant-select').first().click();
   await page.locator('.ant-select-dropdown:visible').getByText('長／縮一面', { exact: true }).click();
   await tab.getByRole('button', { name: '加入變數' }).click();
-  await tab.getByLabel('水平').nth(0).fill('1, 2, 3');
+  await custom(0, '1, 2, 3');
   // 變數 2：整塊移動 z，−1／+1
-  await tab.getByRole('button', { name: /新增變數/ }).click();
+  await tab.getByRole('button', { name: /加一個變數/ }).click();
   await tab.locator('.factor-new .ant-select').first().click();
   await page.locator('.ant-select-dropdown:visible').getByText('整塊移動', { exact: true }).click();
   await tab.locator('.factor-new .ant-segmented').first().getByText('z', { exact: true }).click();
   await tab.getByRole('button', { name: '加入變數' }).click();
-  await tab.getByLabel('水平').nth(1).fill('-1, 1');
+  await custom(1, '-1, 1');
   const btn = tab.getByRole('button', { name: /產生 6 個 split/ });
   ok((await btn.count()) === 1, '§1 全因子 3 × 2 = 6 個 split');
   await btn.click();
-  await page.waitForFunction(() => window.__ed.splits.length === 6, null, { timeout: 120000 });
+  await page.waitForFunction(() => window.__ed.splits.length === 6 && !window.__ed.busy, null, { timeout: 120000 });
   await idle();
   const names = await page.evaluate(() => window.__ed.splits.map((s) => s.name));
   ok(names.includes('PolySi2_top=+1nm_PolySi2_z=-1nm'), `§1 名字照樣板（${names[0]}…）`);
   ok(await page.evaluate(() => window.__ed.splits.every((s) => s.levels && Object.keys(s.levels).length === 2 && s.designId)), '§1 每個 split 帶 levels／designId');
-  await page.getByRole('tab', { name: /矩陣/ }).click();
+  await page.locator('.lab-toolbar .ant-segmented').first().getByText('表格').click();
   const rows = await page.locator('.dim-table tbody tr.ant-table-row').count();
   const factorCols = await page.locator('.dim-table thead th .factor-dot').count();
   ok(rows === 6 && factorCols === 2, `§1 矩陣表 ${rows} 列、${factorCols} 個變數欄`);
@@ -110,8 +119,11 @@ ${fr.map((v, k) => `        <DataArray type="Float32" Name="material_${k + 1}" f
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '匯出 CSV' }).click()]);
   const csv = fs.readFileSync(await dl.path(), 'utf8').trim().split('\n');
   ok(csv.length === 7, `§2 CSV 行數 ${csv.length}＝split 數＋1`);
-  await page.getByRole('button', { name: '並排看' }).first().click();
+  await page.locator('.lab-toolbar .ant-segmented').first().getByText('卡片').click();
+  // 沒勾＝最近一次設計的全部
+  await page.locator('.lab-toolbar').getByRole('button', { name: /^比較/ }).click();
   await page.locator('.compare').waitFor();
+  await page.locator('.compare .pane-head .ant-segmented').nth(1).getByText('XY 正面').click();
   await page.locator('.compare .ant-segmented').first().getByText('疊圖').click();
   await page.locator('.overlay-view').waitFor();
   const legend = await page.locator('.overlay-legend .legend-row').count();
@@ -138,10 +150,11 @@ ${fr.map((v, k) => `        <DataArray type="Float32" Name="material_${k + 1}" f
   const cardText = await page.locator('.cmp-card').filter({ hasText: pair.name }).locator('.pane-head').innerText();
   ok(cardText.includes(`這片 ${pair.n.toLocaleString()} 格不同`), `§2 基準切到 split 2 時 split 3 這一片的差異＝${pair.n}`);
   await page.evaluate(() => window.__ed.setCompareBase('base'));
-  // 關掉並排（Split 列上的切換鈕）
-  await page.locator('.compare').waitFor();
-  await page.locator('button:has(.anticon-appstore)').first().click();
+  // 回到結果，再回編輯頁
+  await page.getByRole('button', { name: /回到結果/ }).click();
   await page.locator('.compare').waitFor({ state: 'detached' });
+  await page.keyboard.press('Control+1');
+  await page.locator('.pane-3d').waitFor();
 
   // ---- §3 新操作 ----
   const cd = await page.evaluate(async () => {

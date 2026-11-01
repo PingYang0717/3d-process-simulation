@@ -105,3 +105,80 @@ export function dirLabel(d: Vec3) {
   const a = axisOf(d);
   return `${directionName(d)}（${d[a] > 0 ? '+' : '−'}${AXIS[a]}）`;
 }
+
+// ---- plan v12 §5.6：實驗變數卡第一行 ----
+
+/** 變數的操作名（下拉、表頭）。 */
+export const OP_LABEL: Record<string, string> = {
+  cd: '對稱 CD（寬度）',
+  push: '長／縮一面',
+  translate: '整塊移動',
+  level: '方頭到（recess）',
+  round: '圓頭半徑',
+  dilate: '保形層厚度',
+  taper: '側壁斜度',
+  defect: '缺陷（void）',
+};
+/** 一句說明（tooltip）。 */
+export const OP_HELP: Record<string, string> = {
+  cd: '對稱 CD：沿一個軸改總寬度，兩側各推一半（奇數格多的給大的一側），也可以固定一側；襯層跟著推。',
+  push: '長／縮一面：結構在那個方向最外側的表面沿法線推 n 格（正＝長、負＝縮）；碰到厚的別的材質預設擋住。',
+  translate: '整塊移動：結構沿一個軸平移 n 格，空出來的地方回填原本的內容。',
+  level: '方頭到：那一面每一排補到同一個座標（只補空氣與可跟推的襯層）；可以相對另一個結構的面（相對 recess）。',
+  round: '圓頭半徑：結構頂端兩個角改成半徑 r 的圓角（0＝方角），每一片用自己的外框重算。',
+  dilate: '保形層厚度：沿表面法線整圈加厚／減薄，外面的薄層會被推開，厚的別的材質擋住。',
+  taper: '側壁斜度：側壁頂、底各推不同格數，中間線性內插（footing／倒梯形）。',
+  defect: '缺陷：在結構裡面放一塊別的材質（預設 VOID），位置相對結構外框、大小用格數。',
+};
+
+interface FactorLike {
+  keys: string[];
+  op: string;
+  param: string;
+  template: Record<string, unknown>;
+  unit: 'nm' | 'vx';
+  nominal: number;
+}
+
+/** 變數卡第一行（plan v12 §5.6）：「Poly-Si 2」＋「沿 z 的寬度（CD）· 現在 24 格＝12 nm」。 */
+export function factorWords(f: FactorLike, L: Labeled, nm: number, matName: (id: number) => string): { who: string; what: string; now: string } {
+  const who = whoText(L, f.keys, matName);
+  const t = f.template;
+  const n = Math.round(f.nominal);
+  const nmOf = (v: number) => `${(Math.round(v * nm * 10) / 10).toString()} nm`;
+  const fromZero = '從 0 起';
+  switch (f.op) {
+    case 'cd':
+      return { who, what: `沿 ${AXIS[(t.axis as number) ?? 0]} 的寬度（CD）`, now: `現在 ${n} 格＝${nmOf(n)}` };
+    case 'push': {
+      const d = t.dir as Vec3;
+      return { who, what: `${faceName(d)}長／縮（沿 ${AXIS[axisOf(d)]}）`, now: `現在${faceName(d)}在 ${AXIS[axisOf(d)]} = ${n}` };
+    }
+    case 'translate':
+      return { who, what: `整塊沿 ${AXIS[(t.axis as number) ?? 0]} 移動`, now: fromZero };
+    case 'level': {
+      const d = t.dir as Vec3;
+      const ref = t.ref as { key: string; side: string } | undefined;
+      const rc = ref ? L.comps.find((c) => c.key === ref.key) : undefined;
+      return ref
+        ? { who, what: `${faceName(d)}方頭到 ${rc?.label ?? '參照'} 的面 + 偏移`, now: `現在差 ${n} 格＝${nmOf(n)}` }
+        : { who, what: `${faceName(d)}方頭到 ${AXIS[axisOf(d)]} =`, now: `現在 ${n}` };
+    }
+    case 'round':
+      return { who, what: '頂端圓頭的半徑', now: n ? `現在 ${n} 格＝${nmOf(n)}` : '現在是方角（0）' };
+    case 'dilate':
+      return { who, what: '整層厚度（保形）', now: `現在 ${n} 格＝${nmOf(n)}` };
+    case 'taper': {
+      const face = (t.face as Vec3) ?? [1, 0, 0];
+      const which = f.param === 'top' ? '頂' : f.param === 'both' ? '整體傾斜' : '底';
+      return { who, what: `${faceName(face)}側壁斜度（${which}）`, now: fromZero };
+    }
+    case 'defect': {
+      const k = Number(f.param.match(/\[(\d)\]/)?.[1] ?? 0);
+      return f.param.startsWith('center')
+        ? { who, what: `裡的缺陷位置 ${AXIS[k]}（0～1）`, now: `現在 ${f.nominal.toFixed(2)}` }
+        : { who, what: `裡的缺陷大小 ${AXIS[k]}`, now: fromZero };
+    }
+  }
+  return { who, what: OP_LABEL[f.op] ?? f.op, now: '' };
+}

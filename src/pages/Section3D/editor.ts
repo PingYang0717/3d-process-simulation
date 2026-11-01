@@ -237,6 +237,8 @@ export function useEditor() {
   const [origState, setOrig] = useState<EditState | null>(null);
   // 一開始只有「原始」；第一次在原始上調整會自動建立 Split 1
   const [splits, setSplitsState] = useState<Split[]>([]);
+  /** 編輯頁／實驗頁（plan v12 §5.4、§10 D5）：Ctrl+1／Ctrl+2。3D 只在編輯頁掛載。 */
+  const [page, setPage] = usePersisted<'edit' | 'lab'>('page', 'edit', (v): v is 'edit' | 'lab' => v === 'edit' || v === 'lab');
   const [activeId, setActiveIdState] = useState(BASE_ID);
   // 排隊中的步驟要接在前一步的結果後面，所以 split 清單另外放一份在 ref（每次改都同步更新）
   const splitsRef = useRef<Split[]>([]);
@@ -1342,6 +1344,13 @@ export function useEditor() {
         redo();
         return;
       }
+      if (mod && (k === '1' || k === '2')) {
+        e.preventDefault();
+        setPage(k === '1' ? 'edit' : 'lab');
+        return;
+      }
+      // 實驗頁：編輯用的鍵（方向鍵移動、復原、[ ] 切 split…）不動模型
+      if (page === 'lab') return;
       if (mod && k === 'a') {
         e.preventDefault();
         selectAll();
@@ -1381,7 +1390,7 @@ export function useEditor() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId, menu, focus]);
+  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId, menu, focus, page]);
   // 沒有選取就沒有聚焦編輯；載入新檔案也回到瀏覽
   useEffect(() => {
     if (!sel.size) setFocus(null);
@@ -1389,6 +1398,8 @@ export function useEditor() {
   useEffect(() => setFocus(null), [origState]);
 
   return {
+    page,
+    setPage,
     ready,
     materials,
     matName,

@@ -254,3 +254,32 @@ export function toPark(live: string[], lru: string[], K: number, active: string,
 }
 
 export { boxSize };
+
+/**
+ * 沿 axis 每一片有幾格和原始不同（只掃 box；plan v12 §5.5 縮圖選片）。
+ * 回傳 box 在這個軸的起點與每片的格數。parked 用補丁、live 用 diff。
+ */
+export function sliceCounts(dims: Dims, box: BBox, axis: Axis, isDiff: (i: number, k: number) => boolean): { t0: number; counts: number[] } {
+  const a = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+  const lo = [box.x0, box.y0, box.z0];
+  const hi = [box.x1, box.y1, box.z1];
+  const counts = new Array(hi[a] - lo[a] + 1).fill(0);
+  for (let z = box.z0, k = 0; z <= box.z1; z++)
+    for (let y = box.y0; y <= box.y1; y++) {
+      const row = (z * dims.Y + y) * dims.X;
+      for (let x = box.x0; x <= box.x1; x++, k++) if (isDiff(row + x, k)) counts[(a === 0 ? x : a === 1 ? y : z) - lo[a]]++;
+    }
+  return { t0: lo[a], counts };
+}
+/** 補丁裡沿 axis 每片和原始不同的格數。 */
+export const patchSliceCounts = (dims: Dims, p: SplitPatch, orig: Uint8Array, axis: Axis) =>
+  p.box ? sliceCounts(dims, p.box, axis, (i, k) => p.data[k] !== orig[i]) : null;
+/** 改最多的那一片（同多取離中點近的）。 */
+export function busiestSlice(c: { t0: number; counts: number[] } | null): number | null {
+  if (!c || !c.counts.length) return null;
+  const mid = (c.counts.length - 1) / 2;
+  let best = -1;
+  for (let k = 0; k < c.counts.length; k++)
+    if (best < 0 || c.counts[k] > c.counts[best] || (c.counts[k] === c.counts[best] && Math.abs(k - mid) < Math.abs(best - mid))) best = k;
+  return c.counts[best] ? c.t0 + best : null;
+}

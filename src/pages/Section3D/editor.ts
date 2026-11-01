@@ -17,6 +17,7 @@ import {
   maskOf,
   materialsFor,
   nameComponents,
+  patchMask,
   unionBBox,
 } from '../../volume/volume';
 import { type EditState, type Local, type Op, type Policy, bboxOfKeys, defectBox, levelRefTo, matNameOf, opText } from '../../volume/ops';
@@ -75,10 +76,10 @@ export interface Brush {
 }
 /** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
-import { applyIn, applyParkedIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf } from '../../volume/client';
-import { type Step, applyStepInPlace, carryStepStats, unionBox } from '../../volume/patch';
+import { applyIn, applyParkedIn, compsIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf } from '../../volume/client';
+import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, copyAxes, newAxes, stepBytes, unionBox } from '../../volume/patch';
 import { type SplitPatch, type SplitStats, buffersStats, defaultLiveK, extractPatch, restoreBuffers, stepTouch, toPark } from '../../splits/lifecycle';
-import { type OpReport, blockedPhrase, summarize } from '../../volume/report';
+import { type OpReport, blockedPhrase } from '../../volume/report';
 import { boxVoxels } from '../../volume/preview';
 import { clipBox as clipScopeBox } from '../../volume/scope';
 import type { PickedHandle } from './SliceEditor';
@@ -110,6 +111,8 @@ export interface SplitBuffers {
   counts: Float64Array;
   /** 所有改過的範圍（寬鬆聯集；plan v12 §5.3）：park 時只掃這裡，外面和原始逐位元組相同。 */
   touch: BBox | null;
+  /** 三條軸的 diff 直方圖（plan v15 A2）：和 diff 一起差量維護，貼合的 diff 外框 O(X+Y+Z)。 */
+  axes: DiffAxes;
 }
 
 export interface Split {
@@ -143,9 +146,16 @@ export interface Split {
   blocked?: number;
 }
 
-/** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。 */
-export interface StepReport extends OpReport {
+/** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。cells 轉成 number[]（≤ BLOCKED_CAP 個）給 SliceEditor 現有的 blocked 讀法。 */
+export interface StepReport extends Omit<OpReport, 'cells'> {
   op: Op;
+  cells: number[];
+}
+/** 最近一步（plan v15 A1／A4／D2）：seq 每一步 +1（含復原／重做）、box＝stepTouch、owner＝哪個 split 的帳簿。 */
+export interface LastStep {
+  seq: number;
+  box: BBox | null;
+  owner: string;
 }
 
 /** 載入來源；.vti 的 Spacing／Origin／陣列名匯出時原封不動寫回。 */
@@ -175,6 +185,23 @@ export interface Diff {
 export const BASE_ID = 'base';
 /** 每個 split 留幾步 Undo（存的是補丁，只有改到的外框那麼大）。 */
 const HISTORY_LIMIT = 50;
+/** 復原堆疊的位元組上限（plan v15 D1）：筆數之外再限位元組；設定抽屜可調（64／256／1024 MB）。 */
+export const HISTORY_BYTES = 256 * 2 ** 20;
+/**
+ * 從最舊開始丟，直到筆數 ≤ HISTORY_LIMIT 且 Σ stepBytes ≤ bytes（至少留 1 筆）。
+ * byBytes：是位元組（不只是筆數）把它截掉的——UI 提示一次用。
+ */
+export function trimHist(hist: HistEntry[], bytes = HISTORY_BYTES): { hist: HistEntry[]; dropped: number; byBytes: boolean } {
+  let total = 0;
+  for (const h of hist) total += stepBytes(h.step);
+  let k = 0;
+  let byBytes = false;
+  while (hist.length - k > 1 && (hist.length - k > HISTORY_LIMIT || total > bytes)) {
+    if (hist.length - k <= HISTORY_LIMIT) byBytes = true;
+    total -= stepBytes(hist[k++].step);
+  }
+  return { hist: k ? hist.slice(k) : hist, dropped: k, byBytes };
+}
 /** Worker 忙的時候最多排幾步；再多就拒絕並提示。 */
 export const QUEUE_MAX = 3;
 const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] }, version: 0 };
@@ -208,6 +235,107 @@ const wrap = (owner: string, buf: SplitBuffers, comps: Comp[], version: number, 
   version,
   owner,
 });
+
+/** 兩個外框：a ⊆ b。 */
+const within = (a: BBox, b: BBox) => a.x0 >= b.x0 && a.x1 <= b.x1 && a.y0 >= b.y0 && a.y1 <= b.y1 && a.z0 >= b.z0 && a.z1 <= b.z1;
+/**
+ * 一步之後能不能只在 box 裡補 mask：每個結構編號「選了／沒選」若前後不同，它改前、改後的外框都必須在 box 裡
+ * （換編號的 moves、被併掉的、新片段都是；只是鄰居、key 被重新認領的結構則不是 → 重建）。O(結構數)。
+ */
+export function canPatchMask(prev: Comp[], next: Comp[], sel: Set<string>, box: BBox) {
+  const n = Math.max(prev.length, next.length);
+  for (let k = 0; k < n; k++) {
+    const o = prev[k];
+    const c = next[k];
+    const was = !!o && sel.has(o.key);
+    const now = !!c && sel.has(c.key);
+    if (was === now) continue;
+    if (o && !within(o.bbox, box)) return false;
+    if (c && !within(c.bbox, box)) return false;
+  }
+  return true;
+}
+/** 同一個 scope 值的簽名（整段＝'full'）。 */
+const scopeKeyOf = (scope: Scope, vol: Volume) => (isFullScope(scope, vol) ? 'full' : `${scope.axis}|${scope.lo}|${scope.hi}`);
+/** scope 只看一個軸：index → 在不在範圍裡。 */
+function inScopeFn(scope: Scope, vol: Volume) {
+  const { X, Y } = vol;
+  const plane = X * Y;
+  const { axis, lo, hi } = scope;
+  const along = axis === 'z' ? (i: number) => Math.floor(i / plane) : axis === 'y' ? (i: number) => Math.floor(i / X) % Y : (i: number) => i % X;
+  return (i: number) => {
+    const t = along(i);
+    return t >= lo && t <= hi;
+  };
+}
+const sameBytes = (a: Uint8Array, b: Uint8Array) => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+/**
+ * 選取 mask 與 scope 內 mask 的原地維護（plan v15 A1）：同一個選取裡陣列身分不變，一步之後只在 stepTouch 裡重算。
+ * 規則：選取簽名（selKey）或帳簿（vol.data 身分）變了 → 重建（maskOf）；L 變了且 lastStep 正好是這本帳簿的下一步
+ * （seq +1）→ 在 lastStep.box 裡 patchMask（canPatchMask 擋掉編號被重新認領的情形）；其他（L 變了但 seq 沒動或跳了
+ * 不只一步）→ 一律重建。scope 的值變了只重建 aff（O(外框)），mask 不動；整段時 aff === mask（同一個陣列）。
+ * DEV 下每 20 步隨機抽一次和 maskOf 全量比對，不同就 console.error ＋ 重建（e2e 把它當失敗）。
+ */
+function useSelMasks(L: Labeled, sel: Set<string>, selKey: string, vol: Volume, owner: string, scope: Scope, selBox: BBox | null, lastStep: LastStep | null) {
+  const ref = useRef<{ key: string; data: Uint8Array | null; L: Labeled | null; seq: number; scopeKey: string; mask: Uint8Array | null; aff: Uint8Array | null }>({
+    key: '',
+    data: null,
+    L: null,
+    seq: 0,
+    scopeKey: '',
+    mask: null,
+    aff: null,
+  });
+  const r = ref.current;
+  const scopeKey = scopeKeyOf(scope, vol);
+  const affOf = (mask: Uint8Array | null) => (mask && scopeKey !== 'full' ? maskInScope(mask, vol, scope, selBox) : mask);
+  const rebuild = () => {
+    r.mask = maskOf(L, sel, vol);
+    r.aff = affOf(r.mask);
+  };
+  if (!sel.size) {
+    r.mask = null;
+    r.aff = null;
+  } else if (selKey !== r.key || vol.data !== r.data || !r.mask || !r.L) rebuild();
+  else {
+    let rebuilt = false;
+    if (L !== r.L) {
+      const step = lastStep && lastStep.seq === r.seq + 1 && lastStep.owner === owner && lastStep.box ? lastStep : null;
+      if (step && canPatchMask(r.L.comps, L.comps, sel, step.box!)) {
+        const on = new Uint8Array(L.comps.length);
+        L.comps.forEach((c, i) => {
+          if (sel.has(c.key)) on[i] = 1;
+        });
+        patchMask(r.mask, L.labels, on, vol, step.box!);
+        if (r.aff !== r.mask && r.aff) patchMask(r.aff, L.labels, on, vol, step.box!, inScopeFn(scope, vol));
+        if (import.meta.env.DEV && Math.random() < 1 / 20) {
+          const want = maskOf(L, sel, vol)!;
+          const wantAff = affOf(want)!;
+          if (!sameBytes(want, r.mask) || !sameBytes(wantAff, r.aff!)) {
+            console.error('selMask 原地維護和 maskOf 全量不同，已重建');
+            rebuild();
+            rebuilt = true;
+          }
+        }
+      } else {
+        rebuild();
+        rebuilt = true;
+      }
+    }
+    if (!rebuilt && scopeKey !== r.scopeKey) r.aff = affOf(r.mask);
+  }
+  r.key = selKey;
+  r.data = vol.data;
+  r.L = L;
+  r.seq = lastStep?.seq ?? 0;
+  r.scopeKey = scopeKey;
+  return { selMask: r.mask, affMask: r.aff };
+}
 
 // ---- useEditor ----
 
@@ -319,6 +447,25 @@ export function useEditor() {
   const [last, setLast] = useState<{ text: string; at: number; box?: BBox } | null>(null);
   /** 同時 live 幾個 split（plan v12 §10 D4）：0＝依大小自動（8／3／1）。 */
   const [liveKSetting, setLiveK] = usePersisted('liveK', 0, (v): v is number => typeof v === 'number' && v >= 0 && v <= 64);
+  /** 復原堆疊的記憶體上限（MB；plan v15 D1）：64／256／1024。 */
+  const [histBytes, setHistBytes] = usePersisted<number>('histBytes', HISTORY_BYTES >> 20, (v): v is number => v === 64 || v === 256 || v === 1024);
+  const histBytesRef = useRef(histBytes);
+  histBytesRef.current = histBytes;
+  /** 堆疊被位元組上限截掉時提示一次（換檔重置）。 */
+  const histWarned = useRef(false);
+  /** 最近一步（含復原／重做；plan v15 A1）：selMask 只在它的 box 裡補。 */
+  const [lastStep, setLastStep] = useState<LastStep | null>(null);
+  const stepCounter = useRef(0);
+  const noteStep = (owner: string, step: Step) => setLastStep({ seq: ++stepCounter.current, box: stepTouch(step), owner });
+  /** 推一筆進復原堆疊：筆數與位元組上限（D1）。 */
+  const pushHist = (hist: HistEntry[], entry: HistEntry) => {
+    const t = trimHist([...hist, entry], histBytesRef.current * 2 ** 20);
+    if (t.byBytes && !histWarned.current) {
+      histWarned.current = true;
+      message.info({ key: 'hist', content: `復原記憶體達上限（${histBytesRef.current} MB），最早的 ${t.dropped} 步已不能復原；可在設定調高` });
+    }
+    return t.hist;
+  };
   /** 產生中可以取消（已產生的留著）。 */
   const cancelGen = useRef(false);
   /** 產生進度（實驗頁顯示 k／N）。 */
@@ -361,7 +508,6 @@ export function useEditor() {
   const selComps = useMemo(() => L.comps.filter((c) => sel.has(c.key)), [L, sel]);
   /** 選取結構在 L.comps 裡的 index（給 Worker 畫選取層）。 */
   const selIdx = useMemo(() => L.comps.flatMap((c, i) => (sel.has(c.key) ? [i] : [])), [L, sel]);
-  const selMask = useMemo(() => maskOf(L, sel, vol), [L, sel, vol]);
   const selBox: BBox | null = useMemo(() => unionBBox(selComps), [selComps]);
   /** 選取結構沿 editAxis 的起止（「整個結構（z 0～127）」的數字）。 */
   const selRange = useMemo<[number, number] | null>(() => (selBox ? boxRange(selBox, editAxis) : null), [selBox, editAxis]);
@@ -399,7 +545,8 @@ export function useEditor() {
     // 只在選取或軸改變時夾；長高之後外框變了不必重夾
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selKey, editAxis]);
-  const affMask = useMemo(() => (selMask ? maskInScope(selMask, vol, scope, selBox) : null), [selMask, scope, vol, selBox]);
+  // 選取 mask 原地維護（plan v15 A1）：同一個選取裡身分不變；要跟著步驟重算的 memo 把 vol／L 放進 deps
+  const { selMask, affMask } = useSelMasks(L, sel, selKey, vol, cur.owner ?? BASE_ID, scope, selBox, lastStep);
   const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
 
   /** 目前 split 和原始不同的外框（「對準差異」、縮圖；plan v12 §5.2）。 */
@@ -456,7 +603,7 @@ export function useEditor() {
     for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) n++;
     return n;
   };
-  const blockedText = (r: OpReport) => blockedPhrase(r, matName);
+  const blockedText = (r: Pick<OpReport, 'total' | 'blockedBy' | 'slices'>) => blockedPhrase(r, matName);
   /** 「已套用到整根（z 0～127）」「已套用到此片（z = 64）」「已套用到 z 40～80」。 */
   const appliedText = (op: Op, from: EditState) => {
     const a = op.scope.axis;
@@ -477,7 +624,14 @@ export function useEditor() {
       r.total.skippedSlices ? ` · ${r.total.skippedSlices} 片沒有這個結構，略過` : ''
     }${r.total.fallbackSlices ? ` · ${r.total.fallbackSlices} 片對不到同一個${r.op.kind === 'profile' && Object.values(r.op.gestures ?? {})[0]?.kind === 'node' ? '節點' : '邊'}，用參考片的位置` : ''}`;
 
-  const keepSel = (s: EditState) => setSel((prev) => new Set([...prev].filter((k) => s.L.comps.some((c) => c.key === k))));
+  /** 選取裡已經不存在的 key 拿掉；一個都沒少就回傳原來的 Set（身分不變，plan v15 A1）。 */
+  const keepSel = (s: EditState) =>
+    setSel((prev) => {
+      if (!prev.size) return prev;
+      const keys = new Set(s.L.comps.map((c) => c.key));
+      const next = [...prev].filter((k) => keys.has(k));
+      return next.length === prev.size ? prev : new Set(next);
+    });
 
   /** 在 Worker 裡從 from 複製出帳簿 owner、重播 ops（含 relabel）；busy 橫條顯示 label。失敗回 null 並提示，不會卡在計算中。 */
   const run = useCallback(
@@ -487,7 +641,7 @@ export function useEditor() {
       try {
         const r = await replayIn(owner, from, { ops, matNames, keyCounter: keySeq.current });
         keySeq.current = r.keyCounter;
-        const buf: SplitBuffers = { data: r.data, labels: r.labels, diff: r.diff, diffCount: r.diffCount, counts: r.counts, touch: r.touch };
+        const buf: SplitBuffers = { data: r.data, labels: r.labels, diff: r.diff, diffCount: r.diffCount, counts: r.counts, touch: r.touch, axes: r.axes };
         return { cur: wrap(owner, buf, r.comps, r.version, from.vol), buf, blocked: r.blocked };
       } catch (e) {
         dropOwners([owner]);
@@ -510,7 +664,7 @@ export function useEditor() {
     if (sp.state === 'parked') throw new Error(`split ${sp.name} 還沒載入（parked）`);
     const o = origRef.current!;
     const oc = origCountsRef.current!;
-    const buf: SplitBuffers = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null };
+    const buf: SplitBuffers = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) };
     const version = sidOf(sp.cur);
     void forkIn(sp.id, sp.cur).catch(() => {});
     return { ...sp, buf, cur: wrap(sp.id, buf, sp.cur.L.comps, version, o.vol) };
@@ -525,7 +679,7 @@ export function useEditor() {
       keySeq.current = r.keyCounter;
       if (!r.step.data) return { next: null, step: r.step, report: r.report };
       const comps = applyStepInPlace(from.vol, buf.data, buf.labels, r.step, 'fwd');
-      buf.diffCount = carryStepStats(from.vol, buf.data, origRef.current!.vol.data, buf.diff, buf.diffCount, buf.counts, r.step, 'fwd');
+      buf.diffCount = carryStepStats(from.vol, buf.data, origRef.current!.vol.data, buf.diff, buf.diffCount, buf.counts, r.step, 'fwd', buf.axes);
       buf.touch = unionBox(buf.touch, stepTouch(r.step));
       const next = wrap(sp.id, buf, comps ?? from.L.comps, r.version, from.vol);
       return { next, step: r.step, report: r.report };
@@ -550,7 +704,8 @@ export function useEditor() {
       if (fresh) dropOwners([sp.id]);
       if (!r) return;
     }
-    const rep: StepReport & { changed: number } = { ...summarize(r.report, op, from.vol), op, changed: changedCount(r.step) };
+    // 報告已在 Worker 摘要（plan v15 C7）；cells 轉 number[] 給 SliceEditor 現有的讀法
+    const rep: StepReport & { changed: number } = { ...r.report, cells: Array.from(r.report.cells), op, changed: changedCount(r.step) };
     setReport(rep);
     if (!r.next) {
       setLast({ text: `${headText(op, from)} · 沒有改到任何體素${rep.total.blocked ? `（${blockedText(rep)}）` : ''}`, at: Date.now() });
@@ -564,15 +719,15 @@ export function useEditor() {
     if (fresh) {
       const name = `Split ${splitsRef.current.length + 1}`;
       setSplits((all) => [...all, { ...sp, name, cur: next, ops: [op], hist: [entry], future: [] }]);
+      noteStep(sp.id, r.step);
       setActiveRaw(sp.id);
       enforceK();
       keepSel(next);
       setLast({ text: `原始保持不變，已自動建立 ${name}：${headText(op, o)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
       return;
     }
-    setSplits((all) =>
-      all.map((x) => (x.id === sp.id ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)),
-    );
+    setSplits((all) => all.map((x) => (x.id === sp.id ? { ...x, cur: next, ops: [...x.ops, op], hist: pushHist(x.hist, entry), future: [] } : x)));
+    noteStep(sp.id, r.step);
     keepSel(next);
     setLast({ text: `${headText(op, from)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
   };
@@ -662,7 +817,7 @@ export function useEditor() {
     const buf = act.buf!;
     void deriveIn(act.cur, h.version, h.step, dir).catch(() => {});
     const comps = applyStepInPlace(o.vol, buf.data, buf.labels, h.step, dir);
-    buf.diffCount = carryStepStats(o.vol, buf.data, o.vol.data, buf.diff, buf.diffCount, buf.counts, h.step, dir);
+    buf.diffCount = carryStepStats(o.vol, buf.data, o.vol.data, buf.diff, buf.diffCount, buf.counts, h.step, dir, buf.axes);
     buf.touch = unionBox(buf.touch, stepTouch(h.step));
     return wrap(act.id, buf, comps ?? act.cur.L.comps, h.version, o.vol);
   };
@@ -691,6 +846,7 @@ export function useEditor() {
           : x,
       ),
     );
+    noteStep(act.id, h.step);
     keepSel(prev);
     setReport(null);
     setLast(null);
@@ -707,10 +863,11 @@ export function useEditor() {
     setSplits((all) =>
       all.map((x) =>
         x.id === act.id
-          ? { ...x, cur: next, ops: f.ops, hist: [...x.hist, { step: f.step, ops: x.ops, version: sidOf(x.cur) }].slice(-HISTORY_LIMIT), future: x.future.slice(1) }
+          ? { ...x, cur: next, ops: f.ops, hist: pushHist(x.hist, { step: f.step, ops: x.ops, version: sidOf(x.cur) }), future: x.future.slice(1) }
           : x,
       ),
     );
+    noteStep(act.id, f.step);
     keepSel(next);
     setReport(null);
     setLast(null);
@@ -839,7 +996,15 @@ export function useEditor() {
       let cur = src.cur;
       let buf: SplitBuffers | null = null;
       if (src.buf) {
-        buf = { data: src.buf.data.slice(), labels: src.buf.labels.slice(), diff: src.buf.diff.slice(), diffCount: src.buf.diffCount, counts: src.buf.counts.slice(), touch: src.buf.touch && { ...src.buf.touch } };
+        buf = {
+          data: src.buf.data.slice(),
+          labels: src.buf.labels.slice(),
+          diff: src.buf.diff.slice(),
+          diffCount: src.buf.diffCount,
+          counts: src.buf.counts.slice(),
+          touch: src.buf.touch && { ...src.buf.touch },
+          axes: copyAxes(src.buf.axes),
+        };
         const v = newVersion();
         void forkIn(nid, src.cur, v).catch(() => {});
         cur = wrap(nid, buf, src.cur.L.comps, v, src.cur.vol);
@@ -881,9 +1046,9 @@ export function useEditor() {
     [nmPerVoxel, follow, backfill, pushPolicy],
   );
 
-  /** 寫進 manifest 的一步結果摘要（重播時忽略，§11）。 */
-  const withReport = (op0: Op, r: Parameters<typeof summarize>[0], vol: Volume, changed: number) => {
-    const t = summarize(r, op0, vol).total;
+  /** 寫進 manifest 的一步結果摘要（重播時忽略，§11）。報告已在 Worker 摘要（plan v15 C7）。 */
+  const withReport = (op0: Op, r: OpReport, changed: number) => {
+    const t = r.total;
     return { ...op0, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed } } as unknown as Op;
   };
 
@@ -907,8 +1072,8 @@ export function useEditor() {
       }
       keySeq.current = r.keyCounter;
       const added = ops.flatMap((op0, k) => {
-        blocked += r.reports[k].blocked;
-        return r.changed[k] ? [withReport(op0, r.reports[k], o.vol, r.changed[k])] : [];
+        blocked += r.reports[k].total.blocked;
+        return r.changed[k] ? [withReport(op0, r.reports[k], r.changed[k])] : [];
       });
       const res = r;
       setSplits((all) =>
@@ -928,12 +1093,13 @@ export function useEditor() {
       const from = cur.cur;
       const r = await applyOne(cur, op0);
       if (!r) return null;
-      blocked += r.report.blocked;
+      blocked += r.report.total.blocked;
       if (!r.next) continue;
-      const op = withReport(op0, r.report, from.vol, changedCount(r.step));
+      const op = withReport(op0, r.report, changedCount(r.step));
       const entry: HistEntry = { step: r.step, ops: cur.ops, version: sidOf(from) };
       const next = r.next;
-      setSplits((all) => all.map((x) => (x.id === splitId ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)));
+      setSplits((all) => all.map((x) => (x.id === splitId ? { ...x, cur: next, ops: [...x.ops, op], hist: pushHist(x.hist, entry), future: [] } : x)));
+      noteStep(splitId, r.step);
     }
     setSplits((all) =>
       all.map((x) =>
@@ -1239,8 +1405,13 @@ export function useEditor() {
       if (mats) table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
       setMaterials(table);
       setMeta(m);
-      setOrig({ vol: v, L: { labels, comps: nameComponents(raw, matNameOf(table)) }, version, owner: BASE_ID });
+      const comps = nameComponents(raw, matNameOf(table));
+      setOrig({ vol: v, L: { labels, comps }, version, owner: BASE_ID });
       setOrigCounts(oc);
+      // 原始的結構清單給 Worker 一份（plan v15 §10）：拖拉預覽不再每幀送 comps
+      void compsIn(BASE_ID, comps).catch(() => {});
+      histWarned.current = false;
+      setLastStep(null);
       // 匯出照原格式要的原檔（Worker 留一份；plan v12 §5.3 匯出搬進 Worker）
       void exportMetaIn(m.raw && m.fractions ? m.raw : null, m.raw && m.fractions ? m.fractions : null).catch(() => {});
       lru.current = [];
@@ -1432,6 +1603,9 @@ export function useEditor() {
     liveK: liveKSetting,
     setLiveK,
     liveLimit: liveLimit(),
+    histBytes,
+    setHistBytes,
+    lastStep,
     stats: (s: Split) => statsOf(s, origCounts),
     origCounts,
     diffBox,

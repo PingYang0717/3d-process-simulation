@@ -114,10 +114,68 @@ export function applyStep(s: { vol: Volume; L: Labeled }, step: Step, dir: 'fwd'
 }
 
 /**
- * 補丁在 R 裡對 diff（和原始不同的格子）與材質體積帳的差量更新（plan v9 §4.4）：O(補丁)。
- * data 是已經貼好補丁的陣列；回傳新的 diff 計數。
+ * 三條軸上每一片各有幾個 diff 格（plan v15 §5.1 A2）：和 diff 一起差量維護，貼合的 diff 外框就是三條軸
+ * 第一個與最後一個非 0 的位置，O(X+Y+Z)，不必每步掃整個 touch。
  */
-export function carryStepStats(dims: Dims, data: Uint8Array, orig: Uint8Array, diff: Uint8Array, diffCount: number, counts: Float64Array, step: Step, dir: 'fwd' | 'back' = 'fwd') {
+export interface DiffAxes {
+  x: Int32Array;
+  y: Int32Array;
+  z: Int32Array;
+}
+export const newAxes = (dims: Dims): DiffAxes => ({ x: new Int32Array(dims.X), y: new Int32Array(dims.Y), z: new Int32Array(dims.Z) });
+export const copyAxes = (a: DiffAxes): DiffAxes => ({ x: a.x.slice(), y: a.y.slice(), z: a.z.slice() });
+/** 三條軸第一個與最後一個非 0 → 貼合外框；一格 diff 都沒有回傳 null。O(X+Y+Z)。 */
+export function diffBoxOfAxes(a: DiffAxes): BBox | null {
+  const span = (h: Int32Array): [number, number] => {
+    let lo = 0;
+    while (lo < h.length && !h[lo]) lo++;
+    let hi = h.length - 1;
+    while (hi >= 0 && !h[hi]) hi--;
+    return [lo, hi];
+  };
+  const [x0, x1] = span(a.x);
+  if (x1 < 0) return null;
+  const [y0, y1] = span(a.y);
+  const [z0, z1] = span(a.z);
+  return { x0, x1, y0, y1, z0, z1 };
+}
+/**
+ * 依 diff 重數 axes（整個清零，再數 box 裡的）：box 外的 diff 必須都是 0（restore／貼補丁到原始複本時成立）。
+ * O(X+Y+Z + box)；box 為 null＝沒有 diff。
+ */
+export function recountAxes(dims: Dims, diff: Uint8Array, box: BBox | null, axes = newAxes(dims)): DiffAxes {
+  axes.x.fill(0);
+  axes.y.fill(0);
+  axes.z.fill(0);
+  if (!box) return axes;
+  for (let z = box.z0; z <= box.z1; z++)
+    for (let y = box.y0; y <= box.y1; y++) {
+      const row = (z * dims.Y + y) * dims.X;
+      for (let x = box.x0; x <= box.x1; x++)
+        if (diff[row + x]) {
+          axes.x[x]++;
+          axes.y[y]++;
+          axes.z[z]++;
+        }
+    }
+  return axes;
+}
+
+/**
+ * 補丁在 R 裡對 diff（和原始不同的格子）與材質體積帳的差量更新（plan v9 §4.4）：O(補丁)。
+ * data 是已經貼好補丁的陣列；回傳新的 diff 計數。axes 有給就在同一個迴圈裡同步三條軸的 diff 直方圖（A2）。
+ */
+export function carryStepStats(
+  dims: Dims,
+  data: Uint8Array,
+  orig: Uint8Array,
+  diff: Uint8Array,
+  diffCount: number,
+  counts: Float64Array,
+  step: Step,
+  dir: 'fwd' | 'back' = 'fwd',
+  axes?: DiffAxes,
+) {
   const p = step.data;
   if (!p) return diffCount;
   const { box } = p;
@@ -134,8 +192,15 @@ export function carryStepStats(dims: Dims, data: Uint8Array, orig: Uint8Array, d
         counts[old]--;
         counts[now]++;
         const d = now !== orig[i] ? 1 : 0;
-        diffCount += d - diff[i];
+        const dd = d - diff[i];
+        if (!dd) continue;
+        diffCount += dd;
         diff[i] = d;
+        if (axes) {
+          axes.x[i - row + box.x0] += dd;
+          axes.y[y] += dd;
+          axes.z[z] += dd;
+        }
       }
     }
   return diffCount;
@@ -151,7 +216,7 @@ export function unionBox(a: BBox | null, b: BBox | null): BBox | null {
   return { x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1), z0: Math.min(a.z0, b.z0), z1: Math.max(a.z1, b.z1) };
 }
 
-/** 在 box 裡掃 diff（非 0）收緊成貼合的外框（plan v12 §5.2）；一格都沒有回傳 null。O(box)。 */
+/** 在 box 裡掃 diff（非 0）收緊成貼合的外框（plan v12 §5.2）；一格都沒有回傳 null。O(box)。v15 起只當 diffBoxOfAxes 的對照與 changedBox 用。 */
 export function tightBox(dims: Dims, diff: Uint8Array, box: BBox | null): BBox | null {
   if (!box) return null;
   let x0 = Infinity;

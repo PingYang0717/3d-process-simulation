@@ -1,7 +1,7 @@
 // Worker 的本體（plan v9 §4.2）：每個 split（owner）的體素、結構編號、diff、體積帳在這裡各只有一份，
 // 每一步原地貼補丁（不整個陣列影印）。原始是 owner 'base'，永遠不寫。
 // 純模組（沒有 self.onmessage），worker.ts 接訊息；測試與 bench 直接呼叫 handle()。
-import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, greedyMesh, labelComponents } from './volume';
+import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, VOID, greedyMesh, labelComponents } from './volume';
 import { type Scope, clipBox } from './scope';
 import { type Op, upgradeOp } from './ops';
 import { applyOpInPlace } from './apply';
@@ -9,8 +9,8 @@ import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
 import { type TracedHandle, ringCache } from '../slice/relative';
-import { type Step, applyStepInPlace, carryStepStats, tightBox, unionBox } from './patch';
-import type { Report } from './kernel';
+import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, copyAxes, diffBoxOfAxes, newAxes, recountAxes, unionBox } from './patch';
+import { type OpReport, summarize } from './report';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
 import { type SplitPatch, type SplitStats, applyPatch, extractPatch, patchStats, stepTouch } from '../splits/lifecycle';
 import { pasteArr, cropArr, globalIndex } from './patch';
@@ -46,14 +46,17 @@ export interface Requests {
   load: { req: { sid: number; vol: Volume }; res: { labels: Int32Array; raw: RawComp[]; counts: Float64Array } };
   /** 開一本新帳簿：複製 src 目前的內容給 owner（這是整個流程裡唯一的整陣列複製）。sid 省略＝沿用 src 的版本號。 */
   fork: { req: { owner: string; src: string; sid?: number }; res: null };
-  /** 保險：主執行緒的內容補送過來（只在 head 對不上時）。 */
-  put: { req: { owner: string; sid: number; vol: Volume; labels: Int32Array }; res: null };
+  /** 保險：主執行緒的內容補送過來（只在 head 對不上時）。comps：拖拉預覽用（plan v15 §10，Worker 存 compsOf）。 */
+  put: { req: { owner: string; sid: number; vol: Volume; labels: Int32Array; comps?: Comp[] }; res: null };
+  /** 主執行緒命名好的結構清單（載入後對原始送一次）：拖拉預覽不再每幀送 comps（plan v15 §10）。 */
+  comps: { req: { owner: string; comps: Comp[] }; res: null };
   /** 釋放這些帳簿。 */
   drop: { req: { owners: string[] }; res: null };
   /** 從 src（版本 from）複製出 owner，原地逐個套 ops，結果是版本 to；複本 transfer 回主執行緒（新 split 一次）。 */
   replay: {
     req: { owner: string; src: string; from: number; to: number; comps: Comp[]; ops: Op[]; matNames: Record<number, string>; keyCounter: number };
-    res: { data: Uint8Array; labels: Int32Array; diff: Uint8Array; diffCount: number; counts: Float64Array; comps: Comp[]; keyCounter: number; blocked: number; touch: BBox | null };
+    /** axes：三條軸的 diff 直方圖（plan v15 A2），主執行緒的帳簿接著差量維護。 */
+    res: { data: Uint8Array; labels: Int32Array; diff: Uint8Array; diffCount: number; counts: Float64Array; comps: Comp[]; keyCounter: number; blocked: number; touch: BBox | null; axes: DiffAxes };
   };
   mesh: {
     req: {
@@ -86,7 +89,7 @@ export interface Requests {
   /** 對 parked split 套一串 Op（「套用到所有 split」）：scratch 上 restore → 套用 → 裁補丁，不留帳簿。 */
   applyParked: {
     req: { patch: SplitPatch; ops: Op[]; matNames: Record<number, string>; keyCounter: number };
-    res: { patch: SplitPatch; stats: SplitStats; keyCounter: number; reports: Report[]; changed: number[] };
+    res: { patch: SplitPatch; stats: SplitStats; keyCounter: number; reports: OpReport[]; changed: number[] };
   };
   /** 匯出要的原檔（比例陣列照原格式寫回，plan v11 §4.0）：載入時送一次，Worker 留著。 */
   exportMeta: { req: { raw: ArrayBuffer | null; fractions: FractionArray[] | null }; res: null };
@@ -97,10 +100,10 @@ export interface Requests {
   };
   /** 保留給測試與保險；UI 每一步不再呼叫（主執行緒自己差量更新，§4.4）。 */
   diff: { req: { sid: number }; res: { mask: Uint8Array; count: number } };
-  /** 一步操作：owner 的帳簿必須正好是版本 from；原地算（§4.3），沒改到時 head 不動。回傳補丁。 */
+  /** 一步操作：owner 的帳簿必須正好是版本 from；原地算（§4.3），沒改到時 head 不動。回傳補丁與已摘要的報告（plan v15 C7：cells 有上限）。 */
   apply: {
     req: { owner: string; from: number; to: number; comps: Comp[]; op: Op; matNames: Record<number, string>; keyCounter: number };
-    res: { step: Step; keyCounter: number; report: Report };
+    res: { step: Step; keyCounter: number; report: OpReport };
   };
   /** 復原／重做：owner 從 from 原地套補丁（往前或往回）成為 to（§8.3）。 */
   derive: { req: { owner: string; from: number; to: number; step: Step; dir: 'fwd' | 'back' }; res: null };
@@ -131,7 +134,8 @@ export interface Requests {
    * 每片的輪廓同一次拖拉只描一次（快取 key 含 sid 與手勢的把手，換 sid 就清空）。超過 cap 回 none。
    */
   preview: {
-    req: { sid: number; comps: Comp[]; op: Op; cap: number; hidden: Uint8Array; palette: Float32Array; showDiff: boolean; seq: number; mesh: boolean };
+    /** comps 可省略（plan v15 §10）：Worker 用自己在 apply／derive／replay／restore／comps 存下的那份。 */
+    req: { sid: number; comps?: Comp[]; op: Op; cap: number; hidden: Uint8Array; palette: Float32Array; showDiff: boolean; seq: number; mesh: boolean };
     res: { seq: number; sid: number; box: BBox; data: Uint8Array; blockedAt: number[]; mesh: MeshData | null } | { seq: number; sid: number; none: true };
   };
 }
@@ -144,10 +148,8 @@ export interface Book {
   diff: Uint8Array | null;
   diffCount: number;
   counts: Float64Array;
-  /** 和原始不同的格子一定在這個外框裡（每一步 union 補丁外框，寬鬆；plan v12 §5.2）。null＝沒有不同。 */
-  diffBox: BBox | null;
-  /** diffBox 已經收緊過（貼合）。 */
-  tight: boolean;
+  /** 三條軸的 diff 直方圖（plan v15 A2）：貼合的 diff 外框 O(X+Y+Z)，不再每步掃寬鬆外框。 */
+  axes: DiffAxes;
   /** 所有改過的範圍（data、labels 的 S、換編號的結構外框）的聯集：外面和原始逐位元組相同（park／scratch 只碰這裡）。 */
   touch: BBox | null;
 }
@@ -159,6 +161,12 @@ const heads = new Map<string, number>();
 /** 每個版本從哪一版、改了哪個外框來的（box：體素；labelBox：結構編號，⊇ box）。chunk／圖層只重算改到的地方。 */
 const parents = new Map<number, { from: number; box: BBox | null; labelBox: BBox | null }>();
 let origSid = 0;
+/** 原始裡 VOID 的外框（plan v15 A5）：載入時數體積帳的同一個迴圈順手算；之後 VOID 只會在 touch 裡出現或消失。 */
+let origVoidBox: BBox | null = null;
+/** 每本帳簿現在的結構清單（plan v15 §10）：apply／derive／replay／restore／put／comps 都會更新，拖拉預覽用它、不必每幀送。 */
+const compsOf = new Map<string, Comp[]>();
+/** 測試用：整陣列掃描的次數（A5：VOID 層不該呼叫 boxOf）。 */
+export const scanStats = { boxOf: 0 };
 /** 拖拉預覽的每片輪廓快取（§4.5）：只對 previewSid 有效。 */
 const rings = ringCache();
 let previewSid = -1;
@@ -166,7 +174,7 @@ let previewSid = -1;
 export const previewStats = rings.stats;
 
 /** 測試用：看 Worker 的內部狀態。 */
-export const inspect = () => ({ books, heads, parents, origSid });
+export const inspect = () => ({ books, heads, parents, origSid, compsOf, origVoidBox });
 
 const origBook = () => books.get(BASE_OWNER)!;
 const volOf = (b: Book): Volume => ({ X: dims.X, Y: dims.Y, Z: dims.Z, data: b.data });
@@ -194,6 +202,27 @@ function countAll(data: Uint8Array) {
   for (let i = 0; i < data.length; i++) out[data[i]]++;
   return out;
 }
+/** 載入時的一次掃描：體積帳＋ VOID 的外框（同一個迴圈，plan v15 A5）。 */
+function countAllAndVoid(v: Volume) {
+  const { X, Y, Z, data } = v;
+  const out = new Float64Array(256);
+  const b: BBox = { x0: X, x1: -1, y0: Y, y1: -1, z0: Z, z1: -1 };
+  for (let z = 0, i = 0; z < Z; z++)
+    for (let y = 0; y < Y; y++)
+      for (let x = 0; x < X; x++, i++) {
+        const m = data[i];
+        out[m]++;
+        if (m === VOID) {
+          if (x < b.x0) b.x0 = x;
+          if (x > b.x1) b.x1 = x;
+          if (y < b.y0) b.y0 = y;
+          if (y > b.y1) b.y1 = y;
+          if (z < b.z0) b.z0 = z;
+          if (z > b.z1) b.z1 = z;
+        }
+      }
+  return { counts: out, voidBox: b.x1 < 0 ? null : b };
+}
 function copyBook(b: Book): Book {
   const N = b.data.length;
   return {
@@ -202,31 +231,21 @@ function copyBook(b: Book): Book {
     diff: b.diff ? b.diff.slice() : new Uint8Array(N),
     diffCount: b.diffCount,
     counts: b.counts.slice(),
-    diffBox: b.diffBox ? { ...b.diffBox } : null,
-    tight: b.tight,
+    axes: copyAxes(b.axes),
     touch: b.touch ? { ...b.touch } : null,
   };
 }
-/** 貼合的 diff 外框（plan v12 §5.2）：在寬鬆的 union 裡掃一次 diff 收緊，快取到下一步。O(外框)。 */
+/** 貼合的 diff 外框（plan v12 §5.2；v15 A2 改從三條軸的直方圖來，O(X+Y+Z)）。 */
 export function diffBoxOf(b: Book): BBox | null {
-  if (!b.diff || !b.diffCount) {
-    b.diffBox = null;
-    b.tight = true;
-    return null;
-  }
-  if (!b.tight) {
-    b.diffBox = tightBox(dims, b.diff, b.diffBox);
-    b.tight = true;
-  }
-  return b.diffBox;
+  if (!b.diff || !b.diffCount) return null;
+  return diffBoxOfAxes(b.axes);
 }
-/** 一步補丁之後：diff 外框 union 補丁外框（寬鬆；復原也 union）。 */
-const growDiffBox = (b: Book, step: Step) => {
+/** 一步補丁之後：touch union 這一步碰到的範圍（復原也 union）。diff 外框由 axes 差量維護，不必在這裡記。 */
+const growTouch = (b: Book, step: Step) => {
   b.touch = unionBox(b.touch, stepTouch(step));
-  if (!step.data) return;
-  b.diffBox = unionBox(b.diffBox, step.data.box);
-  b.tight = false;
 };
+/** VOID 的外框（plan v15 A5）：原始的 VOID 外框 ∪ touch——VOID 只會在改過的範圍裡出現或消失，不必掃整個陣列。 */
+const voidBoxOf = (b: Book): BBox | null => unionBox(origVoidBox, b.touch);
 
 /** 重複使用的帳簿（plan v12 §5.3）：產生 split、對 parked split 套用、匯出 parked split 都在這裡算，不另外 fork。 */
 let scratch: Book | null = null;
@@ -248,8 +267,8 @@ function resetScratch(src: Book): Book {
   }
   b.counts = src.counts.slice();
   b.diffCount = src.diffCount;
-  b.diffBox = src.diffBox ? { ...src.diffBox } : null;
-  b.tight = src.tight;
+  // scratch 的 diff 現在和 src 的逐位元組相同（touch 外都是 0），直方圖直接複製
+  b.axes = copyAxes(src.axes);
   b.touch = src.touch ? { ...src.touch } : null;
   return b;
 }
@@ -269,8 +288,8 @@ function pastePatch(b: Book, p: SplitPatch) {
   }
   b.counts = st.counts;
   b.diffCount = st.changed;
-  b.diffBox = st.diffBox;
-  b.tight = true;
+  // b 是原始的內容，box 外的 diff 都是 0：在 box 裡重數一次（O(patch)）
+  recountAxes(dims, b.diff!, p.box, b.axes);
   b.touch = p.box ? { ...p.box } : null;
 }
 /** 帳簿 → 補丁＋摘要。 */
@@ -294,8 +313,8 @@ const ctxOf = (matNames: Record<number, string>, keyCounter: number) => {
 function applyTo(b: Book, comps: Comp[], op: Op, ctx: ReturnType<typeof ctxOf>['ctx']) {
   const r = applyOpInPlace({ vol: volOf(b), L: { labels: b.labels, comps } }, op, ctx);
   if (r.step.data) {
-    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd');
-    growDiffBox(b, r.step);
+    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd', b.axes);
+    growTouch(b, r.step);
   }
   return r;
 }
@@ -307,8 +326,9 @@ const REMOVED_RGB: [number, number, number] = [1, 77 / 255, 79 / 255];
 
 const emptyMesh = (): MeshData => ({ positions: new Float32Array(0), normals: new Float32Array(0), colors: new Float32Array(0), quads: 0 });
 
-/** 符合 test 的體素外框；一個都沒有回傳 null。 */
+/** 符合 test 的體素外框；一個都沒有回傳 null。O(N)，每格一個 closure call：VOID 層改走 voidBoxOf（A5），其他材質才用它。 */
 function boxOf(vol: Volume, test: (i: number) => boolean): BBox | null {
+  scanStats.boxOf++;
   const { X, Y, Z } = vol;
   const b: BBox = { x0: X, x1: -1, y0: Y, y1: -1, z0: Z, z1: -1 };
   for (let z = 0, i = 0; z < Z; z++)
@@ -354,9 +374,11 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     heads.clear();
     parents.clear();
     dims = { X: vol.X, Y: vol.Y, Z: vol.Z };
+    compsOf.clear();
     const { labels, raw } = labelComponents(vol);
-    const counts = countAll(vol.data);
-    books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, diffBox: null, tight: true, touch: null });
+    const { counts, voidBox } = countAllAndVoid(vol);
+    origVoidBox = voidBox;
+    books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, axes: newAxes(dims), touch: null });
     scratch = null;
     heads.set(BASE_OWNER, sid);
     origSid = sid;
@@ -371,9 +393,16 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     if (!b) throw new Error(`Worker 沒有帳簿 ${src}`);
     books.set(owner, copyBook(b));
     heads.set(owner, sid ?? heads.get(src)!);
+    const cs = compsOf.get(src);
+    if (cs) compsOf.set(owner, cs);
     return [null, []];
   },
-  put: ({ owner, sid, vol, labels }) => {
+  comps: ({ owner, comps }) => {
+    compsOf.set(owner, comps);
+    return [null, []];
+  },
+  put: ({ owner, sid, vol, labels, comps }) => {
+    if (comps) compsOf.set(owner, comps);
     if (owner === BASE_OWNER) {
       heads.set(owner, sid);
       return [null, []];
@@ -387,7 +416,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
         diffCount++;
       }
     const all: BBox = { x0: 0, x1: dims.X - 1, y0: 0, y1: dims.Y - 1, z0: 0, z1: dims.Z - 1 };
-    books.set(owner, { data: vol.data, labels, diff, diffCount, counts: countAll(vol.data), diffBox: diffCount ? all : null, tight: !diffCount, touch: all });
+    books.set(owner, { data: vol.data, labels, diff, diffCount, counts: countAll(vol.data), axes: recountAxes(dims, diff, diffCount ? all : null), touch: all });
     heads.set(owner, sid);
     return [null, []];
   },
@@ -396,6 +425,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       if (o !== BASE_OWNER) {
         books.delete(o);
         heads.delete(o);
+        compsOf.delete(o);
       }
     return [null, []];
   },
@@ -416,13 +446,17 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       heads.set(owner, to);
       parents.set(to, { from, box: r.step.data.box, labelBox: r.step.labels?.box ?? r.step.data.box });
     }
-    return [{ step: r.step, keyCounter: seq(), report: r.report }, stepBuffers(r.step)];
+    compsOf.set(owner, r.comps);
+    // 報告在 Worker 摘要（plan v15 C7）：被擋的格子只回前 BLOCKED_CAP 個，不 clone 整個 blockedAt
+    const report = summarize(r.report, op, dims);
+    return [{ step: r.step, keyCounter: seq(), report }, [...stepBuffers(r.step), report.cells.buffer]];
   },
   derive: ({ owner, from, to, step, dir }) => {
     const b = bookAt(owner, from);
-    applyStepInPlace(dims, b.data, b.labels, step, dir);
-    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, step, dir);
-    growDiffBox(b, step);
+    const cs = applyStepInPlace(dims, b.data, b.labels, step, dir);
+    if (cs) compsOf.set(owner, cs);
+    b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, step, dir, b.axes);
+    growTouch(b, step);
     heads.set(owner, to);
     parents.set(to, { from, box: step.data?.box ?? null, labelBox: step.labels?.box ?? step.data?.box ?? null });
     return [null, []];
@@ -440,12 +474,13 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     }
     books.set(owner, b);
     heads.set(owner, to);
+    compsOf.set(owner, cs);
     parents.delete(to);
     // Worker 自己留一份，複本 transfer 回主執行緒（新 split 一次）
     const out = copyBook(b);
     return [
-      { data: out.data, labels: out.labels, diff: out.diff!, diffCount: out.diffCount, counts: out.counts, comps: cs, keyCounter: seq(), blocked, touch: out.touch },
-      [out.data.buffer, out.labels.buffer, out.diff!.buffer, out.counts.buffer],
+      { data: out.data, labels: out.labels, diff: out.diff!, diffCount: out.diffCount, counts: out.counts, comps: cs, keyCounter: seq(), blocked, touch: out.touch, axes: out.axes },
+      [out.data.buffer, out.labels.buffer, out.diff!.buffer, out.counts.buffer, out.axes.x.buffer, out.axes.y.buffer, out.axes.z.buffer],
     ];
   },
   replayPatch: ({ src, from, comps, ops, matNames, keyCounter }) => {
@@ -467,6 +502,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     pastePatch(b, patch);
     books.set(owner, b);
     heads.set(owner, sid);
+    compsOf.set(owner, patch.comps);
     // 網格：從原始的版本只重算補丁外框碰到的 chunk
     parents.set(sid, { from: origSid, box: patch.box, labelBox: patch.box });
     return [null, []];
@@ -476,18 +512,18 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     pastePatch(b, patch);
     const { ctx, seq } = ctxOf(matNames, keyCounter);
     let cs = patch.comps;
-    const reports: Report[] = [];
+    const reports: OpReport[] = [];
     const changed: number[] = [];
     for (const op of ops) {
       const r = applyTo(b, cs, upgradeOp(op), ctx);
       cs = r.comps;
-      reports.push(r.report);
+      reports.push(summarize(r.report, op, dims));
       let n = 0;
       if (r.step.data) for (let i = 0; i < r.step.data.before.length; i++) if (r.step.data.before[i] !== r.step.data.after[i]) n++;
       changed.push(n);
     }
     const out = patchOf(b, cs);
-    return [{ ...out, keyCounter: seq(), reports, changed }, patchTransfer(out.patch, out.stats)];
+    return [{ ...out, keyCounter: seq(), reports, changed }, [...patchTransfer(out.patch, out.stats), ...reports.map((r) => r.cells.buffer)]];
   },
   exportMeta: ({ raw, fractions }) => {
     exportRaw = raw;
@@ -537,7 +573,8 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       let box: BBox | null;
       if ('mat' in only) {
         test = (i) => vol.data[i] === only.mat;
-        box = boxOf(vol, test);
+        // 空洞層（A5）：原始的 VOID 外框 ∪ touch；其他材質才掃整個陣列
+        box = only.mat === VOID ? voidBoxOf(stateOf(sid).book) : boxOf(vol, test);
       } else {
         const on = new Uint8Array(Math.max(1, ...only.comps.map((c) => c + 1)));
         only.comps.forEach((c) => (on[c] = 1));
@@ -602,7 +639,8 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     } else if ('mat' in filter) {
       const mat = filter.mat;
       code = (i) => (data[i] === mat ? 1 : 0);
-      box = null;
+      // 空洞層（A5）：VOID 只會在原始的 VOID 外框與 touch 裡，不掃整個陣列；其他材質在全量時才 boxOf
+      box = mat === VOID ? voidBoxOf(book) : null;
     } else {
       sel = true;
       const on = new Uint8Array(Math.max(1, ...filter.comps.map((c) => c + 1)));
@@ -631,7 +669,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       const d = sel ? par.labelBox : par.box;
       ks = d ? chunksTouching(vol, g, d) : [];
     } else {
-      if (!sel && !isDiff) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
+      if (!sel && !isDiff && (filter as { mat: number }).mat !== VOID) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
       ks = box ? chunksTouching(vol, g, box) : [];
     }
     const color = (c: number): [number, number, number] =>
@@ -646,8 +684,12 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
     return [{ full, items }, transfer];
   },
-  preview: ({ sid, comps, op, cap, hidden, palette, showDiff, seq, mesh }) => {
+  preview: ({ sid, comps: comps0, op, cap, hidden, palette, showDiff, seq, mesh }) => {
+    const owner = ownerOfSid(sid);
     const { vol, labels, book } = stateOf(sid);
+    // comps：主執行緒不再每幀送（plan v15 §10），用 Worker 自己存的那份（兩邊逐欄相同，worker.test 有斷言）
+    const comps = comps0 ?? compsOf.get(owner);
+    if (!comps) throw new Error(`Worker 沒有 ${owner} 的結構清單`);
     if (previewSid !== sid) {
       rings.clear();
       previewSid = sid;

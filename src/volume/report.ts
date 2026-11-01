@@ -14,12 +14,14 @@ export interface OpReport {
   blockedBy: Record<number, number>;
   /** 有被擋的片（沿 scope 的軸），由小到大。 */
   slices: SliceReport[];
-  /** 被擋的格子（整個陣列的 index；最多 BLOCKED_CAP 個）。 */
-  cells: number[];
+  /** 被擋的格子（整個陣列的 index；最多 BLOCKED_CAP 個）。Int32Array：Worker 端摘要後 transfer 回來（plan v15 C7）。 */
+  cells: Int32Array;
   skipped: number[];
 }
-const BLOCKED_CAP = 50_000;
+/** 回主執行緒的被擋格子上限（切面標紅用；slices 的每片被擋數在截斷前算完，所以「看這些片」仍然完整）。 */
+export const BLOCKED_CAP = 50_000;
 
+/** Report → OpReport：在 Worker 端做（apply／applyParked），主執行緒只拿摘要，不 clone 整個 blockedAt。 */
 export function summarize(r: Report, input: Op | LegacyOp, dims: Pick<Volume, 'X' | 'Y'>): OpReport {
   const op = upgradeOp(input);
   const axis = op.scope.axis;
@@ -37,13 +39,13 @@ export function summarize(r: Report, input: Op | LegacyOp, dims: Pick<Volume, 'X
     total: { filled: r.filled, pushed: r.pushed, removed: r.removed, blocked: r.blocked, skippedSlices: r.skipped.length, fallbackSlices: new Set(r.fallback).size },
     blockedBy: r.blockedBy,
     slices: [...per.entries()].sort((p, q) => p[0] - q[0]).map(([at, blocked]) => ({ at, blocked })),
-    cells: r.blockedAt.slice(0, BLOCKED_CAP),
+    cells: Int32Array.from(r.blockedAt.length > BLOCKED_CAP ? r.blockedAt.slice(0, BLOCKED_CAP) : r.blockedAt),
     skipped: [...r.skipped].sort((p, q) => p - q),
   };
 }
 
 /** 「4 片有 12 格被 Poly-Si 擋住」。 */
-export function blockedPhrase(r: OpReport, matName: (id: number) => string) {
+export function blockedPhrase(r: Pick<OpReport, 'total' | 'blockedBy' | 'slices'>, matName: (id: number) => string) {
   if (!r.total.blocked) return '';
   const by = Object.entries(r.blockedBy)
     .sort((p, q) => q[1] - p[1])

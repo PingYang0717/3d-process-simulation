@@ -115,9 +115,14 @@ export function ensure(s: EditState) {
   const owner = ownerOf(s);
   if (heads.get(owner) !== id) {
     heads.set(owner, id);
-    call('put', { owner, sid: id, vol: s.vol, labels: s.L.labels });
+    call('put', { owner, sid: id, vol: s.vol, labels: s.L.labels, comps: s.L.comps });
   }
   return id;
+}
+
+/** 主執行緒命名好的結構清單送給 Worker（載入後對原始一次；plan v15 §10）：之後拖拉預覽不必每幀送 comps。 */
+export function compsIn(owner: string, comps: EditState['L']['comps']) {
+  return call('comps', { owner, comps });
 }
 
 /** 載入新的原始陣列：Worker 標記結構，之前的帳簿全部丟掉。回傳的 version 是原始的版本號。 */
@@ -185,9 +190,9 @@ export function deriveIn(from: EditState, to: number, step: Step, dir: 'fwd' | '
   });
 }
 
-/** 拖拉第 2 級預覽（§4.5）：在 Worker 裡對 s（目前的版本）算預覽與網格。s 過期時 Worker 回錯誤。 */
+/** 拖拉第 2 級預覽（§4.5）：在 Worker 裡對 s（目前的版本）算預覽與網格。s 過期時 Worker 回錯誤。comps 不送（plan v15 §10），Worker 用自己那份。 */
 export function previewIn(s: EditState, req: Omit<Requests['preview']['req'], 'sid' | 'comps'>) {
-  return call('preview', { ...req, sid: sidOf(s), comps: s.L.comps });
+  return call('preview', { ...req, sid: sidOf(s) });
 }
 
 // ---- split 生命週期（plan v12 §5.3） ----

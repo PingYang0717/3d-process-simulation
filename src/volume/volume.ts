@@ -730,9 +730,8 @@ export function dilateMask(
           }
         }
       }
-  const cand: number[] = [];
-  for (let k = 0; k < best.length; k++) if (src[k] >= 0) cand.push(k);
-  cand.sort((p, q) => best[p] - best[q] || p - q);
+  // 由近到遠、同距離依 index：計數排序（plan v15 D5），結果和 comparator 排序 (best[p] − best[q]) || (p − q) 完全相同
+  const cand = sortByDist(best, src);
   for (const k of cand) {
     const lx = k % W;
     const ly = ((k - lx) / W) % H;
@@ -764,6 +763,28 @@ export function dilateMask(
     }
   }
   return { X, Y, Z, data: out };
+}
+
+/**
+ * dilate 的候選格排序（plan v15 D5）：src[k] ≥ 0 的 k 依 best[k]（整數距離平方）遞增、同距離依 k 遞增。
+ * 計數排序：先數每個 d2 的個數，前綴和，再依 k 遞增放入——同一個 d2 內自然是 k 遞增，
+ * 和 cand.sort((p, q) => best[p] − best[q] || p − q) 逐元素相同（dilate.test 對照）。O(候選數 + max d2)。
+ */
+export function sortByDist(best: Int32Array, src: Int32Array): Int32Array {
+  let maxD2 = 0;
+  let n = 0;
+  for (let k = 0; k < best.length; k++)
+    if (src[k] >= 0) {
+      n++;
+      if (best[k] > maxD2) maxD2 = best[k];
+    }
+  // hist[d + 1] = d2 == d 的個數 → 前綴和後 hist[d] = d2 == d 的起點
+  const hist = new Int32Array(maxD2 + 2);
+  for (let k = 0; k < best.length; k++) if (src[k] >= 0) hist[best[k] + 1]++;
+  for (let d = 1; d <= maxD2 + 1; d++) hist[d] += hist[d - 1];
+  const out = new Int32Array(n);
+  for (let k = 0; k < best.length; k++) if (src[k] >= 0) out[hist[best[k]]++] = k;
+  return out;
 }
 
 /** 缺陷的形狀判定：abs 外框裡，box／slab 全部，sphere 取內切橢球（格子中心）。 */
@@ -1320,10 +1341,14 @@ export interface RelabelInPlace {
   before: Int32Array;
 }
 
+/** 測試與 bench 用：最近一次 relabelInPlace 的舊值快照大小（PF 的格數；plan v15 A3 目標 ≤ F）。 */
+export const relabelStats = { snapshot: 0 };
+
 /**
  * relabelFast 的原地版本（plan v9 §4.3）：labels 直接改成新的編號，不影印整個陣列。
  * - dataBefore：改前的體素在 R 裡的裁片（取代整個改前陣列；R 外面改前改後相同）。
- * - 任何寫入之前先把 Smax（R ∪ 碰到的結構的外框，⊇ 最後的 S）裡的舊 labels 裁下來當快照，之後讀舊值都讀它。
+ * - 任何寫入之前先把 F（R ∪ 掉了體素的結構的外框＝要重新 flood fill 的範圍）裡的舊 labels 裁下來當快照 PF，
+ *   之後讀舊值都讀它（plan v15 A3：以前快照 Smax ＝ R ∪ 所有碰到的結構的外框，只是相鄰的基板、STI 也整塊包進來）。
  * - moved(i, o)：舊的第 i 格（舊編號 o）搬到哪。
  */
 export function relabelInPlace(
@@ -1364,21 +1389,6 @@ export function relabelInPlace(
         if (inR(x, y, z) && chg[((z - R.z0) * RH + y - R.y0) * RW + x - R.x0]) lost[l] = 1;
       }
     }
-  // 舊值快照：Smax = R ∪ 碰到的結構的外框（掉了體素的、被併掉的都是碰到的，所以 ⊇ 最後的 S）
-  const Smax: BBox = { ...R };
-  for (let k = 0; k < nOld; k++)
-    if (touched[k]) {
-      const bb = prevComps[k].bbox;
-      Smax.x0 = Math.min(Smax.x0, bb.x0);
-      Smax.x1 = Math.max(Smax.x1, bb.x1);
-      Smax.y0 = Math.min(Smax.y0, bb.y0);
-      Smax.y1 = Math.max(Smax.y1, bb.y1);
-      Smax.z0 = Math.min(Smax.z0, bb.z0);
-      Smax.z1 = Math.max(Smax.z1, bb.z1);
-    }
-  const PS = cropBox(labels, next, Smax);
-  const SW = Smax.x1 - Smax.x0 + 1;
-  const SH = Smax.y1 - Smax.y0 + 1;
   const S: BBox = { ...R };
   const grow = (bb: BBox) => {
     S.x0 = Math.min(S.x0, bb.x0);
@@ -1390,6 +1400,12 @@ export function relabelInPlace(
   };
   for (let k = 0; k < nOld; k++) if (lost[k]) grow(prevComps[k].bbox);
   const F: BBox = { ...S }; // 要重新 flood fill 的範圍
+  // 舊值快照只要 F（plan v15 A3）：步驟 2～6 只寫 F 裡的格子（flood fill 只走被清掉的格子，清掉的都在 F 裡），
+  // S \ F 是步驟 7 才併進來的結構，在「寫回 S」之前還是舊值，到時直接從 labels 讀
+  const PF = cropBox(labels, next, F);
+  const FW = F.x1 - F.x0 + 1;
+  const FH = F.y1 - F.y0 + 1;
+  relabelStats.snapshot = PF.length;
   // 2. 清掉：掉了體素的結構（F 裡）、R 裡改過的格子
   for (let z = F.z0; z <= F.z1; z++)
     for (let y = F.y0; y <= F.y1; y++) {
@@ -1487,10 +1503,10 @@ export function relabelInPlace(
   for (let z = F.z0; z <= F.z1; z++)
     for (let y = F.y0; y <= F.y1; y++) {
       const row = (z * Y + y) * X;
-      const prow = ((z - Smax.z0) * SH + y - Smax.y0) * SW - Smax.x0;
+      const prow = ((z - F.z0) * FH + y - F.y0) * FW - F.x0;
       for (let x = F.x0; x <= F.x1; x++) {
         const i = row + x;
-        const o = PS[prow + x];
+        const o = PF[prow + x];
         if (o < 0 || !lost[o]) continue;
         const j = moved(i, o);
         if (j < 0) continue;
@@ -1525,6 +1541,15 @@ export function relabelInPlace(
     else target[c] = comps.length, comps.push(named[c]);
     comps[target[c]] = named[c];
   });
+  // 改前的 labels 在 S 裡（Step.labels.before）：S \ F 這時還是舊值，直接從 labels 裁；F 那一塊用快照 PF 蓋回去
+  const SW2 = S.x1 - S.x0 + 1;
+  const SH2 = S.y1 - S.y0 + 1;
+  const before = cropBox(labels, next, S);
+  for (let z = F.z0; z <= F.z1; z++)
+    for (let y = F.y0; y <= F.y1; y++) {
+      const f0 = ((z - F.z0) * FH + y - F.y0) * FW;
+      before.set(PF.subarray(f0, f0 + FW), ((z - S.z0) * SH2 + y - S.y0) * SW2 + F.x0 - S.x0);
+    }
   // 寫回 S：新片段、被併掉的照舊結構
   const mergedAway = new Int32Array(nOld).fill(-1);
   members.forEach(({ gs }, c) => gs.forEach((g) => g !== target[c] && (mergedAway[g] = target[c])));
@@ -1551,14 +1576,6 @@ export function relabelInPlace(
   }
   while (n > 0 && holes.has(n - 1)) n--;
   comps.length = n;
-  // 改前的 labels 在 S 裡（S ⊆ Smax，從快照裁，不必再讀已改寫的陣列）
-  const SW2 = S.x1 - S.x0 + 1;
-  const before = new Int32Array(SW2 * (S.y1 - S.y0 + 1) * (S.z1 - S.z0 + 1));
-  for (let z = S.z0, k = 0; z <= S.z1; z++)
-    for (let y = S.y0; y <= S.y1; y++, k += SW2) {
-      const s0 = ((z - Smax.z0) * SH + y - Smax.y0) * SW + S.x0 - Smax.x0;
-      before.set(PS.subarray(s0, s0 + SW2), k);
-    }
   for (const mv of moves) moveLabel(labels, next, mv.box, mv.from, mv.to);
   return { comps, S, moves, before };
 }
@@ -1571,6 +1588,24 @@ export function moveLabel(labels: Int32Array, d: { X: number; Y: number }, b: BB
       const row = (z * d.Y + y) * d.X;
       for (let i = row + b.x0; i <= row + b.x1; i++) if (labels[i] === from) labels[i] = to;
     }
+}
+
+/**
+ * 選取 mask 的原地差量更新（plan v15 A1）：只在 box 裡依目前的 labels 與 on（結構編號 → 是否選取）重算
+ * mask[i] = labels[i] ≥ 0 && on[labels[i]]（inScope 有給就再 ∧ inScope(i)）；box 外不動。
+ * 正確性靠一步之後的不變量：stepTouch 外 labels 沒變、外面的結構編號對到的 key 也沒變。純函式，maskOf 是對照。
+ */
+export function patchMask(mask: Uint8Array, labels: Int32Array, on: Uint8Array, dims: { X: number; Y: number }, box: BBox, inScope?: (i: number) => boolean) {
+  const { X, Y } = dims;
+  for (let z = box.z0; z <= box.z1; z++)
+    for (let y = box.y0; y <= box.y1; y++) {
+      const row = (z * Y + y) * X;
+      for (let i = row + box.x0, e = row + box.x1; i <= e; i++) {
+        const l = labels[i];
+        mask[i] = l >= 0 && l < on.length && on[l] && (!inScope || inScope(i)) ? 1 : 0;
+      }
+    }
+  return mask;
 }
 
 /**

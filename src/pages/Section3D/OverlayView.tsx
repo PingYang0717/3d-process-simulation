@@ -163,7 +163,7 @@ export function OverlayView({ ed, axis, at, ids, onOpen }: { ed: Editor; axis: A
     return () => ro.disconnect();
   }, [VW, VH]);
   const many = splits.length > CATEGORY.length;
-  // 滑過加粗：直接改 svg 裡那條路徑的 data-hover（樣式在 svg 的 <style>），不經過 React state
+  // 滑過加粗：直接改 svg 裡那條路徑的 data-hover（樣式在 styles.css 的 .overlay-stage svg path[data-hover="1"]），不經過 React state
   const svgRef = useRef<SVGSVGElement>(null);
   const onHover = useCallback((id: string | null) => {
     const svg = svgRef.current;
@@ -179,7 +179,6 @@ export function OverlayView({ ed, axis, at, ids, onOpen }: { ed: Editor; axis: A
           <div style={{ position: 'absolute', width: `${(W / VW) * 100}%`, height: `${(H / VH) * 100}%`, left: `${(-view.u0 / VW) * 100}%`, top: `${(-view.v0 / VH) * 100}%` }}>
             <canvas ref={canvasRef} style={{ width: '100%', height: '100%', imageRendering: 'pixelated', display: 'block', opacity: 0.55 }} />
             <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
-              <style>{'path[data-hover="1"]{stroke-width:3;stroke-opacity:1}'}</style>
               <path d={baseD} fill="none" stroke="#000" strokeWidth={2} vectorEffect="non-scaling-stroke" />
               {lines.map(({ s, k, d }) =>
                 hidden.has(s.id) ? null : <path key={s.id} data-id={s.id} d={d} fill="none" stroke={CATEGORY[k % CATEGORY.length]} strokeOpacity={many ? 0.5 : 1} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />,

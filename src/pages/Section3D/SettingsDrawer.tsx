@@ -3,6 +3,8 @@ import { Button, Drawer, Flex, InputNumber, Select, Switch, Typography } from 'a
 import { MatLabel } from '../../ui/Swatch';
 import { Section } from '../../ui/Stat';
 import type { Editor } from './editor';
+import { usePersisted } from '../../ui/persist';
+import { QUALITY_EVENT, type Quality, isQuality } from './views';
 
 const { Text } = Typography;
 
@@ -34,6 +36,12 @@ export function SettingsDrawer({
   onClose: () => void;
   onLoad: () => void;
 }) {
+  // 畫質（plan v15 B6）：靜止時的 pixelRatio 上限；存 localStorage（se3d.v1.quality），改了立刻通知 3D（usePersisted 的寫入是 idle 時才落地）
+  const [quality, setQuality] = usePersisted<Quality>('quality', 'standard', isQuality);
+  const changeQuality = (q: Quality) => {
+    setQuality(q);
+    window.dispatchEvent(new CustomEvent(QUALITY_EVENT, { detail: q }));
+  };
   return (
     <Drawer title="設定" open={open} onClose={onClose} width={380}>
       <Flex vertical gap={24}>
@@ -64,6 +72,17 @@ export function SettingsDrawer({
         <Section title="顯示">
           <Row label="套用後閃一下改到的範圍" sub="改後模式不標色；套用一步後在改到的外框畫橘色虛線，1.5 秒淡出（不碰網格）">
             <Switch checked={ed.stepFlash} onChange={ed.setStepFlash} />
+          </Row>
+          <Row label="畫質" sub="3D 靜止時每 CSS px 畫幾個點：標準 1.5（和 2 肉眼難辨、填色成本約一半）、高 2；轉視角、拖把手時都是 1">
+            <Select
+              value={quality}
+              onChange={changeQuality}
+              style={{ width: 150 }}
+              options={[
+                { value: 'standard' as const, label: '標準（1.5）' },
+                { value: 'high' as const, label: '高（2）' },
+              ]}
+            />
           </Row>
         </Section>
         <Section title="Split 與記憶體">

@@ -354,6 +354,8 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 .design-preview { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow: auto; padding: 6px 8px; background: var(--c-bg-2, #fafafa); border-radius: 6px; }
 .overlay-view { display: flex; gap: 12px; height: calc(100% - 56px); min-height: 360px; }
 .overlay-stage { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; background: #fff; border-radius: 8px; padding: 8px; }
+/* 疊圖：圖例滑過的那條輪廓加粗（OverlayView 直接改 path 的 data-hover，不經 React） */
+.overlay-stage svg path[data-hover="1"] { stroke-width: 3; stroke-opacity: 1; }
 .overlay-legend { width: 240px; flex: none; display: flex; flex-direction: column; gap: 4px; background: #fff; border-radius: 8px; padding: 10px; overflow: auto; }
 .legend-row { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; }
 .legend-row.on { background: var(--c-bg-2, #f0f5ff); }

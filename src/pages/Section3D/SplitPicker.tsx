@@ -6,6 +6,7 @@ import { CopyOutlined, DeleteOutlined, DownOutlined, EditOutlined, ExperimentOut
 import { BASE_ID, type Editor, type Split, changedOf } from './editor';
 import { factorsOf, levelCell } from './matrix';
 import { CATEGORY } from './colors';
+import { memoEd } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
@@ -19,7 +20,7 @@ export function StateDot({ s }: { s: Split }) {
   );
 }
 
-export function SplitPicker({ ed }: { ed: Editor }) {
+function SplitPickerImpl({ ed }: { ed: Editor }) {
   const { modal } = App.useApp();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -196,3 +197,5 @@ export function SplitPicker({ ed }: { ed: Editor }) {
     </div>
   );
 }
+
+export const SplitPicker = memoEd(SplitPickerImpl, ['active', 'activeId', 'designs', 'nmPerVoxel', 'splits'], 'SplitPicker');

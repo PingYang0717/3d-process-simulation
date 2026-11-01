@@ -24,7 +24,7 @@ import { type EditState, type Local, type Op, type Policy, bboxOfKeys, defectBox
 import { type Design, type FactorCtx, combosOf, nameOfCombo, opsOfCombo } from '../../volume/factors';
 import type { BrushShape } from '../../volume/volume';
 import type { FractionArray } from '../../volume/vti';
-import { type Scope, axisIndex, axisLen, boxRange, clampScope, fullScope, isFullScope, scopeBox } from '../../volume/scope';
+import { type Scope, axisIndex, axisLen, boxRange, clampScope, fullScope, isFullScope, sameScope, scopeBox } from '../../volume/scope';
 
 /** 範圍：整個結構（預設）、只有目前這一片、自訂一段；軸＝目前主切面的法線軸。 */
 export type ScopeMode = 'whole' | 'slice' | 'custom';
@@ -86,6 +86,8 @@ import type { PickedHandle } from './SliceEditor';
 import { ModelStore } from '../../slice/model';
 import { pushOpOf } from './handles3d';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
+import { useEvent } from '../../ui/useEvent';
+import { useStable } from '../../ui/stable';
 
 export { type EditState, type Op, applyOp, matNameOf, opText, replay } from '../../volume/ops';
 
@@ -217,8 +219,11 @@ export function statsOf(s: Split, origCounts: Float64Array | null): SplitStats {
   if (!s.buf) return { changed: 0, diffBox: null, counts: origCounts ?? new Float64Array(256) };
   let st = statsCache.get(s.cur);
   if (!st) {
+    const t0 = import.meta.env.DEV ? performance.now() : 0;
     st = buffersStats(s.cur.vol, s.buf);
     statsCache.set(s.cur, st);
+    // 量測用（perf.cjs，plan v15 A2）：這一步算 diff 外框（diffBoxOfAxes）花了多久
+    if (import.meta.env.DEV) (window as unknown as { __diffBoxMs?: number }).__diffBoxMs = performance.now() - t0;
   }
   return st;
 }
@@ -510,6 +515,13 @@ export function useEditor() {
   }, [splits, orig, models]);
   const hist = active?.hist ?? [];
   const future = active?.future ?? [];
+  // 量測用（perf.cjs，plan v15 D1）：目前 split 的復原堆疊位元組 Σ stepBytes（getter，讀的時候才算）
+  const histRef = useRef(hist);
+  histRef.current = hist;
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    Object.defineProperty(window, '__histBytes', { get: () => histRef.current.reduce((n, h) => n + stepBytes(h.step), 0), configurable: true });
+  }, []);
 
   const matName = useMemo(() => matNameOf(materials), [materials]);
   const matNames = useMemo(() => Object.fromEntries(materials.map((m) => [m.id, m.name])), [materials]);
@@ -522,14 +534,21 @@ export function useEditor() {
   /** 選取結構沿 editAxis 的起止（「整個結構（z 0～127）」的數字）。 */
   const selRange = useMemo<[number, number] | null>(() => (selBox ? boxRange(selBox, editAxis) : null), [selBox, editAxis]);
   /** 實際送進 Op 的範圍：整個結構＝整段（選取本來就只有那段，重播到別的 split 也不會被切掉）。 */
-  const scope: Scope = useMemo(() => {
-    if (scopeMode === 'slice') {
-      const t = cursor[axisIndex(editAxis)];
-      return clampScope({ axis: editAxis, lo: t, hi: t }, vol);
-    }
+  /*
+   * 身分規則（plan v15 §4、§10）：
+   * - 同一個選取裡 selMask／affMask 陣列身分不變（useSelMasks 原地維護）；
+   * - 任何要跟著步驟重算的 memo 都必須把 vol 或 L 放進 deps（不能靠 selMask 身分）；
+   * - scope／gesture／geo／selBBox 以值比較：值相同就是同一個物件（useStable），cursor 連點、每一步都不會換新；
+   * - 回傳給 UI 的事件 handler 都經 useEvent，身分永遠相同；op factory（pushOp、cdOp…）、matName 維持 useCallback／useMemo，
+   *   它們的身分代表輸入（sel、scope）變了，OpCard 的 useMemo 靠它重算。
+   */
+  const sliceAt = scopeMode === 'slice' ? cursor[axisIndex(editAxis)] : -1;
+  const scopeRaw: Scope = useMemo(() => {
+    if (scopeMode === 'slice') return clampScope({ axis: editAxis, lo: sliceAt, hi: sliceAt }, vol);
     if (scopeMode === 'custom') return clampScope({ axis: editAxis, lo: customRange[0], hi: customRange[1] }, vol);
     return fullScope(vol, editAxis);
-  }, [scopeMode, editAxis, cursor, customRange, vol]);
+  }, [scopeMode, editAxis, sliceAt, customRange[0], customRange[1], vol]); // eslint-disable-line react-hooks/exhaustive-deps
+  const scope = useStable(scopeRaw, sameScope);
   const setCustom = useCallback(
     (lo: number, hi: number) => {
       const c = clampScope({ axis: editAxis, lo, hi }, vol);
@@ -556,7 +575,10 @@ export function useEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selKey, editAxis]);
   // 選取 mask 原地維護（plan v15 A1）：同一個選取裡身分不變；要跟著步驟重算的 memo 把 vol／L 放進 deps
+  const tMask = import.meta.env.DEV ? performance.now() : 0;
   const { selMask, affMask } = useSelMasks(L, sel, selKey, vol, cur.owner ?? BASE_ID, scope, selBox, lastStep);
+  // 量測用（perf.cjs，plan v15 A1）：這次 render 維護 selMask／affMask 花了多久（沒事做時 ≈ 0）
+  if (import.meta.env.DEV) (window as unknown as { __selMaskMs?: number }).__selMaskMs = performance.now() - tMask;
   const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
 
   /** 目前 split 和原始不同的外框（「對準差異」、縮圖；plan v12 §5.2）。 */
@@ -1578,6 +1600,49 @@ export function useEditor() {
   }, [sel.size]);
   useEffect(() => setFocus(null), [origState]);
 
+  // 回傳給 UI 的事件 handler 都經 useEvent（plan v15 B2）：身分永遠相同、呼叫時用最新的 closure，子元件才能 memo、listener 只掛一次。
+  // 不包的：commit／undo／redo（已是 useCallback、有 effect 依賴它們）、op factory（pushOp、cdOp…；OpCard 靠它們的身分重算）、
+  // matName／opText（useMemo／useCallback，身分代表 materials 變了）、useState 的 setter（本來就穩定）。
+  const ev = {
+    resetAll: useEvent(resetAll),
+    setActiveId: useEvent(setActiveId),
+    addSplit: useEvent(addSplit),
+    duplicateSplit: useEvent(duplicateSplit),
+    renameSplit: useEvent(renameSplit),
+    removeSplit: useEvent(removeSplit),
+    removeSplits: useEvent(removeSplits),
+    ensureLive: useEvent(ensureLive),
+    exportBytes: useEvent(exportBytes),
+    addDesign: useEvent(addDesign),
+    cancelDesign: useEvent(cancelDesign),
+    commitTo: useEvent(commitTo),
+    factorCtx: useEvent(factorCtx),
+    setSplitTags: useEvent(setSplitTags),
+    selectKeys: useEvent(selectKeys),
+    clearSel: useEvent(clearSel),
+    pickVoxel: useEvent(pickVoxel),
+    selectMaterial: useEvent(selectMaterial),
+    selectAll: useEvent(selectAll),
+    toggleHidden: useEvent(toggleHidden),
+    stepCursor: useEvent(stepCursor),
+    voxelCoord: useEvent(voxelCoord),
+    setCustom: useEvent(setCustom),
+    translate: useEvent(translate),
+    push: useEvent(push),
+    level: useEvent(level),
+    sculpt: useEvent(sculpt),
+    levelTarget: useEvent(levelTarget),
+    levelWhole: useEvent(levelWhole),
+    setMaterial: useEvent(setMaterial),
+    loadVolume: useEvent(loadVolume),
+    demo: useEvent(demo),
+    renameMaterial: useEvent(renameMaterial),
+    setMaterialColor: useEvent(setMaterialColor),
+    setMaterialKind: useEvent(setMaterialKind),
+    park: useEvent(parkOne),
+    stats: useEvent((s: Split) => statsOf(s, origCounts)),
+  };
+
   return {
     page,
     setPage,
@@ -1596,37 +1661,37 @@ export function useEditor() {
     future,
     undo,
     redo,
-    resetAll,
+    resetAll: ev.resetAll,
     busy,
     splits,
     activeId,
-    setActiveId,
+    setActiveId: ev.setActiveId,
     active,
     isBase,
-    addSplit,
-    duplicateSplit,
-    renameSplit,
-    removeSplit,
-    removeSplits,
-    ensureLive,
-    park: parkOne,
+    addSplit: ev.addSplit,
+    duplicateSplit: ev.duplicateSplit,
+    renameSplit: ev.renameSplit,
+    removeSplit: ev.removeSplit,
+    removeSplits: ev.removeSplits,
+    ensureLive: ev.ensureLive,
+    park: ev.park,
     liveK: liveKSetting,
     setLiveK,
     liveLimit: liveLimit(),
     histBytes,
     setHistBytes,
     lastStep,
-    stats: (s: Split) => statsOf(s, origCounts),
+    stats: ev.stats,
     origCounts,
     diffBox,
-    exportBytes,
-    addDesign,
-    cancelDesign,
+    exportBytes: ev.exportBytes,
+    addDesign: ev.addDesign,
+    cancelDesign: ev.cancelDesign,
     genProgress,
-    commitTo,
-    factorCtx,
+    commitTo: ev.commitTo,
+    factorCtx: ev.factorCtx,
     designs,
-    setSplitTags,
+    setSplitTags: ev.setSplitTags,
     exportOff,
     setExportOff,
     compareBase,
@@ -1648,18 +1713,18 @@ export function useEditor() {
     selMask,
     affMask,
     selCount,
-    selectKeys,
-    clearSel,
-    pickVoxel,
-    selectMaterial,
-    selectAll,
+    selectKeys: ev.selectKeys,
+    clearSel: ev.clearSel,
+    pickVoxel: ev.pickVoxel,
+    selectMaterial: ev.selectMaterial,
+    selectAll: ev.selectAll,
     hidden,
-    toggleHidden,
+    toggleHidden: ev.toggleHidden,
     cursor,
     setCursor,
-    stepCursor,
+    stepCursor: ev.stepCursor,
     cursorIndex,
-    voxelCoord,
+    voxelCoord: ev.voxelCoord,
     commit,
     report,
     setReport,
@@ -1683,7 +1748,7 @@ export function useEditor() {
     editAxis,
     setEditAxis,
     customRange,
-    setCustom,
+    setCustom: ev.setCustom,
     selBox,
     selRange,
     focus,
@@ -1707,24 +1772,24 @@ export function useEditor() {
     setStepFlash,
     menu,
     setMenu,
-    translate,
+    translate: ev.translate,
     translateOp,
-    push,
+    push: ev.push,
     pushOp,
     materialOp,
     levelOp,
-    level,
+    level: ev.level,
     opFor,
-    sculpt,
-    levelTarget,
-    levelWhole,
+    sculpt: ev.sculpt,
+    levelTarget: ev.levelTarget,
+    levelWhole: ev.levelWhole,
     previewHook,
-    setMaterial,
-    loadVolume,
-    demo,
-    renameMaterial,
-    setMaterialColor,
-    setMaterialKind,
+    setMaterial: ev.setMaterial,
+    loadVolume: ev.loadVolume,
+    demo: ev.demo,
+    renameMaterial: ev.renameMaterial,
+    setMaterialColor: ev.setMaterialColor,
+    setMaterialKind: ev.setMaterialKind,
   };
 }
 

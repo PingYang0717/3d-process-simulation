@@ -6,11 +6,12 @@ import { Section } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
 import { matOf } from './Inspector';
+import { memoEd } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
 /** 右欄「改了哪些」：原始 → 現在；最底下「丟掉所有改動」（plan v10 D8）。 */
-export function ChangesTab({ ed }: { ed: Editor }) {
+function ChangesTabImpl({ ed }: { ed: Editor }) {
   const total = ed.vol.data.length;
   const nm = ed.nmPerVoxel;
   const fromTo = (a: number, b: number) => `${a} → ${b}（${signed(b - a)} vx，${signed((b - a) * nm, 1)} nm）`;
@@ -179,3 +180,5 @@ export function ChangesTab({ ed }: { ed: Editor }) {
     </Flex>
   );
 }
+
+export const ChangesTab = memoEd(ChangesTabImpl, ['busy', 'changedKeys', 'compByKey', 'comps', 'diff', 'ledger', 'matName', 'materials', 'nmPerVoxel', 'orig', 'origByKey', 'resetAll', 'vol'], 'ChangesTab');

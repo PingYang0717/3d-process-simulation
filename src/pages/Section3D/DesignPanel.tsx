@@ -20,6 +20,7 @@ import { whoText } from './opWords';
 const { Text } = Typography;
 
 import { type Draft, loadDraft, nextDraft, saveDraft } from './draft';
+import { memoEd } from '../../ui/memoEd';
 const isTemplates = (v: unknown): v is DesignTemplate[] => Array.isArray(v);
 
 type StepState = 'done' | 'now' | 'todo';
@@ -54,7 +55,7 @@ const Row = ({ label, children }: { label: string; children: React.ReactNode }) 
   </div>
 );
 
-export function DesignPanel({ ed, onMade, onOpen3D, onOpenStructure, title = true }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void; onOpenStructure: () => void; title?: boolean }) {
+function DesignPanelImpl({ ed, onMade, onOpen3D, onOpenStructure, title = true }: { ed: Editor; onMade: (ids: string[]) => void; onOpen3D: (id: string) => void; onOpenStructure: () => void; title?: boolean }) {
   const { message, modal } = App.useApp();
   // 草稿不持久化（plan v14 §5.4）：重新整理＝空的；切頁回來還在（draft.ts 的模組記憶體）
   const [draft, setDraft] = useState<Draft>(loadDraft);
@@ -372,3 +373,5 @@ export function DesignPanel({ ed, onMade, onOpen3D, onOpenStructure, title = tru
     </div>
   );
 }
+
+export const DesignPanel = memoEd(DesignPanelImpl, ['L', 'vol', 'comps', 'active', 'busy', 'cancelDesign', 'factorCtx', 'genProgress', 'hidden', 'matName', 'materials', 'nmPerVoxel', 'orig', 'sel', 'selComps', 'splits', 'cursor'], 'DesignPanel');

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { App, Badge, Button, Divider, Drawer, Dropdown, Flex, InputNumber, Menu, Modal, Popover, Segmented, Slider, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
@@ -24,7 +24,7 @@ import {
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { type Axis, type BBox, type Vec3, directionName, hexToRgb, unionBBox } from '../../volume/volume';
+import { type Axis, type BBox, type Vec3, directionName, hexToRgb, sameBBox } from '../../volume/volume';
 import { ZipWriter, crc32 } from '../../volume/zip';
 import { download, openSaveSink, type SaveSink } from '../../ui/download';
 import { MatLabel } from '../../ui/Swatch';
@@ -63,6 +63,33 @@ function WithLivePv<P>({ live, pv, children }: { live: LiveValue<P | null>; pv: 
   const l = useLive(live);
   return <>{children(l ?? pv)}</>;
 }
+/** 訂閱一個 live value：值變了只有這一小段重 render。 */
+function WithLive<T>({ live, children }: { live: LiveValue<T>; children: (v: T) => ReactNode }) {
+  return <>{children(useLive(live))}</>;
+}
+/**
+ * 欄寬（plan v15 B2）：拖拉中走 live value（只有那一欄與 Resizer 重 render，Section3DPage 不 commit）；
+ * 停下來 300 ms 後才寫回 usePersisted（localStorage）。初始值從 persisted 來。
+ */
+function useLiveWidth(key: string, init: number): LiveValue<number> {
+  const [w, setW] = usePersisted(key, init);
+  const live = useLiveValue(w);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const off = live.subscribe(() => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => setW(live.get()), 300);
+    });
+    return () => {
+      off();
+      if (t) {
+        clearTimeout(t);
+        setW(live.get());
+      }
+    };
+  }, [live, setW]);
+  return live;
+}
 /** 3D 右下角：拖拉中範圍太大、3D 沒有即時預覽（plan v14 §5.1）。 */
 function TooBigNote({ live }: { live: LiveValue<boolean> }) {
   const on = useLive(live);
@@ -81,6 +108,9 @@ import type { MeshData } from '../../volume/volume';
 import type { Clip, ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceEditor, SliceView, View3D } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
+import { useEvent } from '../../ui/useEvent';
+import { useStable } from '../../ui/stable';
+import { countRender } from '../../ui/memoEd';
 import { Resizer } from '../../ui/Resizer';
 import { Inspector, matOf } from './Inspector';
 import { ChangesTab } from './ChangesTab';
@@ -142,17 +172,16 @@ function Brand() {
 
 export default function Section3DPage() {
   const ed = useEditor();
-  // 開發模式：e2e（scripts/e2e/m9.cjs、perf.cjs）讀編輯器狀態
+  // 開發模式：e2e（scripts/e2e/m9.cjs、perf.cjs）從 window.__ed 讀編輯器狀態（正式打包不會有）
   if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
-  // 開發模式：整頁 render 次數（perf.cjs 量主切面上滑鼠移動時整頁 render 幾次，plan v9 P7）
+  // 開發模式：整頁 render 次數（perf.cjs 量主切面上滑鼠移動、拖欄寬時整頁 render 幾次，plan v9 P7；StrictMode 下一次 commit 算 2）；
+  // __rendersBy.Section3DPage 是 commit 次數（plan v15 B2，layout effect 裡數）
   if (import.meta.env.DEV) (window as unknown as { __renders?: number }).__renders = ((window as unknown as { __renders?: number }).__renders ?? 0) + 1;
-  // 開發模式：e2e 腳本從 window.__ed 讀狀態（正式打包不會有）
-  if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = ed;
-  // 開發模式：整頁 render 次數（perf.cjs 量主切面上滑鼠移動時整頁 render 幾次，plan v9 P7）
-  if (import.meta.env.DEV) (window as unknown as { __renders?: number }).__renders = ((window as unknown as { __renders?: number }).__renders ?? 0) + 1;
+  useLayoutEffect(() => countRender('Section3DPage'));
   const { message, modal } = App.useApp();
-  const [leftW, setLeftW] = usePersisted('leftW', 240);
-  const [rightW, setRightW] = usePersisted('rightW', 350);
+  // 欄寬（plan v15 B2）：拖拉中每一幀只有那一欄重 render（live value），整頁不動；停下來 300 ms 才寫進 persisted state
+  const leftW = useLiveWidth('leftW', 240);
+  const rightW = useLiveWidth('rightW', 350);
   const narrow = useMedia('(max-width: 1199px)');
   const tiny = useMedia('(max-width: 799px)');
   /** 實驗頁：寬度 < 1100 px 時設計區變抽屜（plan v12 §5.4）。 */
@@ -196,15 +225,15 @@ export default function Section3DPage() {
   /** 切到編輯頁後要對準什麼：'diff'＝目前 split 的差異外框、BBox＝某個結構（設計區的「在 3D 看」）。 */
   const pendingFocus = useRef<false | 'diff' | BBox>(false);
   /** 實驗頁的「在 3D 看」（plan v12 §5.4、§10 D10）：設為目前（parked 先載入）→ 切到編輯頁 → 對準差異。 */
-  const open3D = async (id: string) => {
+  const open3D = useEvent(async (id: string) => {
     await ed.setActiveId(id);
     pendingFocus.current = 'diff';
     ed.setPage('edit');
-  };
-  const openStructure3D = () => {
+  });
+  const openStructure3D = useEvent(() => {
     pendingFocus.current = ed.selBox ?? 'diff';
     ed.setPage('edit');
-  };
+  });
   useEffect(() => {
     if (ed.page !== 'edit' || !pendingFocus.current) return;
     let tries = 0;
@@ -366,70 +395,77 @@ export default function Section3DPage() {
   };
 
   // B：改後 ⇄ 改前；D：改後 ⇄ 差異；, .：剖面前後一片；F 對準選取、H 全貌、1/2/3/4 視角；Esc：還原放大的切面
+  // 鍵盤（plan v15 B7）：handler 每次 render 換成最新的 closure、放在 ref；listener 只在掛載時掛一次
+  const keyDown = (e: KeyboardEvent) => {
+    if (typingIn(e.target)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // 實驗頁沒有 3D：單鍵只留 ?
+    if (ed.page === 'lab') {
+      if (e.key === '?' && !overlayOpen()) setHelpOpen(true);
+      return;
+    }
+    // 說明、設定、Modal 開著時單鍵留給它們，不動 3D
+    if (overlayOpen()) return;
+    const k = e.key.toLowerCase();
+    const views: Record<string, ViewPreset> = { f: 'fit', h: 'home', home: 'home', '1': 'front', '2': 'top', '3': 'side', '4': 'iso' };
+    if (editing && (e.key === ',' || e.key === '.' || e.key === 'PageUp' || e.key === 'PageDown')) {
+      // 2D 編輯：換主切面的片（PgUp／PgDn 不再是整塊前後移動）
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      ed.stepCursor(ed.editAxis, e.key === '.' || e.key === 'PageDown' ? (e.shiftKey ? 10 : 1) : e.shiftKey ? -10 : -1);
+      return;
+    }
+    if (k === 'e') {
+      // E（D9）：瀏覽 → 3D 把手 → 2D 剖面 → 瀏覽。2D 剖面裡 E 點一下＝回瀏覽；按住＝只抓邊（放開時判斷）
+      if (editing) {
+        if (!e.repeat) {
+          eDownAt.current = Date.now();
+          draggedSinceE.current = false;
+        }
+      } else if (!ed.sel.size) message.info({ key: 'edit', content: '先選一個結構，再按 E 進入聚焦編輯' });
+      else if (ed.focus) enterEdit();
+      else enterFocus();
+      return;
+    }
+    if (k === 'g') {
+      // 對準差異（plan v12 §5.4）
+      if (ed.diffBox) view.current?.focusBox(ed.diffBox);
+      else message.info({ key: 'aim', content: '這個 split 還沒有改動' });
+      return;
+    }
+    if (k === 'b') setMode((m) => (m === 'orig' ? 'now' : 'orig'));
+    else if (k === 'd') setMode((m) => (m === 'diff' ? 'now' : 'diff'));
+    else if ((e.key === ',' || e.key === '.') && clipOn) setClipAt(clipAxis, (clipFollow ? cursorAt(clipAxis) : clipPos[clipAxis]) + (e.key === '.' ? 1 : -1));
+    else if (views[k]) view.current?.setView(views[k]);
+    else if (e.key === '?') setHelpOpen(true);
+    else if (e.key === 'Escape' && cardAt && !ed.menu) {
+      // 先關卡片
+      e.stopImmediatePropagation();
+      setCardAt(null);
+    } else if (e.key === 'Escape' && ed.focus && !ed.menu) {
+      // 離開聚焦編輯，選取與範圍留著（右鍵選單開著時先關選單）
+      e.stopImmediatePropagation();
+      leaveFocus();
+    }
+  };
+  const keyUp = (e: KeyboardEvent) => {
+    if (e.key.toLowerCase() !== 'e' || !editing || typingIn(e.target)) return;
+    if (Date.now() - eDownAt.current < 300 && !draggedSinceE.current) leaveFocus();
+  };
+  const keyRef = useRef({ down: (_e: KeyboardEvent) => {}, up: (_e: KeyboardEvent) => {} });
+  keyRef.current = { down: keyDown, up: keyUp };
+  // 掛在 document（capture）：SliceEditor 的把手／拖拉、OpCard、View3D 的 Esc 都掛在 window（capture），要搶在這裡前面
+  //（以前這個 effect 每次 render 重掛、排在最後，順序是靠「父元件的 effect 最後跑」撐出來的；只掛一次後改用層級保證）
   useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (typingIn(e.target)) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      // 實驗頁沒有 3D：單鍵只留 ?
-      if (ed.page === 'lab') {
-        if (e.key === '?' && !overlayOpen()) setHelpOpen(true);
-        return;
-      }
-      // 說明、設定、Modal 開著時單鍵留給它們，不動 3D
-      if (overlayOpen()) return;
-      const k = e.key.toLowerCase();
-      const views: Record<string, ViewPreset> = { f: 'fit', h: 'home', home: 'home', '1': 'front', '2': 'top', '3': 'side', '4': 'iso' };
-      if (editing && (e.key === ',' || e.key === '.' || e.key === 'PageUp' || e.key === 'PageDown')) {
-        // 2D 編輯：換主切面的片（PgUp／PgDn 不再是整塊前後移動）
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        ed.stepCursor(ed.editAxis, e.key === '.' || e.key === 'PageDown' ? (e.shiftKey ? 10 : 1) : e.shiftKey ? -10 : -1);
-        return;
-      }
-      if (k === 'e') {
-        // E（D9）：瀏覽 → 3D 把手 → 2D 剖面 → 瀏覽。2D 剖面裡 E 點一下＝回瀏覽；按住＝只抓邊（放開時判斷）
-        if (editing) {
-          if (!e.repeat) {
-            eDownAt.current = Date.now();
-            draggedSinceE.current = false;
-          }
-        } else if (!ed.sel.size) message.info({ key: 'edit', content: '先選一個結構，再按 E 進入聚焦編輯' });
-        else if (ed.focus) enterEdit();
-        else enterFocus();
-        return;
-      }
-      if (k === 'g') {
-        // 對準差異（plan v12 §5.4）
-        if (ed.diffBox) view.current?.focusBox(ed.diffBox);
-        else message.info({ key: 'aim', content: '這個 split 還沒有改動' });
-        return;
-      }
-      if (k === 'b') setMode((m) => (m === 'orig' ? 'now' : 'orig'));
-      else if (k === 'd') setMode((m) => (m === 'diff' ? 'now' : 'diff'));
-      else if ((e.key === ',' || e.key === '.') && clipOn) setClipAt(clipAxis, (clipFollow ? cursorAt(clipAxis) : clipPos[clipAxis]) + (e.key === '.' ? 1 : -1));
-      else if (views[k]) view.current?.setView(views[k]);
-      else if (e.key === '?') setHelpOpen(true);
-      else if (e.key === 'Escape' && cardAt && !ed.menu) {
-        // 先關卡片
-        e.stopImmediatePropagation();
-        setCardAt(null);
-      } else if (e.key === 'Escape' && ed.focus && !ed.menu) {
-        // 離開聚焦編輯，選取與範圍留著（右鍵選單開著時先關選單）
-        e.stopImmediatePropagation();
-        leaveFocus();
-      }
-    };
-    const up = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'e' || !editing || typingIn(e.target)) return;
-      if (Date.now() - eDownAt.current < 300 && !draggedSinceE.current) leaveFocus();
-    };
-    window.addEventListener('keydown', down, { capture: true });
-    window.addEventListener('keyup', up, { capture: true });
+    const down = (e: KeyboardEvent) => keyRef.current.down(e);
+    const up = (e: KeyboardEvent) => keyRef.current.up(e);
+    document.addEventListener('keydown', down, { capture: true });
+    document.addEventListener('keyup', up, { capture: true });
     return () => {
-      window.removeEventListener('keydown', down, { capture: true });
-      window.removeEventListener('keyup', up, { capture: true });
+      document.removeEventListener('keydown', down, { capture: true });
+      document.removeEventListener('keyup', up, { capture: true });
     };
-  });
+  }, []);
   const eDownAt = useRef(0);
   const draggedSinceE = useRef(false);
 
@@ -437,7 +473,7 @@ export default function Section3DPage() {
   // 第 1 級（主切面這一片）每一幀都換：同樣不進整頁的 state，只有主切面重 render（plan v9 P7）
   const dragPv = useLiveValue<PV | null>(null);
   const setDragPv = dragPv.set;
-  const onLive = (op: Op | null) => {
+  const onLive = useEvent((op: Op | null) => {
     if (!op) {
       setDragPv(null);
       endLive();
@@ -453,9 +489,9 @@ export default function Section3DPage() {
     } else setDragPv(null);
     // 第 2 級：3D 與小切面（Worker）；範圍太大只有主切面（3D 角落寫「範圍太大」）
     makePreview(op, LIVE_PREVIEW_CAP, false);
-  };
+  });
   /** 「看這些片」：跳到下一個有被擋住的片（循環）。 */
-  const jumpBlocked = () => {
+  const jumpBlocked = useEvent(() => {
     const r = ed.report;
     if (!r?.slices.length) return;
     const a = r.axis;
@@ -466,7 +502,7 @@ export default function Section3DPage() {
       ed.setFocus({ view: '2d', tool: ed.focus?.tool ?? 'handles' });
     }
     setCursorAxis(a, next.at);
-  };
+  });
 
   /**
    * 進入 2D 編輯：方向＝使用者挑過的，否則選取最長的那一軸當法線；
@@ -503,11 +539,11 @@ export default function Section3DPage() {
     }
   };
   const leaveFocus = () => ed.setFocus(null);
-  const onTab = (t: EditTab) => {
+  const onTab = useEvent((t: EditTab) => {
     if (t === 'browse') leaveFocus();
     else if (t === '2d') enterEdit();
     else enterFocus(t);
-  };
+  });
   const [seenFocusHint, setSeenFocusHint] = usePersisted('seenFocusHint', false);
   // 改名後舊使用者找不到（plan v10 §8）：第一次開新版本提示一次，? 裡有對照表
   const [seenRename, setSeenRename] = usePersisted('seenV10Rename', false);
@@ -584,11 +620,15 @@ export default function Section3DPage() {
   const peek = mode === 'orig';
   const shown = peek ? ed.orig.vol : ed.vol;
   const clip: Clip | null = clipOn ? { axis: clipAxis, at: Math.min(axisMax(clipAxis), clipFollow ? cursorAt(clipAxis) : clipPos[clipAxis]), side: clipSide } : null;
-  const selBBox = useMemo(() => {
-    const b = unionBBox(ed.selComps);
-    if (!b) return null;
-    return clipBox(b, ed.scope) ?? b;
-  }, [ed.selComps, ed.scope]);
+  // 值相同身分不變（plan v15 B1）：3D 的選取層／把手 effect 以身分比較，cursor 連點、每一步都不該重建
+  const selBBox = useStable(
+    useMemo(() => {
+      const b = ed.selBox;
+      if (!b) return null;
+      return clipBox(b, ed.scope) ?? b;
+    }, [ed.selBox, ed.scope]),
+    sameBBox,
+  );
   /** 只有差異模式描邊（plan v10 §4.3）。 */
   const diffShown = mode === 'diff' && ed.diff.count ? ed.diff.mask : null;
 
@@ -666,6 +706,7 @@ export default function Section3DPage() {
       },
     });
   };
+  const onLabExport = useEvent((ids: string[]) => confirmExportAll('vti', ids));
   /** 串流打包（plan v15 C2）：每個 split 編碼完就寫進 zip（Worker 回的 crc），主執行緒同時最多留一個 split 的位元組；manifest 最後。 */
   const exportAll = async (fmt: Fmt, only: string[] | undefined, sink: SaveSink) => {
     const fileOf = (s: { name: string }) => `${stem}__${safeName(s.name)}.${ext(fmt)}`;
@@ -853,10 +894,28 @@ export default function Section3DPage() {
   };
   hostFns.current = { makePreview: (op) => makePreview(op, LIVE_PREVIEW_CAP, false), endLive, changeMaterial };
 
-  const pickInSlice = (p: [number, number, number], mode: SelectMode) => {
+  // 傳給 SliceView／SliceEditor／memoEd 子元件的 callback 身分不變（plan v15 B1、B7）
+  const pickInSlice = useEvent((p: [number, number, number], mode: SelectMode) => {
     ed.setCursor(p);
     ed.pickVoxel((p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0], mode);
-  };
+  });
+  const stepAxis = useEvent((a: Axis, d: number) => ed.stepCursor(a, d));
+  const stepFns = useMemo<Record<Axis, (d: number) => void>>(() => ({ x: (d) => stepAxis('x', d), y: (d) => stepAxis('y', d), z: (d) => stepAxis('z', d) }), [stepAxis]);
+  const onSliceDragState = useEvent((d: boolean) => {
+    if (d) draggedSinceE.current = true;
+  });
+  const onSliceNote = useEvent((t: string) => message.warning({ key: 'mirror', content: t }));
+  const onSliceMenu = useEvent((p: Vec3 | null, x: number, y: number) => {
+    const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
+    setMenuAt({ x, y });
+    ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, voxel: p ? (p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0] : null });
+  });
+  /** 2D 手勢的選項與幾何層（plan v15 B1：值沒變就是同一個物件，SliceEditor 的 sctx 才不會每 render 重算）。 */
+  const gesture = useMemo(() => ({ scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }), [ed.scope, ed.follow, ed.backfill, ed.nmPerVoxel]);
+  const geo = useMemo(
+    () => ({ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, lastStep: ed.lastStep, outline: ed.outlineStyle, snap: ed.snapMode }),
+    [ed.models, ed.version, ed.stepSeq, ed.lastStep, ed.outlineStyle, ed.snapMode],
+  );
   const selKey = [...ed.sel].sort().join(',');
   /** 頁籤提示：這個方向可以改什麼（例如「上視 XZ · TiN 可改 x、z」）。 */
   const tabHint = (a: Axis) => {
@@ -905,33 +964,27 @@ export default function Section3DPage() {
                 scope={ed.sel.size ? ed.scope : null}
                 diff={diffShown}
                 preview={dp ?? (lp && lp.base === sidOf(ed.cur) && mode === 'now' ? lp : null) ?? slicePv}
-                selBox={peek ? null : (unionBBox(ed.selComps) ?? null)}
+                selBox={peek ? null : ed.selBox}
                 faceHi={fh}
                 focusKey={selKey}
                 autoZoom={ed.autoZoom}
                 onPick={pickInSlice}
-                onStep={(d) => ed.stepCursor(axis, d)}
+                onStep={stepFns[axis]}
                 onHover={sliceHover.set}
                 L={peek ? undefined : ed.L}
                 selKeys={peek ? [] : [...ed.sel]}
-                gesture={{ scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }}
+                gesture={gesture}
                 onCommit={ed.commit}
                 onLive={onLive}
                 blocked={ed.report?.cells ?? null}
                 handle={ed.handle}
                 setHandle={ed.setHandle}
-                onDragState={(d) => {
-                  if (d) draggedSinceE.current = true;
-                }}
+                onDragState={onSliceDragState}
                 mirror={ed.mirror && ed.sel.size > 1}
-                onNote={(t) => message.warning({ key: 'mirror', content: t })}
+                onNote={onSliceNote}
                 overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} /> : undefined}
-                geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, lastStep: ed.lastStep, outline: ed.outlineStyle, snap: ed.snapMode }}
-                onMenu={(p, x, y) => {
-                  const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
-                  setMenuAt({ x, y });
-                  ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, voxel: p ? (p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0] : null });
-                }}
+                geo={geo}
+                onMenu={onSliceMenu}
               />
                     )}
                   </WithLivePv>
@@ -997,7 +1050,7 @@ export default function Section3DPage() {
                 diff={diffShown}
                 preview={p && p.base === sidOf(ed.cur) && mode === 'now' ? p : null}
                 onPick={pickInSlice}
-                onStep={(d) => ed.stepCursor(axis, d)}
+                onStep={stepFns[axis]}
               />
             )}
           </WithLivePv>
@@ -1460,7 +1513,7 @@ export default function Section3DPage() {
       </header>
       <div className="body">
         {ed.page === 'lab' ? (
-          <ExperimentPage ed={ed} onOpen3D={(id) => void open3D(id)} onOpenStructure={openStructure3D} onExport={(ids) => confirmExportAll('vti', ids)} narrow={labNarrow} stem={stem} />
+          <ExperimentPage ed={ed} onOpen3D={open3D} onOpenStructure={openStructure3D} onExport={onLabExport} narrow={labNarrow} stem={stem} />
         ) : (
         <>
         {narrow ? (
@@ -1469,8 +1522,8 @@ export default function Section3DPage() {
           </Drawer>
         ) : (
           <>
-            <StructureList ed={ed} width={leftW} />
-            <Resizer label="左欄寬度" value={leftW} min={180} max={420} onDrag={(dx) => setLeftW((w) => Math.max(180, Math.min(420, w + dx)))} />
+            <WithLive live={leftW}>{(w) => <StructureList ed={ed} width={w} />}</WithLive>
+            <WithLive live={leftW}>{(w) => <Resizer label="左欄寬度" value={w} min={180} max={420} onDrag={(dx) => leftW.set(Math.max(180, Math.min(420, leftW.get() + dx)))} />}</WithLive>
           </>
         )}
         <main className="stage" id="stage">
@@ -1503,10 +1556,14 @@ export default function Section3DPage() {
           </Drawer>
         ) : (
           <>
-            <Resizer label="右欄寬度" value={rightW} min={300} max={560} onDrag={(dx) => setRightW((w) => Math.max(300, Math.min(560, w - dx)))} />
-            <aside className="inspector" style={{ width: narrow ? 300 : rightW }}>
-              {inspector}
-            </aside>
+            <WithLive live={rightW}>{(w) => <Resizer label="右欄寬度" value={w} min={300} max={560} onDrag={(dx) => rightW.set(Math.max(300, Math.min(560, rightW.get() - dx)))} />}</WithLive>
+            <WithLive live={rightW}>
+              {(w) => (
+                <aside className="inspector" style={{ width: narrow ? 300 : w }}>
+                  {inspector}
+                </aside>
+              )}
+            </WithLive>
           </>
         )}
         </>

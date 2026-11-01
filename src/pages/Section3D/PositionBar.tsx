@@ -4,6 +4,7 @@ import { LeftOutlined, RightOutlined } from '@ant-design/icons';
 import type { Axis, Vec3 } from '../../volume/volume';
 import { AXES, type Scope, axisIndex, axisLen, boxRange } from '../../volume/scope';
 import type { Editor, ScopeMode } from './editor';
+import { memoEd } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
@@ -197,7 +198,7 @@ export function nearestSlice(has: Uint8Array | null, at: number) {
  * 位置列（編輯狀態的主切面上方）：第幾片 │ 套用到哪裡 │ 提示（這一片沒有選取、不在範圍內）。
  * has = 選取沿 axis 每一片有沒有體素。
  */
-export function PositionBar({ ed, axis, has, onJumpBlocked }: { ed: Editor; axis: Axis; has: Uint8Array | null; onJumpBlocked?: () => void }) {
+function PositionBarImpl({ ed, axis, has, onJumpBlocked }: { ed: Editor; axis: Axis; has: Uint8Array | null; onJumpBlocked?: () => void }) {
   const at = ed.cursor[axisIndex(axis)];
   const sel = ed.selComps;
   const name = sel.length === 1 ? sel[0].label : sel.length ? `已選的 ${sel.length} 個結構` : '';
@@ -263,3 +264,5 @@ export function longestAxis(ed: Pick<Editor, 'selComps'>): Axis | null {
   for (const k of order) if (len[k] > len[best]) best = k;
   return AXES[best];
 }
+
+export const PositionBar = memoEd(PositionBarImpl, ['comps', 'cursor', 'customRange', 'editAxis', 'hidden', 'nmPerVoxel', 'queued', 'report', 'scope', 'scopeMode', 'sel', 'selBox', 'selComps', 'selRange', 'vol'], 'PositionBar');

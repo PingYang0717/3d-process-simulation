@@ -289,12 +289,21 @@ export function SliceEditor({
   /** 第一次用：選到結構後左下角三行提示，成功拖一次之後不再顯示。 */
   const [hintsSeen, setHintsSeen] = usePersisted('hintsSeen', false);
   /** 浮動工具列的實際寬度（貼右邊時不要超出畫面）。 */
-  const tbRef = useRef<HTMLDivElement>(null);
+  // ResizeObserver 量（plan v15 B5）：不在每次 render 的 layout effect 裡讀 offsetWidth；工具列是條件掛載的，所以用 callback ref
   const [tbW, setTbW] = useState(520);
-  useLayoutEffect(() => {
-    const w = tbRef.current?.offsetWidth;
-    if (w && Math.abs(w - tbW) > 2) setTbW(w);
-  });
+  const tbRo = useRef<ResizeObserver | null>(null);
+  const tbRef = useCallback((el: HTMLDivElement | null) => {
+    tbRo.current?.disconnect();
+    tbRo.current = null;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const w = el.offsetWidth;
+      if (w) setTbW((p) => (Math.abs(w - p) > 2 ? w : p));
+    });
+    ro.observe(el);
+    tbRo.current = ro;
+  }, []);
+  useEffect(() => () => tbRo.current?.disconnect(), []);
   const [hover, setHover] = useState<Handle | null>(null);
   /**
    * 拖動中（§8.1）：每一幀的位移、Op 放在 dragRef，ghost 與提示文字直接寫 SVG／DOM（不經 React state）；
@@ -583,71 +592,76 @@ export function SliceEditor({
     onDragState?.(false);
   };
   // 鍵盤：V／E／R 按住只抓一種；拖到一半 Esc 取消；選到把手時方向鍵推 1 格（Shift 10）、Delete 刪節點
+  // 鍵盤（plan v15 B7）：handler 每次 render 換成最新的 closure、放在 ref；listener 只在掛載時掛一次
+  const keyDown = (e: KeyboardEvent) => {
+    if (typingIn(e.target)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'v' || k === 'e' || k === 'r') only.current = k === 'v' ? 'node' : k === 'e' ? 'edge' : 'region';
+    if (k === 'v' && !showAll) setShowAll(true);
+    if (e.key === 'Escape' && dragRef.current) {
+      e.stopImmediatePropagation();
+      cancelDrag();
+      return;
+    }
+    if (e.key === 'Escape' && handle) {
+      e.stopImmediatePropagation();
+      setHandle?.(null);
+      return;
+    }
+    if (!handle || handle.axis !== axis || handle.at !== at) return;
+    const step = e.shiftKey ? 10 : 1;
+    const arrows: Record<string, XY> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    if (arrows[e.key]) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const hh = currentHandle(handle);
+      const r = hh && rings.get(hh.key)?.[hh.ring];
+      if (!sctx || !r || !hh) return;
+      let delta = arrows[e.key];
+      if (handle.kind === 'edge') {
+        // 邊：沿它的法線推；按跟法線同側的方向鍵＝往外
+        const nrm = groupNormal(r, smoothEdgeGroup(r, hh.index));
+        const sgn = delta[0] * nrm[0] + delta[1] * nrm[1] >= 0 ? 1 : -1;
+        delta = [nrm[0] * step * sgn, nrm[1] * step * sgn];
+      }
+      const { op, missed } = opFor(hh, delta, false);
+      if (op) {
+        noteMissed(missed, hh);
+        commitOp(hh, delta, false, op);
+        // 把手跟著走：幾何層的頂點 id 不變；畫面位置跟著更新
+        const v = handle.vid && model?.vertices[handle.vid];
+        setHandle?.({ ...handle, ...hh, p: v && handle.kind === 'node' ? [v.u, v.v] : [handle.p[0] + Math.round(delta[0]), handle.p[1] + Math.round(delta[1])] });
+      }
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && handle.kind === 'node') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      // 幾何層的操作：這個頂點不再是節點（形狀不變）
+      if (model && handle.vid) {
+        removeHandle(model, handle.vid);
+        bump();
+      }
+      setHandle?.(null);
+    }
+  };
+  const keyUp = (e: KeyboardEvent) => {
+    const k = e.key.toLowerCase();
+    if (k === 'v' || k === 'e' || k === 'r') only.current = undefined;
+    if (k === 'v') setShowAll(false);
+  };
+  const keyRef = useRef({ down: (_e: KeyboardEvent) => {}, up: (_e: KeyboardEvent) => {} });
+  keyRef.current = { down: keyDown, up: keyUp };
   useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (typingIn(e.target)) return;
-      const k = e.key.toLowerCase();
-      if (k === 'v' || k === 'e' || k === 'r') only.current = k === 'v' ? 'node' : k === 'e' ? 'edge' : 'region';
-      if (k === 'v' && !showAll) setShowAll(true);
-      if (e.key === 'Escape' && dragRef.current) {
-        e.stopImmediatePropagation();
-        cancelDrag();
-        return;
-      }
-      if (e.key === 'Escape' && handle) {
-        e.stopImmediatePropagation();
-        setHandle?.(null);
-        return;
-      }
-      if (!handle || handle.axis !== axis || handle.at !== at) return;
-      const step = e.shiftKey ? 10 : 1;
-      const arrows: Record<string, XY> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
-      if (arrows[e.key]) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        const hh = currentHandle(handle);
-        const r = hh && rings.get(hh.key)?.[hh.ring];
-        if (!sctx || !r || !hh) return;
-        let delta = arrows[e.key];
-        if (handle.kind === 'edge') {
-          // 邊：沿它的法線推；按跟法線同側的方向鍵＝往外
-          const nrm = groupNormal(r, smoothEdgeGroup(r, hh.index));
-          const sgn = delta[0] * nrm[0] + delta[1] * nrm[1] >= 0 ? 1 : -1;
-          delta = [nrm[0] * step * sgn, nrm[1] * step * sgn];
-        }
-        const { op, missed } = opFor(hh, delta, false);
-        if (op) {
-          noteMissed(missed, hh);
-          commitOp(hh, delta, false, op);
-          // 把手跟著走：幾何層的頂點 id 不變；畫面位置跟著更新
-          const v = handle.vid && model?.vertices[handle.vid];
-          setHandle?.({ ...handle, ...hh, p: v && handle.kind === 'node' ? [v.u, v.v] : [handle.p[0] + Math.round(delta[0]), handle.p[1] + Math.round(delta[1])] });
-        }
-        return;
-      }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && handle.kind === 'node') {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        // 幾何層的操作：這個頂點不再是節點（形狀不變）
-        if (model && handle.vid) {
-          removeHandle(model, handle.vid);
-          bump();
-        }
-        setHandle?.(null);
-      }
-    };
-    const up = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === 'v' || k === 'e' || k === 'r') only.current = undefined;
-      if (k === 'v') setShowAll(false);
-    };
+    const down = (e: KeyboardEvent) => keyRef.current.down(e);
+    const up = (e: KeyboardEvent) => keyRef.current.up(e);
     window.addEventListener('keydown', down, { capture: true });
     window.addEventListener('keyup', up, { capture: true });
     return () => {
       window.removeEventListener('keydown', down, { capture: true });
       window.removeEventListener('keyup', up, { capture: true });
     };
-  });
+  }, []);
   /** 選到的把手在目前的環上：先用頂點 id（幾何沒重描就是同一個），沒有 id 才用位置找。 */
   const currentHandle = (h: PickedHandle): Handle | null => {
     if (h.vid && model) {

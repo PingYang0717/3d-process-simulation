@@ -4,7 +4,8 @@
 import { Button, Divider, Flex, InputNumber, Popover, Segmented, Slider, Tooltip, Typography } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import type { Editor } from './editor';
-import { OpButtons } from './OpCard';
+import { CARD_USES, OpButtons } from './OpCard';
+import { memoEd } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
@@ -55,7 +56,7 @@ function BrushSettings({ ed }: { ed: Editor }) {
   );
 }
 
-export function EditToolbar({ ed, onTab }: { ed: Editor; onTab: (t: EditTab) => void }) {
+function EditToolbarImpl({ ed, onTab }: { ed: Editor; onTab: (t: EditTab) => void }) {
   const tab = tabOf(ed);
   const name = ed.selComps.length === 1 ? ed.selComps[0].label : `${ed.selComps.length} 個結構`;
   return (
@@ -97,3 +98,5 @@ export function EditToolbar({ ed, onTab }: { ed: Editor; onTab: (t: EditTab) => 
     </div>
   );
 }
+
+export const EditToolbar = memoEd(EditToolbarImpl, [...CARD_USES, 'focus', 'brushOn', 'brush'], 'EditToolbar');

@@ -98,10 +98,12 @@ export function FactorCard({
   const w = factorWords(f, L, nm, ed.matName);
   const t = f.template;
   const color = CATEGORY[k % CATEGORY.length];
+  // deps 寫實際讀的欄位（ed 在 memoEd 底下是身分不變的 Proxy，不能拿整個 ed 當 deps）
   const ops = useMemo(() => {
     const o = opsFor(kindOfSel(ed));
     return o.length === ALL_OPS.length ? o : ALL_OPS;
-  }, [ed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ed.selComps, ed.materials]);
   /** 改固定欄位：重新量標稱（id 不變）。 */
   const setT = (patch: Record<string, unknown>) => {
     const nf = { ...f, template: { ...t, ...patch } };

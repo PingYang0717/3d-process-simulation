@@ -23,14 +23,27 @@ export function Resizer({ onDrag, label, value, min, max, horizontal }: { onDrag
         const el = e.currentTarget;
         el.setPointerCapture(e.pointerId);
         let p = horizontal ? e.clientY : e.clientX;
+        // pointermove 只累積位移，一幀一次 onDrag（plan v15 B2：欄寬進整頁 state，不要每個原始事件都整頁 render）
+        let acc = 0;
+        let raf = 0;
+        const flush = () => {
+          raf = 0;
+          if (!acc) return;
+          const d = acc;
+          acc = 0;
+          onDrag(d);
+        };
         const move = (ev: PointerEvent) => {
           const q = horizontal ? ev.clientY : ev.clientX;
-          onDrag(q - p);
+          acc += q - p;
           p = q;
+          if (!raf) raf = requestAnimationFrame(flush);
         };
         const up = () => {
           el.removeEventListener('pointermove', move);
           el.removeEventListener('pointerup', up);
+          if (raf) cancelAnimationFrame(raf);
+          flush();
         };
         el.addEventListener('pointermove', move);
         el.addEventListener('pointerup', up);

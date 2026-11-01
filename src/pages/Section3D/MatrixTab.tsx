@@ -10,6 +10,7 @@ import { type Editor, changedOf } from './editor';
 import { factorsOf, levelCell, matrixCsv } from './matrix';
 import { CATEGORY } from './colors';
 import { StateDot } from './SplitPicker';
+import { memoEd } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
@@ -18,7 +19,7 @@ export const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '_').replace(
 /**
  * ids＝只列這些（實驗頁的篩選與排序後的順序）；onRow＝點一列（實驗頁：高亮，不切 split，plan v12 §10 D11）；highlight＝高亮哪一列。
  */
-export function MatrixTab({
+function MatrixTabImpl({
   ed,
   onCompare,
   fileOf,
@@ -256,3 +257,5 @@ export function MatrixTab({
     </Flex>
   );
 }
+
+export const MatrixTab = memoEd(MatrixTabImpl, ['activeId', 'designs', 'exportOff', 'nmPerVoxel', 'origByKey', 'selComps', 'splits'], 'MatrixTab');

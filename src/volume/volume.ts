@@ -1729,6 +1729,10 @@ export const bboxDims = (b: BBox) => ({
   z: b.z0,
 });
 
+/** 六個數字都一樣（plan v15 B1：selBBox 以值比較，身分不變）。 */
+export const sameBBox = (a: BBox | null, b: BBox | null) =>
+  a === b || (!!a && !!b && a.x0 === b.x0 && a.x1 === b.x1 && a.y0 === b.y0 && a.y1 === b.y1 && a.z0 === b.z0 && a.z1 === b.z1);
+
 export const unionBBox = (comps: { bbox: BBox }[]): BBox | null =>
   comps.length
     ? comps.reduce(

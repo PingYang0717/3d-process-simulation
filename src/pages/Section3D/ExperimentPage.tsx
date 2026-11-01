@@ -2,6 +2,7 @@
 // 結果區：工具列（篩選、排序、卡片｜表格、縮圖軸、比較／匯出／刪除勾選的）、依設計分組的卡片（視窗化、縮圖進視窗才畫）。
 // 點卡片＝高亮；「在 3D 看」＝設為目前並切到編輯頁、對準差異。這一頁沒有 WebGL。
 import { useCallback, useMemo, useRef, useState } from 'react';
+import { useEvent } from '../../ui/useEvent';
 import { App, Button, Drawer, Empty, Input, Modal, Segmented, Select, Tooltip, Typography } from 'antd';
 import { AppstoreOutlined, ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, LeftOutlined, RightOutlined, SearchOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import { type Axis, hexToRgb, unionBBox } from '../../volume/volume';
@@ -178,7 +179,8 @@ export function ExperimentPage({ ed, onOpen3D, onOpenStructure, onExport, narrow
         setChecked(new Set());
       },
     });
-  const onMade = (ids: string[]) => {
+  // 傳給 memoEd 元件（DesignPanel、MatrixTab）的 props 身分穩定（plan v15 B2）
+  const onMade = useEvent((ids: string[]) => {
     setQ('');
     setDesignF('all');
     setTagF(null);
@@ -187,7 +189,9 @@ export function ExperimentPage({ ed, onOpen3D, onOpenStructure, onExport, narrow
     setHi(ids[0] ?? null);
     setScrollTo({ id: ids[0], nonce: Date.now() });
     if (narrow) setDrawer(false);
-  };
+  });
+  const fileOf = useCallback((sp: { name: string }) => `${stem}__${safeName(sp.name)}.vti`, [stem]);
+  const visibleIds = useMemo(() => visible.map((s) => s.id), [visible]);
 
   // 抽屜自己有「設計」標題，面板裡就不再放一次
   const design = <DesignPanel ed={ed} onMade={onMade} onOpen3D={onOpen3D} onOpenStructure={onOpenStructure} title={!narrow} />;
@@ -354,7 +358,7 @@ export function ExperimentPage({ ed, onOpen3D, onOpenStructure, onExport, narrow
               </div>
             ) : view === 'table' ? (
               <div className="lab-table">
-                <MatrixTab ed={ed} fileOf={(sp) => `${stem}__${safeName(sp.name)}.vti`} ids={visible.map((s) => s.id)} onRow={setHi} highlight={hi} />
+                <MatrixTab ed={ed} fileOf={fileOf} ids={visibleIds} onRow={setHi} highlight={hi} />
               </div>
             ) : !visible.length ? (
               <Empty className="lab-empty" description="沒有符合篩選的 split" />

@@ -15,6 +15,7 @@ import { FacePicker } from './FacePicker';
 import { type WordsCtx, describeOp, faceName } from './opWords';
 import { RoundCard } from './RoundCard';
 import type { RoundGesture } from '../../slice/round';
+import type { EdKey } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
@@ -541,6 +542,16 @@ export function DefectCard({ ed, compact }: { ed: Editor; compact?: boolean }) {
  * 五顆操作按鈕（plan v10 §4.7）：長／縮 · 方頭／圓頭 · 移動 · 材質 · 對應（多選）；每顆開對應卡片的 Popover。
  * 3D 的編輯工具列與 2D 浮動列共用（plane＝2D 剖面的法線軸，卡片只開放切面上的方向）。
  */
+/**
+ * 卡片（長／縮、方頭／圓頭、移動、材質、缺陷）與範圍控制 render 期間會讀的 ed 欄位（plan v15 B2）：
+ * 掛著卡片的 memoEd 元件（EditToolbar、FloatingToolbar、Inspector）把它併進 uses。
+ */
+export const CARD_USES: readonly EdKey[] = [
+  'L', 'vol', 'comps', 'materials', 'matName', 'origByKey', 'sel', 'selComps', 'selBox', 'selMask', 'selRange', 'scope', 'scopeMode', 'customRange', 'editAxis', 'cursor',
+  'busy', 'queued', 'report', 'follow', 'backfill', 'mirror', 'pushPolicy', 'nmPerVoxel', 'hidden',
+  'pushOp', 'cdOp', 'dilateOp', 'taperOp', 'translateOp', 'materialOp', 'levelOp', 'defectOp', 'commit',
+];
+
 export function OpButtons({ ed, plane }: { ed: Editor; plane?: Axis }) {
   const busy = !!ed.busy && ed.queued >= 3;
   const pop = (content: ReactNode) => <div style={{ width: 380 }}>{content}</div>;

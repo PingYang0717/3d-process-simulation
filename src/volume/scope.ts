@@ -45,6 +45,9 @@ export function scopeBox(v: Dims, s: Scope): BBox | null {
 /** 外框沿 axis 的起止。 */
 export const boxRange = (b: BBox, a: Axis): [number, number] => (a === 'x' ? [b.x0, b.x1] : a === 'y' ? [b.y0, b.y1] : [b.z0, b.z1]);
 
+/** 值相同（plan v15 B1：scope 以值比較，身分不變）。 */
+export const sameScope = (a: Scope | null, b: Scope | null) => a === b || (!!a && !!b && a.axis === b.axis && a.lo === b.lo && a.hi === b.hi);
+
 /** 外框 ∩ scope；沒有交集回傳 null。 */
 export function clipBox(b: BBox, s: Scope): BBox | null {
   const [l, h] = boxRange(b, s.axis);

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from 'react';
+import { useEvent } from '../../ui/useEvent';
 import {
   BoxGeometry,
   BufferAttribute,
@@ -244,20 +245,26 @@ const PARTS_CACHE = 3;
 /**
  * 畫質（plan v15 B6）：antialias 開著（MSAA 4）時每 CSS px 的 sample 數 = pixelRatio² × 4，dpr 2 就是 16。
  * 靜止時 1.5（9 sample，和 2 的差異肉眼難辨）、互動中（轉視角、拖把手、拖筆刷）1.0（4 sample）；「高」＝2。
- * 設定抽屜之後接 localStorage `se3d.v1.quality`（JSON 字串 "high"｜"standard"），這裡先只讀。
+ * 設定抽屜存在 localStorage `se3d.v1.quality`（usePersisted('quality')，JSON 字串 "high"｜"standard"）；掛載時讀一次，
+ * 之後設定改了由 SettingsDrawer 送 QUALITY_EVENT（detail＝新值）立刻生效（usePersisted 的寫入是 idle 時才落地，不能靠 storage 事件）。
  */
 export const PIXEL_RATIO = { standard: 1.5, high: 2, interact: 1 } as const;
 export const QUALITY_KEY = 'se3d.v1.quality';
-/** 靜止時的 pixelRatio：設定的上限和裝置 dpr 取小。 */
-export const idlePixelRatio = (dpr = window.devicePixelRatio || 1) => {
-  let q: unknown = null;
+export const QUALITY_EVENT = 'se3d-quality';
+export type Quality = 'high' | 'standard';
+export const isQuality = (v: unknown): v is Quality => v === 'high' || v === 'standard';
+/** 目前設定的畫質（localStorage；沒存過或格式不對＝標準）。 */
+export const readQuality = (): Quality => {
   try {
-    q = JSON.parse(localStorage.getItem(QUALITY_KEY) ?? 'null');
+    const q: unknown = JSON.parse(localStorage.getItem(QUALITY_KEY) ?? 'null');
+    if (isQuality(q)) return q;
   } catch {
     /* 沒存過或格式不對：標準 */
   }
-  return Math.min(q === 'high' ? PIXEL_RATIO.high : PIXEL_RATIO.standard, dpr);
+  return 'standard';
 };
+/** 靜止時的 pixelRatio：設定的上限和裝置 dpr 取小。 */
+export const idlePixelRatio = (dpr = window.devicePixelRatio || 1, q: Quality = readQuality()) => Math.min(q === 'high' ? PIXEL_RATIO.high : PIXEL_RATIO.standard, dpr);
 
 const newPart = (c: Ctx, m: MeshData) => {
   const part = new Mesh(toGeometry(m), c.mesh.material);
@@ -520,15 +527,28 @@ export function View3D({
       Object.defineProperty(window, '__bvhStats', { get: () => ({ ...bvhStats }), configurable: true });
     }
     // 畫質（plan v15 B6）：靜止 ≤ 1.5（設定「高」＝2）、互動中 1.0；setPixelRatio 內部會 setSize，不必再叫
-    const prIdle = idlePixelRatio();
+    let prIdle = idlePixelRatio();
+    let low = false;
     renderer.setPixelRatio(prIdle);
     const lowRes = (on: boolean) => {
+      low = on;
       const pr = on ? Math.min(PIXEL_RATIO.interact, prIdle) : prIdle;
       if (renderer.getPixelRatio() === pr) return;
       renderer.setPixelRatio(pr);
       kick();
     };
     lowResRef.current = lowRes;
+    // 設定抽屜改了畫質：立刻換（互動中維持 1.0，放開後用新的靜止值）
+    const onQuality = (e: Event) => {
+      const d = (e as CustomEvent<unknown>).detail;
+      prIdle = idlePixelRatio(undefined, isQuality(d) ? d : readQuality());
+      const pr = low ? Math.min(PIXEL_RATIO.interact, prIdle) : prIdle;
+      if (renderer.getPixelRatio() !== pr) {
+        renderer.setPixelRatio(pr);
+        kick();
+      }
+    };
+    window.addEventListener(QUALITY_EVENT, onQuality);
     renderer.localClippingEnabled = true;
     renderer.outputColorSpace = LinearSRGBColorSpace;
     host.appendChild(renderer.domElement);
@@ -1067,6 +1087,7 @@ export function View3D({
       // 快取裡、不在場景上的 chunk
       for (const m of partsCache.values()) for (const p of m.values()) p.geometry.dispose();
       for (const l of [selFill, voidMesh, voidEdges, diffFill, diffEdges]) l.material.dispose();
+      window.removeEventListener(QUALITY_EVENT, onQuality);
       renderer.dispose();
       host.removeChild(renderer.domElement);
       ctxRef.current = null;
@@ -2262,15 +2283,17 @@ export function SliceView({
     return () => ro.disconnect();
   }, [BW, BH]);
 
+  // 滾輪換片（plan v15 B7）：onStep 經 useEvent，listener 只掛一次
+  const step = useEvent(onStep);
   useEffect(() => {
     const el = imgRef.current!;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      onStep(e.deltaY > 0 ? 1 : -1);
+      step(e.deltaY > 0 ? 1 : -1);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [onStep]);
+  }, [step]);
 
   const uvOf = (e: { clientX: number; clientY: number; currentTarget: HTMLElement }) => {
     const r = e.currentTarget.getBoundingClientRect();

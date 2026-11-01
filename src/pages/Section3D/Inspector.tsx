@@ -6,12 +6,13 @@ import { Swatch } from '../../ui/Swatch';
 import { Section, StatTile } from '../../ui/Stat';
 import { signed } from '../../ui/format';
 import type { Editor } from './editor';
-import { CardShell, DefectCard, MaterialCard, MoveCard, PushCard, ShapeCard, wordsOf } from './OpCard';
+import { CardShell, DefectCard, MaterialCard, MoveCard, PushCard, ShapeCard, wordsOf, CARD_USES } from './OpCard';
 import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handleOps';
 import { type DragArg, type DragMode, groupNormal, resolveNodeDrag, smoothEdgeGroup } from '../../slice/gestures';
 import type { Op } from '../../volume/ops';
 import { describeOp } from './opWords';
 import { useSliceRev } from './useSliceRev';
+import { memoEd } from '../../ui/memoEd';
 
 const { Text } = Typography;
 
@@ -138,7 +139,7 @@ function HandleRow({ ed }: { ed: Editor }) {
 }
 
 /** 右欄「選取與調整」。 */
-export function Inspector({ ed }: { ed: Editor }) {
+function InspectorImpl({ ed }: { ed: Editor }) {
   const nm = ed.nmPerVoxel;
   const sel = ed.selComps;
   if (!sel.length)
@@ -270,3 +271,5 @@ export function Inspector({ ed }: { ed: Editor }) {
     </>
   );
 }
+
+export const Inspector = memoEd(InspectorImpl, [...CARD_USES, 'changedKeys', 'clearSel', 'freeform', 'handle', 'isBase', 'lastStep', 'models', 'selCount', 'setHandle', 'stepSeq', 'version'], 'Inspector');

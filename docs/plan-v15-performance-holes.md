@@ -3,7 +3,7 @@
 > 位置：`docs/plan-v15-performance-holes.md`，分支 `claude/upbeat-einstein-wod16i`，接在 plan v14 之後（commit fac120f）。
 > 出發點：2026-11-01 對整個專案做的一輪效能盤點（三個方向平行審：Worker／體素引擎、主執行緒 3D 與 React、切面幾何／split 生命週期／匯出），每條都回到原始碼對過，`bench.ts step 1 2` 在本機重跑確認 README 已記的項目確實做掉了。本計畫只列**還剩下的**。
 > 範圍：主執行緒每一步的固定成本（選取 mask、diff 外框、relabel 快照）、物件身分抖動造成的連鎖重算、2D 拖拉與每步重描、3D 拾取與繪製、`.vti` 載入與同格式匯出、zip、實驗頁的疊圖／並排／縮圖、幾個只會長不會縮的快取。**Op、manifest、補丁格式、`.vti` 輸出的內容（值）都不動；Worker 協定只加不改。**
-> 狀態：計畫（M15.0～M15.7 未開工）。
+> 狀態：M15.0～M15.7 完成（2026-11-01，HEAD b06f914 之後）；§3 表有「實測」欄、§11 有量測與紀錄，沒達到的在 §11.3。頁面層級的列待協調者跑 `perf.cjs`／`m15.cjs` 補。
 
 ---
 
@@ -156,34 +156,34 @@
 
 ## 3. 目標與量法
 
-量法：`npx vite-node scripts/bench.ts <mode> [scale ...]`、`node scripts/e2e/perf.cjs <url> <scale>`、`node scripts/e2e/m15.cjs <url>`。雲端容器、Node 22、headless Chromium 軟體 WebGL，單位 ms。「現在」欄＝M15.0 量出來的實測（2026-11-01，HEAD 83d2256；指令與完整數字見 §11.2；括號內是量法上的備註）。
+量法：`npx vite-node scripts/bench.ts <mode> [scale ...]`、`node scripts/e2e/perf.cjs <url> <scale>`、`node scripts/e2e/m15.cjs <url>`。雲端容器、Node 22、headless Chromium 軟體 WebGL，單位 ms。「現在」欄＝M15.0 量出來的實測（2026-11-01，HEAD 83d2256；指令與完整數字見 §11.2；括號內是量法上的備註）。「實測」欄＝M15.7 全部合併後重跑（2026-11-01，HEAD b06f914，同一台、同指令；`bench.ts` 已改量新路徑，完整數字見 §11.2「之後」表；✓／✗＝有沒有達到「目標」欄；頁面層級的列由協調者跑 `perf.cjs`／`m15.cjs` 補）。
 
-| 項目 | 現在（×2 / ×3） | 目標（×2 / ×3） | 量法 |
-| --- | --- | --- | --- |
-| 選到基板後每一步的 `selMask`＋`affMask`（主執行緒） | **19.5 / 47.5**（×1 2.6）；每步配 2 × N ＝ 30 / 101 MB | **< 3 / < 5**，且不配新陣列 | `bench.ts step --sel substrate` 印 selMask ms、配置位元組 |
-| 每步 `diffBox`（主執行緒），在相隔兩角各改一次之後 | **10.3 / 34.8**（touch 撐到 X×Z 全幅後每步掃 ∝ touch；沒撐開時 1.5 / 4.9） | **< 1**（O(X+Y+Z)） | `bench.ts step --corners` 印 diffBox ms |
-| relabel 快照位元組（fin 在基板上長高 1） | **fin 左右搬 1（R±1 碰到基板）：48.8 MB / 143 MB／步**；poly 長高 1：4.9 / 16.4 MB／步（S 的 before 只有 0.4～23 MB） | **≤ F 的大小**（≈ R ∪ lost bbox；×3 < 2 MB） | `bench.ts step` 印 PS bytes |
-| 一步 Worker apply（×3，fin 長高 1） | poly 長高 1：162～342；fin 左右搬 1：629～1,056（含 143 MB 快照 memcpy） | **< 500**（A3 省掉的 memcpy＋D5） | `bench.ts step 3` |
-| 開 X-ray／切 split 後空洞層開始 mesh 前的掃描 | `layer {mat: VOID}` 全量 129 / 234（整陣列 closure 掃描佔大半；增量 23 / 77）；頁面往返 145（×2） | **< 5**（只看 voidBox ∩ touch） | `bench.ts layer void`、`perf.cjs` `__posts.layer` 時間 |
-| 點切面換 cursor 一次：Worker `layer` 請求、把手重建次數 | **1 次／（把手：待 M15.2 加 `__handleBuilds`）**；另整頁 render 4 次、20 次共 50 個 long task（×2） | **0 / 0** | `perf.cjs`：`__posts.layer` 差、`__handleBuilds` 差 |
-| 拖欄寬 60 個 pointermove：整頁 render 次數 | **240**（每個 pointermove 4 次）＋ 3D 重畫 120 幀、153 個 long task（×2） | **≤ 耗時幀數**（rAF 合併，headless 約 10～20） | `perf.cjs` React Profiler commit 計數 |
-| 一步之後 `Section3DPage` 以外的重 render（StructureList／Inspector／SplitPicker／EditToolbar） | 待 M15.2 加 `__renders[元件]`（整頁 `__renders` 一步 ≈ 4～6 次） | **只有讀到的欄位變了才 render**（Profiler 每步 ≤ 2 次） | `perf.cjs` `__renders` 按元件計數 |
-| 2D 拖基板頂邊 60 步（×2）：主執行緒每幀、算 Op 的次數／幀數 | 頂邊（push 路徑）1.4 / 3.8 ms／幀、角節點（profile 路徑）**6.9 / 16.4 ms／幀**（p95 12.5 / 35.2）；Op 次數／幀數 **1.0**，其中位元組相同的 Op 重算 79～89%；頁面 161 幀／2.5 s、0 個 long task | **< 8 ms／幀**，Op 次數／幀數 **≤ 0.5** | `bench.ts drag2 --key substrate`、`perf.cjs` 2D 拖拉段 |
-| 2D 模式每步 `stairs`＋verify（選到基板 ×3、步驟沒碰這一片） | stairs 4.2 / 10.9 ＋ verifyKey 2.1 / 3.5 ＋ sliceContext 1.2 / 2.5（5 個 key）≈ **7.5 / 17 ms／步** | **0**（跳過） | `bench.ts drag2` 印 per-step trace 次數 |
-| 一步後第一次 hover 的 BVH 建置（×2） | 10 次 hover → **20 個 long task（最長 112～159 ms）**，每次 pointermove 63～126 ms（`__bvhBuilds` 待 M15.4） | **≤ 8 ms／事件**（有預算，其餘 idle 補） | `perf.cjs` hover 段 long task、`__bvhBuilds` |
-| 有選取時轉視角每幀強制 layout 次數 | 1（程式碼推得；DEV 計數器待 M15.4） | **0** | `perf.cjs` PerformanceObserver layout-shift／手動 `getComputedStyle` 計數器（DEV 旗標） |
-| HiDPI 每 CSS px 的 sample 數 | 16（dpr 2 × MSAA 4，程式碼推得；headless dpr＝1 量不到） | **≤ 9 靜止、4 拖拉中**（dpr ≤ 1.5；互動中 1.0） | 讀 `renderer.getPixelRatio()` |
-| 同格式 .vti 匯出一個 split（×2，8 個 Float32 壓縮比例陣列，改 2 萬格） | **Worker 4,189 ms**（頁面，改 32k 格）；Node 11,749 ms；重壓 15,360／15,360 塊（只需 320） | **只重壓碰到的 block**：≤ 碰到 block 數 × 32 KB；×2 **< 300 ms** | `bench.ts export 2` 印 blocks 重壓／總數、ms |
-| 匯出 20 個 split 的 zip（×2，vti1）尖峰記憶體（主執行緒） | 300 MB zip：**JS heap 尖峰 +600 MB、renderer RSS 尖峰 +840 MB**（≈ 2.8×）；`zipStore` 278 MB/s（1.08 s） | **≤ 1 個 split ＋ 32 MB**；主執行緒 CRC 0 ms | `perf.cjs` `performance.memory` 匯出前後、`bench.ts export zip` |
-| zip > 4 GiB／> 65,535 個檔 | 壞檔（程式碼推得，未量） | **ZIP64 正確**（Node `yauzl`／Python `zipfile` 能開） | `zip.test.ts`（假大小）、e2e 不做 |
-| 上傳 ×2 比例陣列 .vti：主執行緒 long task、原檔常駐份數 | **7 個 long task（最長 373 ms）**，到結構分析完 3.6 s；JS heap 尖峰 +337 MB、RSS 尖峰 +486 MB（合成檔只有 1.3 MB，原檔 2 份的成本看不出來） | **解碼在 Worker、主執行緒無 > 50 ms long task；原檔 1 份（Worker）** | `perf.cjs` 上傳段、`bench.ts export` 印 Worker 常駐 |
-| 比例陣列解碼（×2，8 個 Float32 壓縮陣列） | `decodeVti` Node **7,173**（×1 1,181）；頁面主執行緒 ≈ 2.5 s（含在上面的 3.6 s 裡） | **≤ 現在的 1/3**（Promise.all 批次） | `bench.ts decode 2` |
-| 200 個 split 疊圖：legend 滑過 60 次（×1） | **10.2 ms／次**（200 條，bench；最大 18.6）；頁面 UI 上限 12 條 0.5 ms／次 | **< 2 ms／次**（memo） | `perf.cjs` 實驗頁段、`__overlayMs` |
-| 200 個 split 疊圖換片一次（×3） | **1,377**（描輪廓 833、整片比對 118、切片 1,366 另計）；×2 343、×1 118 | **< 1 s**（contour 只描 key bbox、diff 快取） | `bench.ts overlay 3 200` |
-| 縮圖一張（×3） | 0.8 ms、配置 0.6 MB（整片 RGBA 0.5 MB）；×2 0.5 ms | **只畫裁切窗**，< 2 ms | `bench.ts thumbs 3` |
-| 復原堆疊：50 步基板級 translate 後堆疊位元組 | ×1 **253 MB**（5.1 MB／筆）；×2 2,023 MB（40.5 MB／筆）；×3 **6,828 MB**（137 MB／筆；HISTORY_LIMIT 50 筆全留） | **≤ 256 MB／split**（可設定） | `bench.ts mem --op translate-substrate` |
-| `ModelStore` 快照總位元組（基板選取、連做 50 步） | 50 份 ≈ 0.5～1.6 MB（估計；基板環只有 4 個頂點，`exact` 小）；SNAP_LIMIT 400 → ≈ 4～12 MB | **≤ 64 MB**，沒碰到這一片的版本是指標不是拷貝 | `bench.ts drag2` 印 `models.bytes()` |
-| `ringCache` 滿了之後下一幀重描次數 | 全部（程式碼推得，未量） | **只重描被逐出的那一片** | `previewWorker.test.ts` |
+| 項目 | 現在（×2 / ×3） | 目標（×2 / ×3） | 實測（×2 / ×3，M15.7） | 量法 |
+| --- | --- | --- | --- | --- |
+| 選到基板後每一步的 `selMask`＋`affMask`（主執行緒） | **19.5 / 47.5**（×1 2.6）；每步配 2 × N ＝ 30 / 101 MB | **< 3 / < 5**，且不配新陣列 | `bench.ts step --sel substrate` 印 selMask ms、配置位元組 | **部分 ✓**：配置 0、和 `maskOf` 逐位元組相同；poly 長高 1（stepTouch 288×8×48／432×12×72）**0.8～1.4 / 3.0～3.2** ✓；poly 縮 1（stepTouch＝整根 poly 288×85×48／432×127×72）**9～10 / 26～35** ✗（O(S) 兩遍）；換選取重建一次 14 / 47 |
+| 每步 `diffBox`（主執行緒），在相隔兩角各改一次之後 | **10.3 / 34.8**（touch 撐到 X×Z 全幅後每步掃 ∝ touch；沒撐開時 1.5 / 4.9） | **< 1**（O(X+Y+Z)） | `bench.ts step --corners` 印 diffBox ms | ✓ **0.02 / 0.02**（最大 0.04；沒撐開時 0.05 / 0.03；對照 `tightBox` 10.7 / 34.8，10 步 0 次不同） |
+| relabel 快照位元組（fin 在基板上長高 1） | **fin 左右搬 1（R±1 碰到基板）：48.8 MB / 143 MB／步**；poly 長高 1：4.9 / 16.4 MB／步（S 的 before 只有 0.4～23 MB） | **≤ F 的大小**（≈ R ∪ lost bbox；×3 < 2 MB） | `bench.ts step` 印 PS bytes | ✗ fin 左右搬 1：**29.3 / 23.3 MB**（基線 48.8 / 143；PF ＝ F，F 仍包含整根 fin 的 lost bbox 與 R±1 碰到的襯層）；poly 長高 1：4.5 / 15.1 MB（S ＝ F，和基線同）；A3 的省只在 S ≠ F 的步驟 |
+| 一步 Worker apply（×3，fin 長高 1） | poly 長高 1：162～342；fin 左右搬 1：629～1,056（含 143 MB 快照 memcpy） | **< 500**（A3 省掉的 memcpy＋D5） | `bench.ts step 3` | ✗ fin 左右搬 1 **563～895**（基線 629～1,056；主執行緒貼補丁 25～50）；poly 長高 1 146～166、縮 1 340～460 |
+| 開 X-ray／切 split 後空洞層開始 mesh 前的掃描 | `layer {mat: VOID}` 全量 129 / 234（整陣列 closure 掃描佔大半；增量 23 / 77）；頁面往返 145（×2） | **< 5**（只看 voidBox ∩ touch） | `bench.ts layer void`、`perf.cjs` `__posts.layer` 時間 | 掃描 ✓ 0（不再掃整陣列；全量 35～71 / 82～106 全是 mesh）；增量 21～38 / 80～88；**非相鄰版本（寬 touch 之後）236 / 659 ✗**（基線 84 / 208；`voidBoxOf`＝origVoidBox ∪ touch 是鬆外框，見 §11.3） |
+| 點切面換 cursor 一次：Worker `layer` 請求、把手重建次數 | **1 次／（把手：待 M15.2 加 `__handleBuilds`）**；另整頁 render 4 次、20 次共 50 個 long task（×2） | **0 / 0** | `perf.cjs`：`__posts.layer` 差、`__handleBuilds` 差 | 協調者補（`perf.cjs --v15 --only=2`） |
+| 拖欄寬 60 個 pointermove：整頁 render 次數 | **240**（每個 pointermove 4 次）＋ 3D 重畫 120 幀、153 個 long task（×2） | **≤ 耗時幀數**（rAF 合併，headless 約 10～20） | `perf.cjs` React Profiler commit 計數 | 協調者補（`perf.cjs --v15 --only=1`） |
+| 一步之後 `Section3DPage` 以外的重 render（StructureList／Inspector／SplitPicker／EditToolbar） | 待 M15.2 加 `__renders[元件]`（整頁 `__renders` 一步 ≈ 4～6 次） | **只有讀到的欄位變了才 render**（Profiler 每步 ≤ 2 次） | `perf.cjs` `__renders` 按元件計數 | 協調者補（`__rendersBy`） |
+| 2D 拖基板頂邊 60 步（×2）：主執行緒每幀、算 Op 的次數／幀數 | 頂邊（push 路徑）1.4 / 3.8 ms／幀、角節點（profile 路徑）**6.9 / 16.4 ms／幀**（p95 12.5 / 35.2）；Op 次數／幀數 **1.0**，其中位元組相同的 Op 重算 79～89%；頁面 161 幀／2.5 s、0 個 long task | **< 8 ms／幀**，Op 次數／幀數 **≤ 0.5** | `bench.ts drag2 --key substrate`、`perf.cjs` 2D 拖拉段 | ✓ 60 幀中位數 **0.0 / 0.0**（去重掉的幀只算 `gestureKey`）；真的算 Op 的幀：push 1.7 / 4.5、profile 7.0 / 15.0（p95 13.0 / 20.7；Poly 整層 12.3 / 19.1）；Op 次數／幀數 **0.22 / 0.22** ✓；位元組相同的 Op 重算 push 50% / 25%（key 含取整位移，比 Op 保守）、profile 0% |
+| 2D 模式每步 `stairs`＋verify（選到基板 ×3、步驟沒碰這一片） | stairs 4.2 / 10.9 ＋ verifyKey 2.1 / 3.5 ＋ sliceContext 1.2 / 2.5（5 個 key）≈ **7.5 / 17 ms／步** | **0**（跳過） | `bench.ts drag2` 印 per-step trace 次數 | ✓ **0**：stairs 0 次（memo 看 rev）、`modelStats` traced 0／verified 0、`ModelStore.get(touched=false)` 0.0 ms、`sliceContext`（area lazy）0.0～0.1 ms |
+| 一步後第一次 hover 的 BVH 建置（×2） | 10 次 hover → **20 個 long task（最長 112～159 ms）**，每次 pointermove 63～126 ms（`__bvhBuilds` 待 M15.4） | **≤ 8 ms／事件**（有預算，其餘 idle 補） | `perf.cjs` hover 段 long task、`__bvhBuilds` | 協調者補（`perf.cjs --v15 --only=3`、`__bvhStats`） |
+| 有選取時轉視角每幀強制 layout 次數 | 1（程式碼推得；DEV 計數器待 M15.4） | **0** | `perf.cjs` PerformanceObserver layout-shift／手動 `getComputedStyle` 計數器（DEV 旗標） | 協調者補（ResizeObserver 標籤，程式碼推得 0） |
+| HiDPI 每 CSS px 的 sample 數 | 16（dpr 2 × MSAA 4，程式碼推得；headless dpr＝1 量不到） | **≤ 9 靜止、4 拖拉中**（dpr ≤ 1.5；互動中 1.0） | 讀 `renderer.getPixelRatio()` | 程式碼：靜止 1.5² × 4 ＝ 9、拖拉中 1.0² × 4 ＝ 4（headless dpr 1 量不到；協調者補） |
+| 同格式 .vti 匯出一個 split（×2，8 個 Float32 壓縮比例陣列，改 2 萬格） | **Worker 4,189 ms**（頁面，改 32k 格）；Node 11,749 ms；重壓 15,360／15,360 塊（只需 320） | **只重壓碰到的 block**：≤ 碰到 block 數 × 32 KB；×2 **< 300 ms** | `bench.ts export 2` 印 blocks 重壓／總數、ms | ✓ 重壓 **320 / 15,360**（＝碰到的 block 數；×3 384 / 51,840）；`encodeVtiLike(hint)` **280～305 / 378 ms**（×2 兩次取較好 280，目標 < 300 邊緣）；`--whole` 整陣列路徑 6,504 ms、位元組相同 |
+| 匯出 20 個 split 的 zip（×2，vti1）尖峰記憶體（主執行緒） | 300 MB zip：**JS heap 尖峰 +600 MB、renderer RSS 尖峰 +840 MB**（≈ 2.8×）；`zipStore` 278 MB/s（1.08 s） | **≤ 1 個 split ＋ 32 MB**；主執行緒 CRC 0 ms | `perf.cjs` `performance.memory` 匯出前後、`bench.ts export zip` | Node `ZipWriter`：資料段不複製（61 段、arrayBuffers 增量 0）、crc32 一個 15 MB split 64 ms（頁面在 Worker）；頁面 heap 協調者補（M15.5 初測：尖峰 +147 MB、gc 後 +6 MB，見 §11.3） |
+| zip > 4 GiB／> 65,535 個檔 | 壞檔（程式碼推得，未量） | **ZIP64 正確**（Node `yauzl`／Python `zipfile` 能開） | `zip.test.ts`（假大小）、e2e 不做 | 測試層級 ✓（`zip.test.ts` 假大小 ZIP64） |
+| 上傳 ×2 比例陣列 .vti：主執行緒 long task、原檔常駐份數 | **7 個 long task（最長 373 ms）**，到結構分析完 3.6 s；JS heap 尖峰 +337 MB、RSS 尖峰 +486 MB（合成檔只有 1.3 MB，原檔 2 份的成本看不出來） | **解碼在 Worker、主執行緒無 > 50 ms long task；原檔 1 份（Worker）** | `perf.cjs` 上傳段、`bench.ts export` 印 Worker 常駐 | 協調者補（`perf.cjs --v15 --only=6`；`meta.hasRaw` 由 e2e m11 §0 驗） |
+| 比例陣列解碼（×2，8 個 Float32 壓縮陣列） | `decodeVti` Node **7,173**（×1 1,181）；頁面主執行緒 ≈ 2.5 s（含在上面的 3.6 s 裡） | **≤ 現在的 1/3**（Promise.all 批次） | `bench.ts decode 2` | ✗ Node **4,599 / 11,592**（×1 808）＝基線的 0.64× / 0.46×（目標 ≤ 1/3）；頁面協調者補 |
+| 200 個 split 疊圖：legend 滑過 60 次（×1） | **10.2 ms／次**（200 條，bench；最大 18.6）；頁面 UI 上限 12 條 0.5 ms／次 | **< 2 ms／次**（memo） | `perf.cjs` 實驗頁段、`__overlayMs` | ✓ useMemo 命中、lines **0 次重算**；快取全命中重組 lines 上限 0.3 ms／次 |
+| 200 個 split 疊圖換片一次（×3） | **1,377**（描輪廓 833、整片比對 118、切片 1,366 另計）；×2 343、×1 118 | **< 1 s**（contour 只描 key bbox、diff 快取） | `bench.ts overlay 3 200` | ✓ **341**（×2 179、×1 61；描 keys 外框 vs 'full' 404 vs 524） |
+| 縮圖一張（×3） | 0.8 ms、配置 0.6 MB（整片 RGBA 0.5 MB）；×2 0.5 ms | **只畫裁切窗**，< 2 ms | `bench.ts thumbs 3` | ✓ **0.4 ms**、配置 0.1 MB（只有縮圖輸出；裁切窗 RGBA 走共用暫存） |
+| 復原堆疊：50 步基板級 translate 後堆疊位元組 | ×1 **253 MB**（5.1 MB／筆）；×2 2,023 MB（40.5 MB／筆）；×3 **6,828 MB**（137 MB／筆；HISTORY_LIMIT 50 筆全留） | **≤ 256 MB／split**（可設定） | `bench.ts mem --op translate-substrate` | ✓ 截後 ×2 **244 MB**（6 筆）、×3 **137 MB**（1 筆）；50 步後 Node 記憶體增量 297 / 284 MB |
+| `ModelStore` 快照總位元組（基板選取、連做 50 步） | 50 份 ≈ 0.5～1.6 MB（估計；基板環只有 4 個頂點，`exact` 小）；SNAP_LIMIT 400 → ≈ 4～12 MB | **≤ 64 MB**，沒碰到這一片的版本是指標不是拷貝 | `bench.ts drag2` 印 `models.bytes()` | ✓ `store.bytes()` **0.0 MB**：實體 1 份、指標 49 份 |
+| `ringCache` 滿了之後下一幀重描次數 | 全部（程式碼推得，未量） | **只重描被逐出的那一片** | `previewWorker.test.ts` | 測試層級 ✓（`previewWorker.test.ts`） |
 
 ---
 
@@ -559,7 +559,48 @@ e2e（`scripts/e2e/m15.cjs`，需 `npm run dev`）：
 
 ## 11. 實作紀錄
 
-（11.1 和計畫不同的地方、11.3 沒達到的目標與理由：各里程碑結束時填。）
+### 11.1 和計畫不同的地方
+
+依各里程碑實作者回報整理，並對照 HEAD b06f914 的程式碼；條目編號對應 §1／§5。
+
+**M15.1 每一步的固定成本**
+
+- **A1 多了 `canPatchMask`**（`editor.ts`）：`nameByVotes` 可能把被併結構的 key 認領給 S 外面的編號，這時只在 box 裡補 mask 會漏。規則＝每個結構編號「選了／沒選」前後不同的，改前、改後的外框都要在 box 裡，否則整個重建（`maskOf`）。`LastStep` 多一欄 `owner`（哪本帳簿），換 split 時不會拿別本帳簿的 box 去補。DEV 下每步 1/20 機率和 `maskOf` 全量比對，不同就 `console.error` ＋ 重建。
+- **A2 `restore` 回應沒帶 axes**：主執行緒 `restoreBuffers` 在補丁外框裡順手數（`recountAxes`），Worker `pastePatch` 同一個函式；Worker 協定一個欄位都沒加。
+- **A3 的測試斷言改了**：「PF < 舊 Smax 的 1/10」只對刻意的案例成立（整根 fin 長高時 F 被襯層撐大，只有 1.2×）；改用 fin 局部長高（159×）與整結構換空氣（22.7×）兩個案例斷言，另外四個 S ≠ F 的案例只斷言結果和 `relabelFast` 逐位元組相同。
+- **C7 `summarize` 放在 workerCore 的 `apply`／`applyParked` handler**，`applyOpInPlace` 仍回原始 Report（kernel 不知道上限）；`OpReport` 欄位不變。
+- **§10「`previewIn` 不再送 `comps`」**：`compsOf` 以 owner（不是 sid）為 key；新增 `comps` handler 與 `put.comps?`，給 parked → live 與重播後主執行緒要 comps 用。
+
+**M15.3 2D 拖拉與每步重描**
+
+- **B3 `gestureKey` 的 edge 含取整 (du, dv) 與 single 旗標**（`recordGesture` 存的是 `Math.round(delta)`，Op 的 `gestures` 欄位跟著它）；所以 push 路徑的 key 比 Op 保守——同一個 n、不同的取整位移會算兩次相同位元組的 Op（§11.2 的「位元組相同的 Op 重算」push 列仍有 40～50%，profile 列 0%）。`deltaOfRef` 只做測試對照，沒有執行期 fallback。
+- **B3 `profileDelta` 外框縮小的語意差**：「放開後 Worker 還沒回來」的 pending 視窗裡，多環 key 的其他環 pending 差不再算進 Op（舊版會）；放開前與 Worker 回來後和舊版逐格相同（`raster.test.ts` 隨機對照）。
+- **A4**：`Shape.area` 改 lazy getter ＋ `areaOf`（只有「對應」配對會讀）；`ModelStore.get(..., touched)` 只在「不 pending、沒快照、cur 有模型」時跳過驗證；`verifyKey` 的 spy 改成計數器 `modelStats`；`useSliceRev` 冪等（StrictMode 第二次呼叫不會把 touched 翻成 false）；首次 lastStep 為 null 一律算 touched。限制：`stepTouch` 的 S 常比改動大很多，沿 z 看基板時幾乎每步都「碰到」這一片，省算在別的結構或 x／y 切面才明顯（A3 的 S 粒度）。
+- **D2 逐出規則**改成「依版本順序找第一個可逐的：指標一律可逐、實體要沒有指標參考」，永不留懸空指標；`prune` 的 live 加 `sidOf(orig)`；順手修了 alias 還原沒接 `baseVersion` 的 bug（d2221f4 就在）。
+
+**M15.4 3D 拾取與繪製**
+
+- **B4** `pickOrdered` 核心是 generator `pickAlong`；BVH 預算的重設放在 host 的 capture listener（每個 pointer 事件一次）；「優先建最近一步碰到的 chunk」用 Worker `chunks` 回應的 `r.items`；多掛 `__bvhStats`。
+- **B6** 降解析度在轉視角的第一次 `change`／拖拉過死區，不是 pointerdown（避免點一下閃一格）；畫質設定透過 `QUALITY_EVENT` 即時生效。
+
+**M15.5 載入與匯出**
+
+- **C1** `hint` 多 `dims`、`diff` 可選（parked 只有補丁外框）；未壓縮陣列用 32 KB 虛擬 block；ascii 用原檔 token 引用＋`Parts` 收集器；順手修了 big-endian 讀寫；`ZipWriter` 多同步 `entry()`／`close()`（`zipStore` 與測試走它）。
+- **C2／C3** `export` 回 `{bytes, crc, stats}`、client 包成 `Uint8Array & {crc}`；parked 匯出用模組級 `exportBuf`（第一次配置、之後 O(外框)），不是零配置；`exportMeta.raw` 保留為可選；`npyDecode` 同步；`keepRaw` 一律 true、由 Worker 依 fractions 決定留不留；Blob sink 每段先包成 Blob。
+
+**M15.6 實驗頁**
+
+- **C5** `contourOf` 省略 bbox 時自動用 keys 外框，`'full'` 保留舊行為；`__overlayMs` 改累計；`pairMaskOf` LRU 以位元組（32 MB）為上限。
+- **C6** thumbs 多一片共用裁切窗暫存（`scratchFor`）。
+
+**M15.2 身分與 render**
+
+- **B1／B2** index.tsx 鍵盤 listener 改掛 document capture（Esc 順序）；欄寬走 live value（`useLiveWidth`），不只 Resizer rAF；計數器名 `__rendersBy`（commit 次數）；`useEvent` 也包了 `factorCtx`／`stats`／`voxelCoord`；群組 Tooltip／ColorPicker／Dropdown 在展開或滑過標題列時才掛；hook 測試用 `react-dom/client`＋act＋測試檔內假 DOM，`useEditor` 本身的身分測試改以 e2e 探針驗。
+
+**M15.7 量測工具**
+
+- `bench.ts` 改量新路徑（檔頭）：`step --sel substrate` 第一步 `maskOf`、之後 `canPatchMask`＋`patchMask`，並逐位元組對照 `maskOf`＋`maskInScope`；diffBox 改 `diffBoxOfAxes` 對照 `tightBox`；PS 快照改讀 `relabelStats.snapshot`（舊的 Int32 配置 Proxy 留作對照，兩者相同）；hist 用 `trimHist`；`drag2` 以 `gestureKey` 去重、`profileDelta` 包 `raster.deltaOf` 實際計數、`ModelStore.get(touched=false)`＋`modelStats`、`store.bytes()`；`export` 傳 hint 印 `ExportStats`、`--whole` 對照位元組、zip 用 `ZipWriter`；`overlay` 用 `overlayEntry`＋`contourCache`，對照 `'full'`。
+- 測試數 261 → 369。
 
 ### 11.2 量測
 
@@ -609,3 +650,54 @@ DEV 計數器（`__selMaskMs`、`__diffBoxMs`、`__handleBuilds`、`__bvhBuilds`
 
 和盤點時估計不同的：PS 快照比估的 57 MB 大（143 MB，Smax 把 STI 與 poly 也包進來）；`ModelStore` 快照遠小於估計（基板環只有 4 個頂點）；縮圖整片 RGBA 是 0.5 MB 不是 6.6 MB（×3 切面 480×288）；2D 拖**邊**走 push 早退很便宜，重的是節點／斜邊走 `profileDelta` 的路徑；疊圖 ×1 legend 每次 10 ms（估 40～80）。
 量不到的：把手重建次數、BVH 建置次數、每幀強制 layout、各元件 render 次數（都要 DEV 計數器，M15.2／M15.4）；HiDPI sample 數（headless dpr 1）；ZIP64（程式碼推得）；`ringCache` 逐出（測試層級）；上傳時原檔常駐份數（合成檔 1.3 MB 看不出來，要用真檔）。
+
+#### M15.7 之後（2026-11-01，HEAD b06f914，M15.0～M15.6 全部合併）
+
+同一台容器、同一組指令、同一天重跑；`bench.ts` 已對準新路徑（§11.1 最後一節），每條新路徑都和舊路徑逐位元組／逐欄對照（selMask、diffBox、PS 快照、`--whole` 匯出），對照全部通過。量的時候容器裡同時有別的 worktree 在跑 e2e；`selMask`、`layer void`、`export ×2` 三列跑了兩次取較好的一次。欄位和基線表對齊；頁面層級的列（`perf.cjs`）由協調者補。
+
+| 項目 | ×1 | ×2 | ×3 | 量法指令 |
+| --- | --- | --- | --- | --- |
+| 每步 `selMask`＋`affMask`（選到基板；第一步 `maskOf` 重建，之後 `canPatchMask`＋`patchMask`，配置 0） | 長高 0.2～0.4／縮 1.3～2.6（重建 7.8） | 長高 **0.8～1.4**／縮 1 **9～10**（重建 14；配 0） | 長高 **3.0～3.2**／縮 1 **26～35**（重建 47；配 0；對照全量 42～94） | `bench.ts step 1 2 3 --sel substrate` |
+| 每步 `diffBox`＝`diffBoxOfAxes`（poly 連推 10 步；括號＝對照 `tightBox`） | 0.02（0.2） | 0.05（1.5） | 0.03（4.8） | `bench.ts step 1 2 3` |
+| 同上，先在基板相隔兩角各推一下（touch 撐到 10%） | 0.03（1.6） | **0.02**（10.7） | **0.02**（34.8） | `bench.ts step 1 2 3 --corners` |
+| relabel 的 PS 快照（`relabelStats.snapshot` × 4；舊法 Int32 配置相同），poly 長高 1／縮 1 | 0.1／0.6 MB | 1.4／4.5 MB | 1.4／15.1 MB（S 的 before 相同＝S ＝ F） | `bench.ts step 1 2 3` |
+| 同上，fin 左右搬 1 | 3.0～3.7 MB | 24.1～29.3 MB | **6.5～23.3 MB**（基線 143.4） | `bench.ts step 1 2 3 --op translate-fin` |
+| move bytes | 0 | 0 | 0 | `bench.ts step` |
+| 一步 Worker apply：poly 長高 1／縮 1 | 14～27 | 60～140 | 146～166／340～460 | `bench.ts step 1 2 3` |
+| 一步 Worker apply：fin 左右搬 1 | — | — | **563～895**（主執行緒貼補丁＋diff＋axes 25～50） | `bench.ts step 3 --op translate-fin` |
+| 主執行緒貼補丁＋diff＋axes（poly 長高 1／縮 1） | 0.2～0.5 | 0.5～2 | 0.8～1.2／4.3～7.1 | `bench.ts step 1 2 3` |
+| 復原堆疊：10 步 poly 長高 1 累計／`trimHist` 截後 | 7.2／7.2 MB（10 筆） | 49.3／49.3 MB（10 筆） | 165.5／165.5 MB（10 筆） | `bench.ts step 1 2 3` |
+| 復原堆疊：50 步基板級 translate 累計／截後（上限 256 MB） | 253／253 MB（50 筆） | 2,023／**244 MB**（6 筆，丟 44） | 6,828／**137 MB**（1 筆，丟 49）；50 步後 Node 記憶體增量 284 MB | `bench.ts mem 1 2 3 --op translate-substrate` |
+| `layer {mat: VOID}` 全量（X-ray 第一次；touch 空） | 57 | **35～71**（整陣列掃描已不在路徑上，剩 mesh） | **82～106** | `bench.ts layer void 1 2 3` |
+| `layer {mat: VOID}` 增量（base＝上一步） | 17 | 21～38 | 80～88 | 同上 |
+| `layer {mat: VOID}` 非相鄰版本（沒有 base；poly 推過一步之後，`voidBoxOf`＝原始 VOID 外框 ∪ touch） | 44 | **231～236**（基線 84） | **579～659**（基線 208） | 同上 |
+| 2D 拖頂邊 60 幀（push 路徑）：60 幀中位數／真的算 Op 的幀中位數（基板／Poly 整層） | 0.0／0.6 | 0.0／1.7（Poly 2.0） | 0.0／4.5（Poly 5.2） | `bench.ts drag2 1 2 3` |
+| 2D 拖頂邊左端角節點 60 幀（profile 路徑）：60 幀中位數／真的算 Op 的幀中位數（p95） | 0.0／3.6（10.5） | 0.0／**7.0（13.0）**（Poly 12.3（16.5）） | 0.0／**15.0（20.7）**（Poly 19.1（34.5）） | 同上 |
+| 算 Op 的次數／幀數（`gestureKey` 去重）；profileDelta 次數／幀數（`deltaOf` 實際計數）；位元組相同的 Op 重算 | 0.12；0.30；push 50%／profile 0% | **0.22**；0.60；push 50%／profile 0% | **0.22**；0.60；push 25%／profile 0% | 同上 |
+| 第 2 級（Worker preview，整根）每幀（只在 Op 變了才送） | 15～60 | 411（基板 push）／257（profile） | 1,764／755 | 同上 |
+| 每步（沒碰這一片，5 個 key）：stairs 次數＋`ModelStore.get(touched=false)`＋`modelStats`＋`sliceContext` | 0 次＋0.0～0.1 ms＋traced 0／verified 0＋0.0～0.1 | **0 次＋0.0＋0／0＋0.0** | **0 次＋0.0＋0／0＋0.1** | 同上 |
+| ModelStore：50 個版本 `store.bytes()`（實體／指標） | 0.0 MB（1／49） | 0.0 MB（1／49） | 0.0 MB（1／49） | 同上 |
+| `decodeVti`（8 個 Float32 zlib appended，合成；`readBlock` 批次） | 808～1,117 | **4,599～6,831** | **11,592～14,290** | `bench.ts decode 1 2 3`、`export 1 2 3` |
+| `encodeVtiLike(hint)` 改 2 萬格（`ExportStats` 重壓／總 block） | 147～178（208／1,920） | **280～305（320／15,360）** | 378（384／51,840） | `bench.ts export 1 2 3`、`export 2 --whole` |
+| `--whole` 整陣列路徑對照（×2） | — | 6,504，位元組相同 | — | `bench.ts export 2 --whole` |
+| `ZipWriter` 20 個 vti1（sink 收集；資料段不複製）／crc32 一個 split | 37.5 MB，61 段，arrayBuffers 增量 0／8～18 ms | 300 MB，61 段，增量 0／64 ms | 1,013 MB，61 段，增量 0／146 ms | `bench.ts export 1 2 3` |
+| 200 個 split 疊圖換片一次（`overlayEntry` 全部；括號＝描 keys 外框 vs 'full'） | 61（79 vs 100） | 179（178 vs 232） | **341**（404 vs 524） | `bench.ts overlay {1,2,3} 200` |
+| 200 個 split 疊圖 legend 滑過 60 次：每次 | useMemo 命中 0 次重算（快取全命中重組 0.3） | 0（0.4） | 0（0.4） | 同上 |
+| `thumbRGBA` 一張 | 1.4（配 0.1 MB） | 0.3（0.1 MB） | **0.4（0.1 MB，只有縮圖輸出）** | `bench.ts thumbs 1 2 3` |
+| 頁面層級（`layer` 請求數、把手重建、`__rendersBy`、hover long task／`__bvhStats`、拖欄寬 commit、上傳／匯出 heap、hover 60 次的 `__overlayMs`） | 協調者補 | 協調者補 | 協調者補 | `perf.cjs --v15`、`m15.cjs` |
+| 測試 | 261 → **369**（44 個檔） | | | `npx vitest run` |
+
+和基線比，一句話：每步的主執行緒固定成本（selMask 長高步、diffBox、stairs／verify、hist）與 2D 每幀都到目標；PS 快照、解碼、VOID 層非相鄰版本、Worker apply ×3 沒到（§11.3）。
+
+### 11.3 沒達到的目標與理由
+
+- **A1 `selMask` 在「結構縮小」的步驟 ×2 9～10 ms／×3 26～35 ms（目標 < 3／< 5）。** 配置已是 0、長高步 3 ms 達標；但 poly 縮 1 的 `stepTouch` 是整根 poly（S ＝ F ＝ 掉了體素的結構的外框，432×127×72 ＝ 3.9 M 格），`patchMask` 要在 S 裡跑兩遍（mask ＋ aff）。這是 A3 的 S 粒度，不是 A1 的問題；要再壓得把「labels 真的變了的格子」的貼合外框（Worker 在 relabel 時順手數，像 axes 那樣）放進 `LastStep`，`patchMask` 只掃它。留作選配。
+- **A3 relabel 快照 fin 左右搬 1 ×3 23.3 MB（目標 ≤ F、×3 < 2 MB）。** PF 現在就等於 F（`S 的 before` 與 PS 相同），143 → 23 MB 是 F ≠ S 省下的；剩下的 23 MB 是 F 本身：fin 整根 lost bbox ∪ R±1 碰到的襯層／STI 外框。目標寫的「< 2 MB」是把 F 估成只有 R，低估了 lost bbox。要再縮只能把「掉了體素的結構」改成只重 flood fill 掉的那塊的連通範圍，涉及 relabel 的正確性論證，不在本計畫做。
+- **×3 一步 Worker apply fin 左右搬 1：563～895 ms（目標 < 500）。** 比基線 629～1,056 少的就是 memcpy 的部分；剩下是 R 裡的 kernel ＋ 在 S（仍包含整個基板 bbox）裡 flood fill ＋ chunk。容器還有別的 e2e 在跑，數字偏保守，但不會壓到 500 以下。
+- **A5 VOID 層「非相鄰版本」在寬 touch 之後 236／659 ms（基線 84／208）。** 第一次開 X-ray（touch 空）從 129／234 降到 35～71／82～106（掃描已不在路徑上，剩 mesh）；但沒有 base 時 `voidBoxOf`＝原始 VOID 外框 ∪ touch 是一個鬆外框，poly 推過一步之後 touch 是整根 poly，mesh 的範圍比舊版 `boxOf` 掃出來的貼合 VOID 外框大很多。切 split、復原跳好幾步會走到這條。修法：Book 裡維護貼合的 VOID 外框（每步從補丁的 before／after 差量更新，像 axes），或 `voidBoxOf` 先和「這一步 S 裡真的有 VOID 的 chunk」取交集。留作下一輪。
+- **C4 解碼批次在 Node 只到 0.46～0.64×（目標 ≤ 1/3）。** `DecompressionStream` 每條 ~0.2 ms 固定成本且不並行（Node 的 zlib 綁定在同一條 thread pool 排隊），15,360 塊就是 3 s 地板；瀏覽器實測另記（協調者補）。再快要用 `node:zlib` 的同步 inflate（Node 專用）或把 block 併成更大的 chunk 再 inflate（格式不允許）。
+- **C2 匯出 20 個 vti1 zip 主執行緒 heap 瞬時尖峰 +147 MB（目標 ≤ 1 個 split ＋ 32 MB ＝ 47 MB；M15.5 初測，協調者重跑後以 §3 為準）。** Blob／串流 sink 要抄每段、Worker transfer 來的 buffer 等 GC；gc 後只剩 +6 MB，所以是 GC 時機不是常駐。再壓要把 buffer transfer 回 Worker 重用，留作選配。Node 裡的 `ZipWriter` 本身不複製資料段（arrayBuffers 增量 0）。
+- **C1 同格式匯出 ×2 改 2 萬格 280～305 ms（目標 < 300，邊緣）。** 重壓數已經是碰到的 block 數（320／15,360）；剩下是 320 塊 inflate ＋ deflate ＋ 原檔 1.3 MB 的 XML／appended 區塊拷貝。×3 378 ms。
+- **B3 2D profile 路徑「真的算 Op 的幀」×2 7.0／×3 15.0 ms（p95 13／21）。** 每幀平均已經 < 1 ms（Op 次數／幀數 0.22），但算的那一幀本身和基線一樣（`profileDelta` 外框縮小對角節點沒幫助：角節點改的那一環就是最大的環）。頁面上是 60 幀裡的 13 幀 > 8 ms，不會掉幀到可見，不再追。
+- **B3 push 路徑「位元組相同的 Op 重算」仍有 25～50%。** `gestureKey` 的 edge 含取整 (du, dv)（`RelGesture.delta` 記它），而 push 早退的 Op 不含位移，所以同一個 n、不同取整位移會算兩次相同的 Op。每次只有 0.1 ms（`opOfGesture` 本身），不值得再分兩種 key。
+- **頁面層級的列**（把手重建、`__rendersBy`、hover BVH、拖欄寬 commit、上傳／匯出 heap、HiDPI sample）在 §3 標「協調者補」。

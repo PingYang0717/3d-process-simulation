@@ -895,7 +895,7 @@ export default function Section3DPage() {
                 mirror={ed.mirror && ed.sel.size > 1}
                 onNote={(t) => message.warning({ key: 'mirror', content: t })}
                 overlay={!peek && ed.sel.size ? <FloatingToolbar ed={ed} axis={axis} /> : undefined}
-                geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, outline: ed.outlineStyle, snap: ed.snapMode }}
+                geo={{ models: ed.models, version: ed.version, stepSeq: ed.stepSeq, lastStep: ed.lastStep, outline: ed.outlineStyle, snap: ed.snapMode }}
                 onMenu={(p, x, y) => {
                   const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
                   setMenuAt({ x, y });

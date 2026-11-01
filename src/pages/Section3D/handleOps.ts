@@ -81,9 +81,12 @@ export interface ModelHost {
   commit: (op: Op) => void;
 }
 
-/** 從幾何層取這一片的手勢環境（右欄、浮動工具列用；主切面自己取同一份）。 */
-export function modelContext(ed: ModelHost, axis: Axis, at: number, keys: string[], opts: GestureOpts): SliceCtx {
-  const { model } = ed.models.get(ed.L, ed.vol, axis, at, keys, ed.version, ed.stepSeq);
+/**
+ * 從幾何層取這一片的手勢環境（右欄、浮動工具列用；主切面自己取同一份）。
+ * touched（plan v15 A4）＝最近一步有沒有碰到這一片（useSliceRev）；省略＝有（驗證）。
+ */
+export function modelContext(ed: ModelHost, axis: Axis, at: number, keys: string[], opts: GestureOpts, touched = true): SliceCtx {
+  const { model } = ed.models.get(ed.L, ed.vol, axis, at, keys, ed.version, ed.stepSeq, touched);
   return { ...sliceContext(ed.L, ed.vol, axis, at, keys, opts, ringsOf(model, keys)), model };
 }
 

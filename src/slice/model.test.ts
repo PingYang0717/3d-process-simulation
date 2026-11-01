@@ -349,6 +349,9 @@ describe('幾何層 SliceModel（plan v8 §6、§7、§10）', () => {
     expect(back).not.toBe(g1);
     sameGeom(back, s1);
     expect(modelStats.verified).toBe(v0);
+    // 經指標還原：版本號接到要的那一版（不是實體的版本 1），再取一次是同一份（不會每次 get 都還原一份新的）
+    expect(back.baseVersion).toBe(2);
+    expect(store.get(base.L, vol, 'z', 26, k, 2, 2).model).toBe(back);
     // 從指標還原出來的模型再走沒碰到的一步：還是指標（不多存一份）
     store.get(base.L, vol, 'z', 26, k, 4, 3, false);
     expect(store.snapOf('z', 26, 4)).toEqual({ alias: true, sameAs: 1 });

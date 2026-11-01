@@ -11,6 +11,7 @@ import { commitGesture, modelContext, opOfGesture, resolveHandle } from './handl
 import { type DragArg, type DragMode, groupNormal, resolveNodeDrag, smoothEdgeGroup } from '../../slice/gestures';
 import type { Op } from '../../volume/ops';
 import { describeOp } from './opWords';
+import { useSliceRev } from './useSliceRev';
 
 const { Text } = Typography;
 
@@ -33,10 +34,12 @@ function HandleRow({ ed }: { ed: Editor }) {
     setLastP(h.p);
     setPos([h.p[0], h.p[1]]);
   }
+  // 沒碰到這一片的步驟不重取（plan v15 A4）：deps 看 rev 不看 ed.L；touched 傳給 ModelStore.get
+  const { rev, touched } = useSliceRev(ed.L, h.axis, h.at, ed.lastStep);
   const c = useMemo(
-    () => modelContext(ed, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }),
+    () => modelContext(ed, h.axis, h.at, [...ed.sel], { scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }, touched),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ed.L, ed.vol, ed.sel, ed.scope, ed.follow, ed.backfill, ed.nmPerVoxel, ed.version, h],
+    [rev, ed.sel, ed.scope, ed.follow, ed.backfill, ed.nmPerVoxel, ed.version, h],
   );
   const hh = resolveHandle(c, h);
   const r = hh ? c.rings.get(hh.key)?.[hh.ring] : undefined;

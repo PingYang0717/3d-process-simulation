@@ -2,8 +2,10 @@
 // LUT 版：材質色（隱藏的折成淡灰）與「混藍」各一張 256 色表；依軸特化索引遞增（不呼叫 toVoxel／idx、不配陣列）；
 // 預覽盒用列區間判斷；差異描邊在同一份像素裡做 4 鄰居判斷，最後一次 putImageData。
 // 沒有 diff 時輸出和舊版逐位元組相同（drawSlice.test.ts 留著舊版當參考；差異的顏色 plan v10 改過）。
+// plan v15 §5.6 C6：crop 有給就只走裁切窗的列與行、輸出裁切窗大小（縮圖不再整片畫完再裁）；drawSlice 每個 canvas 重用自己的 out。
 import type { Axis, Vec3, Volume } from '../../volume/volume';
 import type { Preview } from '../../volume/preview';
+import type { UVBox } from './overlay';
 
 /** 選取混的藍。 */
 export const SEL_RGB: Vec3 = [22, 119, 255];
@@ -21,7 +23,11 @@ export const REMOVED_RGB: Vec3 = [255, 77, 79];
 export const sliceSize = (vol: { X: number; Y: number; Z: number }, axis: Axis): [number, number] =>
   axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
 
-/** 切面的 RGBA（長度 W×H×4）。out 有給且大小對就重用。 */
+/**
+ * 切面的 RGBA（長度 W×H×4）。out 有給且大小對就重用。
+ * crop 有給（切面座標、含端點）：只畫裁切窗，回傳的 W／H 是裁切窗大小，像素和整片畫完再裁下來逐位元組相同
+ * （差異描邊的 4 鄰居仍看整片：裁切窗邊上的格子不會因為裁切多出一圈邊）。
+ */
 export function sliceRGBA(
   vol: Volume,
   axis: Axis,
@@ -31,10 +37,18 @@ export function sliceRGBA(
   selMask: Uint8Array | null,
   diff: Uint8Array | null,
   patch?: Preview | null,
-  out?: Uint8ClampedArray,
+  out?: Uint8ClampedArray | null,
+  crop?: UVBox | null,
 ): { W: number; H: number; data: Uint8ClampedArray } {
   const { X, Y } = vol;
-  const [W, H] = sliceSize(vol, axis);
+  const [FW, FH] = sliceSize(vol, axis);
+  // 要畫的列與行（整片座標、含端點）
+  const cu0 = crop ? Math.max(0, crop.u0) : 0;
+  const cv0 = crop ? Math.max(0, crop.v0) : 0;
+  const cu1 = crop ? Math.min(FW - 1, crop.u1) : FW - 1;
+  const cv1 = crop ? Math.min(FH - 1, crop.v1) : FH - 1;
+  const W = Math.max(0, cu1 - cu0 + 1);
+  const H = Math.max(0, cv1 - cv0 + 1);
   const data = out && out.length === W * H * 4 ? out : new Uint8ClampedArray(W * H * 4);
   // 色表：每個材質一個 RGBA（一次寫 32 位元；little-endian：R 在最低位元組）；混藍另一張
   const lut = new Uint32Array(256);
@@ -73,44 +87,59 @@ export function sliceRGBA(
   }
   const pd = patch?.data;
   const d = vol.data;
-  for (let v = 0, p = 0; v < H; v++) {
+  // u／v 都是整片座標（預覽盒、diff 鄰居、陣列 index 都照整片算），p 是輸出像素
+  const uEnd = cu1 + 1;
+  for (let v = cv0, p = 0; v <= cv1; v++) {
     const r = row0 + v * sv;
     const inPv = pAt >= 0 && v >= pv0 && v <= pv1;
     const prow = inPv ? pAt + (v - pv0) * psv - pu0 * psu : 0;
-    // 預覽盒在這一列的區間 [a, b)；區間外直接讀陣列
-    const a = inPv ? Math.max(0, pu0) : W;
-    const b = inPv ? Math.min(W, pu1 + 1) : W;
-    let u = 0;
-    let i = r;
+    // 預覽盒在這一列的區間 [a, b)（夾在裁切窗裡）；區間外直接讀陣列
+    const a = inPv ? Math.min(uEnd, Math.max(cu0, pu0)) : uEnd;
+    const b = inPv ? Math.max(a, Math.min(uEnd, pu1 + 1)) : uEnd;
+    let u = cu0;
+    let i = r + cu0 * su;
     if (selMask) {
       for (; u < a; u++, i += su, p++) px[p] = selMask[i] ? blu[d[i]] : lut[d[i]];
       for (; u < b; u++, i += su, p++) {
         const m = pd![prow + u * psu];
         px[p] = selMask[i] ? blu[m] : lut[m];
       }
-      for (; u < W; u++, i += su, p++) px[p] = selMask[i] ? blu[d[i]] : lut[d[i]];
+      for (; u < uEnd; u++, i += su, p++) px[p] = selMask[i] ? blu[d[i]] : lut[d[i]];
     } else {
       for (; u < a; u++, i += su, p++) px[p] = lut[d[i]];
       for (; u < b; u++, i += su, p++) px[p] = lut[pd![prow + u * psu]];
-      for (; u < W; u++, i += su, p++) px[p] = lut[d[i]];
+      for (; u < uEnd; u++, i += su, p++) px[p] = lut[d[i]];
     }
   }
   if (diff) {
     const edge = (DIFF_EDGE_RGB[0] | (DIFF_EDGE_RGB[1] << 8) | (DIFF_EDGE_RGB[2] << 16) | (255 << 24)) >>> 0;
     const red = (REMOVED_RGB[0] | (REMOVED_RGB[1] << 8) | (REMOVED_RGB[2] << 16) | (255 << 24)) >>> 0;
-    for (let v = 0, p = 0; v < H; v++) {
+    for (let v = cv0, p = 0; v <= cv1; v++) {
       const r = row0 + v * sv;
-      const edgeRow = v === 0 || v === H - 1;
-      for (let u = 0, i = r; u < W; u++, i += su, p++) {
+      // 出界＝整片的邊，不是裁切窗的邊
+      const edgeRow = v === 0 || v === FH - 1;
+      for (let u = cu0, i = r + cu0 * su; u <= cu1; u++, i += su, p++) {
         if (!diff[i]) continue;
         // 改過而現在是空＝被拿掉：整格紅
         if (!d[i]) px[p] = red;
         // 4 鄰居有一個不是改過的（或出界）＝邊
-        else if (edgeRow || u === 0 || u === W - 1 || !diff[i - su] || !diff[i + su] || !diff[i - sv] || !diff[i + sv]) px[p] = edge;
+        else if (edgeRow || u === 0 || u === FW - 1 || !diff[i - su] || !diff[i + su] || !diff[i - sv] || !diff[i + sv]) px[p] = edge;
       }
     }
   }
   return { W, H, data };
+}
+
+/** 每個 canvas 自己的 RGBA 緩衝（plan v15 C6）：尺寸不變就重用，不每次配一片。 */
+const outByCanvas = new WeakMap<HTMLCanvasElement, Uint8ClampedArray>();
+/** 給 cv 用、長度剛好 n 的緩衝（同一個 canvas 尺寸沒變就是上次那一片；其他要畫整片到 canvas 的地方可共用）。 */
+export function rgbaBufferFor(cv: HTMLCanvasElement, n: number): Uint8ClampedArray {
+  let buf = outByCanvas.get(cv);
+  if (!buf || buf.length !== n) {
+    buf = new Uint8ClampedArray(n);
+    outByCanvas.set(cv, buf);
+  }
+  return buf;
 }
 
 /** 把一個切面畫到 canvas：材質顏色、隱藏材質淡灰、選取混藍、差異（只有差異模式傳）描藍邊＋拿掉的紅；patch＝即時預覽蓋上去。 */
@@ -128,6 +157,7 @@ export function drawSlice(
   const [W, H] = sliceSize(vol, axis);
   if (cv.width !== W) cv.width = W;
   if (cv.height !== H) cv.height = H;
-  const { data } = sliceRGBA(vol, axis, at, rgb, hidden, selMask, diff, patch);
+  // putImageData 當場拷貝進 canvas，緩衝之後可以直接重用
+  const { data } = sliceRGBA(vol, axis, at, rgb, hidden, selMask, diff, patch, rgbaBufferFor(cv, W * H * 4));
   cv.getContext('2d')!.putImageData(new ImageData(data, W, H), 0, 0);
 }

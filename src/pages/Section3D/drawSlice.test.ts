@@ -1,4 +1,5 @@
 // plan v9 §7：LUT 版 drawSlice 和舊版逐位元組相同（三個軸、有無選取、有無 diff、有無預覽盒、有隱藏材質）。
+// plan v15 §7 C6：sliceRGBA(crop) === 整片裁下來的像素；重用 out 的第二次呼叫結果相同。
 import { describe, expect, it } from 'vitest';
 import { type Axis, type Vec3, type Volume, MATERIALS, demoVolume, hexToRgb, idx, initialLabeled, maskOf } from '../../volume/volume';
 import { matNameOf } from '../../volume/ops';
@@ -83,18 +84,72 @@ describe('drawSlice LUT 版（plan v9 P11）', () => {
     ['差異', new Set(), null, diff, null],
     ['全部＋預覽盒', new Set([4]), sel, diff, patch],
   ];
+  const same = (a: Uint8ClampedArray, b: Uint8ClampedArray) => {
+    expect(a.length).toBe(b.length);
+    let bad = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) bad++;
+    expect(bad).toBe(0);
+  };
   for (const axis of ['x', 'y', 'z'] as Axis[])
     for (const at of axis === 'x' ? [0, 50, vol.X - 1] : axis === 'y' ? [0, 30, vol.Y - 1] : [0, 64, vol.Z - 1])
       it(`${axis} = ${at}：四種組合逐位元組相同`, () => {
         for (const [, hidden, s, d, p] of cases) {
           const a = sliceRGBA(vol, axis, at, rgb, hidden, s, d, p).data;
           const b = reference(vol, axis, at, rgb, hidden, s, d, p);
-          expect(a.length).toBe(b.length);
-          let bad = 0;
-          for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) bad++;
-          expect(bad).toBe(0);
+          same(a, b);
         }
       });
+
+  /** 整片像素裁下 crop 那一塊。 */
+  const cut = (full: Uint8ClampedArray, W: number, c: { u0: number; v0: number; u1: number; v1: number }) => {
+    const CW = c.u1 - c.u0 + 1;
+    const out = new Uint8ClampedArray(CW * (c.v1 - c.v0 + 1) * 4);
+    for (let v = c.v0, o = 0; v <= c.v1; v++, o += CW * 4) out.set(full.subarray((v * W + c.u0) * 4, (v * W + c.u1 + 1) * 4), o);
+    return out;
+  };
+  for (const axis of ['x', 'y', 'z'] as Axis[])
+    it(`${axis}：crop 版 === 整片裁下來（含碰到邊、1×1、整片、預覽盒在裁切窗外／跨邊）`, () => {
+      const at = axis === 'x' ? 50 : axis === 'y' ? 30 : 64;
+      const [W, H] = axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
+      const crops = [
+        { u0: 0, v0: 0, u1: W - 1, v1: H - 1 },
+        { u0: 0, v0: 0, u1: 10, v1: 7 },
+        { u0: W - 9, v0: H - 5, u1: W - 1, v1: H - 1 },
+        { u0: 13, v0: 21, u1: 13, v1: 21 },
+        { u0: 25, v0: 5, u1: 75, v1: 65 },
+        { u0: 3, v0: 2, u1: 20, v1: 9 },
+        { u0: 60, v0: 50, u1: W - 1, v1: 58 },
+      ];
+      for (const [, hidden, s, d, p] of cases) {
+        const full = sliceRGBA(vol, axis, at, rgb, hidden, s, d, p);
+        for (const c of crops) {
+          const img = sliceRGBA(vol, axis, at, rgb, hidden, s, d, p, null, c);
+          expect([img.W, img.H]).toEqual([c.u1 - c.u0 + 1, c.v1 - c.v0 + 1]);
+          same(img.data, cut(full.data, W, c));
+        }
+      }
+    });
+  it('重用 out：第二次呼叫寫回同一片、結果相同（整片與 crop 都是）；大小不對就另配', () => {
+    const [, hidden, s, d, p] = cases[3];
+    const a = sliceRGBA(vol, 'z', 64, rgb, hidden, s, d, p);
+    const first = a.data.slice();
+    const again = sliceRGBA(vol, 'z', 64, rgb, hidden, s, d, p, a.data);
+    expect(again.data).toBe(a.data);
+    same(again.data, first);
+    // 先畫別的片弄髒緩衝，再畫回來
+    sliceRGBA(vol, 'z', 10, rgb, new Set(), null, null, null, a.data);
+    same(sliceRGBA(vol, 'z', 64, rgb, hidden, s, d, p, a.data).data, first);
+    const c = { u0: 25, v0: 5, u1: 75, v1: 65 };
+    const k = sliceRGBA(vol, 'z', 64, rgb, hidden, s, d, p, null, c);
+    const kFirst = k.data.slice();
+    sliceRGBA(vol, 'z', 10, rgb, new Set(), null, null, null, k.data, c);
+    const k2 = sliceRGBA(vol, 'z', 64, rgb, hidden, s, d, p, k.data, c);
+    expect(k2.data).toBe(k.data);
+    same(k2.data, kFirst);
+    // 大小不對：不重用
+    const wrong = new Uint8ClampedArray(8);
+    expect(sliceRGBA(vol, 'z', 64, rgb, hidden, s, d, p, wrong).data).not.toBe(wrong);
+  });
 });
 
 describe('改過的地方不染色（plan v10 §4.3）', () => {

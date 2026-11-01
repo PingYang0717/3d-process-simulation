@@ -1,6 +1,6 @@
 // 2D 縮圖（plan v12 §5.5）：純函式（選軸、選片、裁切、畫像素＋原始輪廓）＋ ImageBitmap 的 LRU。
 // 同一個設計的 split 共用一個軸（整個設計的 diff 外框聯集最長的那一軸當法線），片＝各自改最多的那一片；
-// 對照組（沒改動）用結構中點。像素：sliceRGBA（深藍邊、拿掉的紅）→ 裁到 diff 外框 ∪ 改到結構的外框 ＋8 格 →
+// 對照組（沒改動）用結構中點。像素：sliceRGBA 只畫裁切窗（diff 外框 ∪ 改到結構的外框 ＋8 格；深藍邊、拿掉的紅，plan v15 C6）→
 // nearest 縮放（長邊 ≤ 240）→ 疊原始輪廓（黑線）。
 import type { Axis, BBox, Vec3 } from '../../volume/volume';
 import type { XY } from '../../slice/trace';
@@ -75,24 +75,34 @@ export const thumbScale = (c: UVBox, max = THUMB_MAX) => Math.min(8, max / Math.
 /** 原始輪廓的黑線。 */
 export const LOOP_RGB: Vec3 = [17, 17, 17];
 
+/** 裁切窗的 RGBA 暫存（plan v15 C6）：縮圖一次畫一張、畫完就縮進自己的輸出，所以可以共用一片；只長不縮，長度不對就切 subarray。 */
+let scratch: Uint8ClampedArray | null = null;
+const scratchFor = (n: number) => {
+  if (!scratch || scratch.length < n) scratch = new Uint8ClampedArray(n);
+  return scratch.length === n ? scratch : scratch.subarray(0, n);
+};
+/** 裁切窗那一塊的切面像素（W／H＝裁切窗大小）。 */
+const cropRGBA = (slab: Slab, crop: UVBox, rgb: Map<number, Vec3>, hidden: Set<number>, diff: Uint8Array | null) =>
+  sliceRGBA(slab.vol, slab.axis, 0, rgb, hidden, null, diff, null, scratchFor((crop.u1 - crop.u0 + 1) * (crop.v1 - crop.v0 + 1) * 4), crop);
+
 /**
- * 縮圖像素（純函式，測試可比對）：slab 畫成 RGBA（含 diff 深藍邊與拿掉的紅）→ 裁 crop → nearest 縮放 → 疊原始輪廓。
- * loops 是同一片原始的輪廓（切面座標、整數角）。
+ * 縮圖像素（純函式，測試可比對）：slab 只畫 crop 那一塊 RGBA（含 diff 深藍邊與拿掉的紅）→ nearest 縮放 → 疊原始輪廓。
+ * loops 是同一片原始的輪廓（切面座標、整數角）。結果和「整片畫完再裁」逐像素相同（thumbs.test.ts）。
  */
 export function thumbRGBA(slab: Slab, crop: UVBox, rgb: Map<number, Vec3>, hidden: Set<number>, loops: XY[][], max = THUMB_MAX): { W: number; H: number; data: Uint8ClampedArray } {
-  const full = sliceRGBA(slab.vol, slab.axis, 0, rgb, hidden, null, slab.diff);
+  const img = cropRGBA(slab, crop, rgb, hidden, slab.diff);
   const s = thumbScale(crop, max);
   const CW = crop.u1 - crop.u0 + 1;
   const CH = crop.v1 - crop.v0 + 1;
   const W = Math.max(1, Math.round(CW * s));
   const H = Math.max(1, Math.round(CH * s));
   const out = new Uint8ClampedArray(W * H * 4);
-  const src = new Uint32Array(full.data.buffer, full.data.byteOffset, full.W * full.H);
+  // img 的座標已經是裁切窗自己的（(0, 0)＝crop 左上）
+  const src = new Uint32Array(img.data.buffer, img.data.byteOffset, img.W * img.H);
   const dst = new Uint32Array(out.buffer);
   for (let y = 0; y < H; y++) {
-    const v = crop.v0 + Math.min(CH - 1, Math.floor(y / s));
-    const row = v * full.W;
-    for (let x = 0; x < W; x++) dst[y * W + x] = src[row + crop.u0 + Math.min(CW - 1, Math.floor(x / s))];
+    const row = Math.min(CH - 1, Math.floor(y / s)) * img.W;
+    for (let x = 0; x < W; x++) dst[y * W + x] = src[row + Math.min(CW - 1, Math.floor(x / s))];
   }
   // 原始輪廓：軸向的線段，畫 1 px（座標＝角，換到縮圖像素）
   const ink = (LOOP_RGB[0] | (LOOP_RGB[1] << 8) | (LOOP_RGB[2] << 16) | (255 << 24)) >>> 0;
@@ -161,7 +171,7 @@ export function structThumbRGBA(
   face: Vec3 | null,
   max = 120,
 ): { W: number; H: number; data: Uint8ClampedArray } {
-  const full = sliceRGBA(slab.vol, slab.axis, 0, rgb, hidden, null, null);
+  const img = cropRGBA(slab, crop, rgb, hidden, null);
   const s = thumbScale(crop, max);
   const CW = crop.u1 - crop.u0 + 1;
   const CH = crop.v1 - crop.v0 + 1;
@@ -174,15 +184,18 @@ export function structThumbRGBA(
   const vi = slab.axis === 'x' ? (u: number, v: number) => u * SY + v : (u: number, v: number) => v * SX + u;
   const selPx = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) {
-    const v = crop.v0 + Math.min(CH - 1, Math.floor(y / s));
+    const cy = Math.min(CH - 1, Math.floor(y / s));
+    const v = crop.v0 + cy;
     for (let x = 0; x < W; x++) {
-      const u = crop.u0 + Math.min(CW - 1, Math.floor(x / s));
-      const p4 = (v * full.W + u) * 4;
+      const cx = Math.min(CW - 1, Math.floor(x / s));
+      const u = crop.u0 + cx;
+      // img 是裁切窗自己的座標；labels 仍用整片的 (u, v)
+      const p4 = (cy * img.W + cx) * 4;
       const o = (y * W + x) * 4;
       const sel = on.has(lab[vi(u, v)]);
       if (sel) selPx[y * W + x] = 1;
       for (let c = 0; c < 3; c++) {
-        const p = full.data[p4 + c];
+        const p = img.data[p4 + c];
         out[o + c] = sel ? p : Math.round(p * 0.35 + 255 * 0.65);
       }
       out[o + 3] = 255;

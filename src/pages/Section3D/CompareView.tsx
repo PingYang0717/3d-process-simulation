@@ -1,13 +1,13 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Alert, Segmented, Select, Switch, Tag, Typography } from 'antd';
 import { type Axis, type Vec3, bboxDims } from '../../volume/volume';
 import { signed } from '../../ui/format';
 import { BASE_ID, type Editor, type Split } from './editor';
 import { SliceView } from './views.lazy';
 import { OverlayView } from './OverlayView';
-import { sliceDiff, unionUV } from './overlay';
+import { type UVBox, sliceDiff, unionUV } from './overlay';
 import { factorsOf, levelCell } from './matrix';
-import { pairMask, slabOf } from './slabs';
+import { pairMaskOf, slabOf, versionOf } from './slabs';
 
 const { Text } = Typography;
 
@@ -17,6 +17,8 @@ const AX = { x: 0, y: 1, z: 2 } as const;
 /**
  * 並排看各 split（plan v12 §5.4 搬進實驗頁）：每個 split 一張同位置切面，深藍框＝和基準不同。
  * 切面來源是 slabOf（parked 不還原，§5.3）；ids＝要比的 split（省略＝全部）。點卡片標題＝onOpen（實驗頁：在 3D 看）。
+ * plan v15 §5.6 C5：每張卡的切面、對基準的差異 mask（pairMaskOf 有快取）、自動放大外框都進 useMemo，
+ * deps 是卡片 id|版本 串、基準版本、軸、片；滑鼠移動、切模式這類 render 不再逐卡比對整片。
  */
 export function CompareView({ ed, axis, setAxis, ids, onOpen }: { ed: Editor; axis: Axis; setAxis: (a: Axis) => void; ids?: string[]; onOpen?: (id: string) => void }) {
   const at = (a: Axis) => ed.cursor[AX[a]];
@@ -29,19 +31,33 @@ export function CompareView({ ed, axis, setAxis, ids, onOpen }: { ed: Editor; ax
   const baseSplit = ed.compareBase === BASE_ID ? null : (ed.splits.find((s) => s.id === ed.compareBase) ?? null);
   const baseId = baseSplit ? baseSplit.id : BASE_ID;
   const t = at(axis);
-  const baseSlab = slabOf(ed.orig, baseSplit, axis, t);
-  const slabs = new Map(cards.map((c) => [c.id, slabOf(ed.orig, c.split, axis, t)]));
-  const diffOf = (id: string) => {
-    if (id === baseId) return null;
-    const sl = slabs.get(id)!;
-    if (!baseSplit) return id === BASE_ID ? null : { mask: sl.diff, count: sl.diffCount };
-    return pairMask(sl.vol.data, baseSlab.vol.data);
-  };
+  // 身分每次 render 都換的（cards、slab Map）用值的簽名當 deps：卡片 id|版本 串、基準版本
+  const cardsKey = cards.map((c) => `${c.id}|${versionOf(ed.orig, c.split)}`).join(',');
+  const baseVersion = versionOf(ed.orig, baseSplit);
+  const { slabs, diffs, diffBox } = useMemo(() => {
+    const baseSlab = slabOf(ed.orig, baseSplit, axis, t);
+    const slabs = new Map(cards.map((c) => [c.id, slabOf(ed.orig, c.split, axis, t)]));
+    const diffs = new Map<string, { mask: Uint8Array; count: number } | null>();
+    const boxes: (UVBox | null)[] = [];
+    const sv = baseSlab.vol;
+    for (const c of cards) {
+      const sl = slabs.get(c.id)!;
+      let d: { mask: Uint8Array; count: number } | null = null;
+      if (c.id !== baseId) {
+        // 基準是原始：slab 自己帶 diff；基準是某個 split：兩片相比（片大小的 mask，有快取）
+        if (!baseSplit) d = c.id === BASE_ID ? null : { mask: sl.diff, count: sl.diffCount };
+        else d = pairMaskOf(versionOf(ed.orig, c.split), sl.vol.data, baseVersion, sv.data, axis, t);
+        boxes.push(sliceDiff(sl.vol.data, sv.data, sv, axis, 0).box);
+      }
+      diffs.set(c.id, d);
+    }
+    // 卡片自動放大：所有卡片在這一片對基準的差異聯集外框（＋4 格），大家同一個框才好比
+    const [SW, SH] = axis === 'z' ? [sv.X, sv.Y] : axis === 'y' ? [sv.X, sv.Z] : [sv.Z, sv.Y];
+    return { slabs, diffs, diffBox: unionUV(boxes, 4, SW, SH) };
+  }, [cardsKey, baseVersion, baseId, axis, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  const diffOf = (id: string) => diffs.get(id) ?? null;
   const factors = factorsOf(ed.designs);
-  // 卡片自動放大：所有卡片在這一片對基準的差異聯集外框（＋4 格），大家同一個框才好比
-  const sv = baseSlab.vol;
-  const [SW, SH] = axis === 'z' ? [sv.X, sv.Y] : axis === 'y' ? [sv.X, sv.Z] : [sv.Z, sv.Y];
-  const zoomBox = zoom ? unionUV(cards.filter((c) => c.id !== baseId).map((c) => sliceDiff(slabs.get(c.id)!.vol.data, baseSlab.vol.data, sv, axis, 0).box), 4, SW, SH) : null;
+  const zoomBox = zoom ? diffBox : null;
   const focus = ed.selComps[0];
   const nm = ed.nmPerVoxel;
   // 切面座標：法線軸換成 0（假 Volume）；點下去換回真正的片

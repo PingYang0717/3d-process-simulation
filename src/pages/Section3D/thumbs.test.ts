@@ -1,13 +1,95 @@
 // plan v12 §7：縮圖。同一 split 兩次像素相同；差異描邊像素 > 0；原始輪廓線存在；同一設計選同一個軸；對照組選結構中點。
+// plan v15 §7 C6：只畫裁切窗的縮圖（thumbRGBA／structThumbRGBA）和舊版「整片畫完再裁」逐像素相同。
 import { describe, expect, it } from 'vitest';
-import { type Vec3, MATERIALS, hexToRgb } from '../../volume/volume';
+import { type BBox, type Vec3, MATERIALS, hexToRgb } from '../../volume/volume';
 import { handle } from '../../volume/workerCore';
-import { base, comp, vol } from '../../volume/ops11.fixture';
+import { base, comp, expectSame, vol } from '../../volume/ops11.fixture';
 import type { Op } from '../../volume/ops';
-import { type SplitPatch, type SplitStats, busiestSlice, patchSliceCounts, slabOfArrays, slabOfPatch } from '../../splits/lifecycle';
-import { contourOf } from './overlay';
-import { DIFF_EDGE_RGB, REMOVED_RGB } from './drawSlice';
-import { LOOP_RGB, SEL_EDGE, autoAxis, longestAxisOf, structThumbRGBA, thumbAt, thumbCrop, thumbRGBA, unionBoxes } from './thumbs';
+import type { XY } from '../../slice/trace';
+import { type Slab, type SplitPatch, type SplitStats, busiestSlice, patchSliceCounts, slabOfArrays, slabOfPatch } from '../../splits/lifecycle';
+import { type UVBox, contourOf } from './overlay';
+import { DIFF_EDGE_RGB, REMOVED_RGB, sliceRGBA } from './drawSlice';
+import { LOOP_RGB, SEL_EDGE, THUMB_MAX, autoAxis, longestAxisOf, structThumbRGBA, thumbAt, thumbCrop, thumbRGBA, thumbScale, unionBoxes } from './thumbs';
+
+/** 舊版 thumbRGBA（plan v12～v14）：整片 sliceRGBA → 裁 crop → nearest → 疊輪廓。 */
+function thumbRef(slab: Slab, crop: UVBox, rgb: Map<number, Vec3>, hidden: Set<number>, loops: XY[][], max = THUMB_MAX) {
+  const full = sliceRGBA(slab.vol, slab.axis, 0, rgb, hidden, null, slab.diff);
+  const s = thumbScale(crop, max);
+  const CW = crop.u1 - crop.u0 + 1;
+  const CH = crop.v1 - crop.v0 + 1;
+  const W = Math.max(1, Math.round(CW * s));
+  const H = Math.max(1, Math.round(CH * s));
+  const out = new Uint8ClampedArray(W * H * 4);
+  const src = new Uint32Array(full.data.buffer, full.data.byteOffset, full.W * full.H);
+  const dst = new Uint32Array(out.buffer);
+  for (let y = 0; y < H; y++) {
+    const v = crop.v0 + Math.min(CH - 1, Math.floor(y / s));
+    const row = v * full.W;
+    for (let x = 0; x < W; x++) dst[y * W + x] = src[row + crop.u0 + Math.min(CW - 1, Math.floor(x / s))];
+  }
+  const ink = (LOOP_RGB[0] | (LOOP_RGB[1] << 8) | (LOOP_RGB[2] << 16) | (255 << 24)) >>> 0;
+  const px = (u: number) => Math.min(W - 1, Math.max(0, Math.round((u - crop.u0) * s)));
+  const py = (v: number) => Math.min(H - 1, Math.max(0, Math.round((v - crop.v0) * s)));
+  for (const loop of loops)
+    for (let k = 0; k < loop.length; k++) {
+      const p = loop[k];
+      const q = loop[(k + 1) % loop.length];
+      if ((p[0] < crop.u0 && q[0] < crop.u0) || (p[0] > crop.u1 + 1 && q[0] > crop.u1 + 1) || (p[1] < crop.v0 && q[1] < crop.v0) || (p[1] > crop.v1 + 1 && q[1] > crop.v1 + 1)) continue;
+      const x0 = px(p[0]);
+      const y0 = py(p[1]);
+      const x1 = px(q[0]);
+      const y1 = py(q[1]);
+      if (y0 === y1) for (let x = Math.min(x0, x1); x <= Math.max(x0, x1); x++) dst[y0 * W + x] = ink;
+      else if (x0 === x1) for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) dst[y * W + x0] = ink;
+      else {
+        const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
+        for (let i = 0; i <= n; i++) dst[Math.round(y0 + ((y1 - y0) * i) / n) * W + Math.round(x0 + ((x1 - x0) * i) / n)] = ink;
+      }
+    }
+  return { W, H, data: out };
+}
+
+/** 舊版 structThumbRGBA 的像素階段（整片 sliceRGBA 再逐像素取）；描邊與面的橘線和新版共用同一段邏輯，這裡只比到混白為止。 */
+function structRef(slab: Slab, crop: UVBox, rgb: Map<number, Vec3>, hidden: Set<number>, on: Set<number>, max: number) {
+  const full = sliceRGBA(slab.vol, slab.axis, 0, rgb, hidden, null, null);
+  const s = thumbScale(crop, max);
+  const CW = crop.u1 - crop.u0 + 1;
+  const CH = crop.v1 - crop.v0 + 1;
+  const W = Math.max(1, Math.round(CW * s));
+  const H = Math.max(1, Math.round(CH * s));
+  const out = new Uint8ClampedArray(W * H * 4);
+  const lab = slab.L.labels;
+  const { X: SX, Y: SY } = slab.vol;
+  const vi = slab.axis === 'x' ? (u: number, v: number) => u * SY + v : (u: number, v: number) => v * SX + u;
+  const selPx = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const v = crop.v0 + Math.min(CH - 1, Math.floor(y / s));
+    for (let x = 0; x < W; x++) {
+      const u = crop.u0 + Math.min(CW - 1, Math.floor(x / s));
+      const p4 = (v * full.W + u) * 4;
+      const o = (y * W + x) * 4;
+      const sel = on.has(lab[vi(u, v)]);
+      if (sel) selPx[y * W + x] = 1;
+      for (let c = 0; c < 3; c++) {
+        const p = full.data[p4 + c];
+        out[o + c] = sel ? p : Math.round(p * 0.35 + 255 * 0.65);
+      }
+      out[o + 3] = 255;
+    }
+  }
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const k = y * W + x;
+      if (!selPx[k]) continue;
+      const edge = (x > 0 && !selPx[k - 1]) || (x < W - 1 && !selPx[k + 1]) || (y > 0 && !selPx[k - W]) || (y < H - 1 && !selPx[k + W]);
+      if (!edge) continue;
+      const o = k * 4;
+      out[o] = SEL_EDGE[0];
+      out[o + 1] = SEL_EDGE[1];
+      out[o + 2] = SEL_EDGE[2];
+    }
+  return { W, H, data: out };
+}
 
 const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
 const rgb = new Map<number, Vec3>(MATERIALS.map((m) => [m.id, hexToRgb(m.color)]));
@@ -52,6 +134,35 @@ describe('縮圖（plan v12 §5.5）', () => {
     expect(count(a.data, DIFF_EDGE_RGB) + count(a.data, REMOVED_RGB)).toBeGreaterThan(0);
     expect(count(a.data, LOOP_RGB)).toBeGreaterThan(0);
   });
+
+  it('只畫裁切窗 === 舊版整片畫完再裁（三個軸、幾種裁切窗、有隱藏材質、parked 與 live 的片）', () => {
+    const d = design[2];
+    const b: BBox = p2.bbox;
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const at = busiestSlice(patchSliceCounts(vol, d.patch, vol.data, axis)) ?? thumbAt(axis, d.stats.diffBox, b, vol);
+      const parked = slabOfPatch(vol, vol.data, origLabels, d.patch, axis, at);
+      const o = slabOfArrays(vol, vol.data, origLabels, base.L.comps, vol.data, axis, at);
+      const loops = contourOf(o.L, o.vol, [p2.key], axis, 0);
+      const [W, H] = axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
+      const crops: UVBox[] = [
+        thumbCrop(axis, [d.stats.diffBox, b], vol),
+        thumbCrop(axis, [b], vol, 0),
+        { u0: 0, v0: 0, u1: W - 1, v1: H - 1 },
+        { u0: 0, v0: 0, u1: 5, v1: 3 },
+        { u0: W - 7, v0: H - 4, u1: W - 1, v1: H - 1 },
+      ];
+      for (const slab of [parked, o])
+        for (const crop of crops)
+          for (const hidden of [new Set<number>(), new Set([p2.mat, 1])]) {
+            const now = thumbRGBA(slab, crop, rgb, hidden, loops);
+            const ref = thumbRef(slab, crop, rgb, hidden, loops);
+            expect([now.W, now.H]).toEqual([ref.W, ref.H]);
+            expectSame(now.data, ref.data);
+            // 連續兩張不同裁切窗共用暫存也不互相污染
+            expectSame(thumbRGBA(slab, crop, rgb, hidden, loops).data, ref.data);
+          }
+    }
+  });
 });
 
 describe('結構縮圖（設計區 ①）', () => {
@@ -89,6 +200,22 @@ describe('結構縮圖（設計區 ①）', () => {
       expect(edge).toBeGreaterThan(0);
       expect(edge).toBeLessThan(want);
       expect(mismatch).toBe(0);
+    }
+  });
+  it('只畫裁切窗 === 舊版整片畫完再裁（三個軸、幾種裁切窗、有隱藏材質、不同倍率）', () => {
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const at = thumbAt(axis, null, p2.bbox, vol);
+      const slab = slabOfArrays(vol, vol.data, origLabels, base.L.comps, vol.data, axis, at);
+      const [W, H] = axis === 'z' ? [vol.X, vol.Y] : axis === 'y' ? [vol.X, vol.Z] : [vol.Z, vol.Y];
+      const crops: UVBox[] = [thumbCrop(axis, [p2.bbox], vol, 6), thumbCrop(axis, [p2.bbox], vol, 0), { u0: 0, v0: 0, u1: W - 1, v1: H - 1 }, { u0: 2, v0: 1, u1: 9, v1: 4 }];
+      for (const crop of crops)
+        for (const hidden of [new Set<number>(), new Set([1, 3])])
+          for (const max of [120, 48]) {
+            const now = structThumbRGBA(slab, crop, rgb, hidden, on, null, null, max);
+            const ref = structRef(slab, crop, rgb, hidden, on, max);
+            expect([now.W, now.H]).toEqual([ref.W, ref.H]);
+            expectSame(now.data, ref.data);
+          }
     }
   });
 });

@@ -54,7 +54,7 @@ if (import.meta.env?.DEV && typeof window !== 'undefined') {
     slabOf(ed.orig, ed.splits.find((s) => s.id === id) ?? null, axis, at);
 }
 
-/** 兩片不同的格子（A vs B 的基準不是原始時）。 */
+/** 兩片不同的格子（A vs B 的基準不是原始時）。純函式；並排卡片走有快取的 pairMaskOf。 */
 export function pairMask(a: Uint8Array, b: Uint8Array) {
   const m = new Uint8Array(a.length);
   let n = 0;
@@ -65,3 +65,28 @@ export function pairMask(a: Uint8Array, b: Uint8Array) {
     }
   return { mask: m, count: n };
 }
+
+/** A vs B 差異 mask 的快取（plan v15 §5.6 C5）：key＝兩個版本＋軸＋片，值是片大小的 mask；上限 32 MB、LRU。 */
+const pairs = new Map<string, { mask: Uint8Array; count: number }>();
+let pairBytes = 0;
+const PAIR_LIMIT = 32 * 1024 * 1024;
+export function pairMaskOf(va: number, a: Uint8Array, vb: number, b: Uint8Array, axis: Axis, at: number) {
+  const key = `${va}|${vb}|${axis}|${at}`;
+  const hit = pairs.get(key);
+  if (hit) {
+    pairs.delete(key);
+    pairs.set(key, hit);
+    return hit;
+  }
+  const r = pairMask(a, b);
+  pairs.set(key, r);
+  pairBytes += r.mask.length;
+  while (pairBytes > PAIR_LIMIT && pairs.size > 1) {
+    const k = pairs.keys().next().value!;
+    pairBytes -= pairs.get(k)!.mask.length;
+    pairs.delete(k);
+  }
+  return r;
+}
+/** 開發模式量測：A vs B 快取有幾筆、幾位元組。 */
+export const pairStats = () => ({ size: pairs.size, bytes: pairBytes });

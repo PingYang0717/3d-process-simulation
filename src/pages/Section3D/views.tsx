@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from 'react';
 import {
-  AmbientLight,
   BoxGeometry,
   BufferAttribute,
   BufferGeometry,
   CanvasTexture,
   Color,
+  ColorManagement,
   DirectionalLight,
+  HemisphereLight,
+  LinearSRGBColorSpace,
   DoubleSide,
   FrontSide,
   EdgesGeometry,
@@ -79,6 +81,13 @@ const HEAD_ON_PX = 4;
 /** 同一個位置再點一次（時間、距離內）＝沿射線選下一個結構。 */
 const RECLICK_MS = 1500;
 const RECLICK_PX = 6;
+/**
+ * 光照（plan v12 §5.1）：改後＝材質原色。頂點色是調色盤的 sRGB 值，直接輸出（不做色彩管理、不做 sRGB 編碼），
+ * 所以畫面上的顏色＝調色盤 × 光照係數 k；k 最高 0.62＋0.30 ≤ 1.0（最亮的面也不超過調色盤色、不飽和），
+ * 均勻縮放不改色相與飽和度。three 的 Lambert BRDF 除以 π，所以強度乘 π。
+ */
+ColorManagement.enabled = false;
+export const LIGHT = { sky: 0.62, ground: 0.5, key: 0.3 } as const;
 const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export type ViewPreset = 'front' | 'top' | 'side' | 'iso' | 'home' | 'fit';
@@ -100,6 +109,10 @@ export interface View3DHandle {
   highlightFace: (dir: Vec3 | null) => void;
   /** 對準這個體素（有動畫，距離不變）。 */
   lookAt: (p: Vec3) => void;
+  /** 對準一個外框（「對準差異」：split 的 diff 外框，plan v12 §5.4）。 */
+  focusBox: (b: BBox) => void;
+  /** 改後模式套用一步：在改到的外框畫橘色虛線，1.5 秒淡出（plan v12 §5.1 D1；不碰網格）。 */
+  stepBox: (b: BBox) => void;
 }
 
 /** 右鍵選單用：點到的體素，以及沿射線往裡面還有哪些結構（key）。 */
@@ -510,6 +523,7 @@ export function View3D({
     if (import.meta.env.DEV) (window as unknown as { __renderer?: WebGLRenderer }).__renderer = renderer;
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
     renderer.localClippingEnabled = true;
+    renderer.outputColorSpace = LinearSRGBColorSpace;
     host.appendChild(renderer.domElement);
     const scene = new Scene();
     scene.background = new Color('#f5f6f8');
@@ -565,8 +579,8 @@ export function View3D({
       const h = probe.intersectObjects([...ps.values()], false)[0];
       return !!h && h.distance < dist - radius;
     };
-    const setView = (preset: ViewPreset) => {
-      const b = bboxRef.current;
+    const setView = (preset: ViewPreset, box?: BBox) => {
+      const b = box ?? bboxRef.current;
       const target = center.clone();
       let radius = fullRadius();
       if (preset === 'fit' && b) {
@@ -675,13 +689,10 @@ export function View3D({
       recenterTimer = setTimeout(recenter, 250);
     };
     controls.addEventListener('end', scheduleRecenter);
-    scene.add(new AmbientLight(0xffffff, 0.8));
-    const key = new DirectionalLight(0xffffff, 0.85);
+    scene.add(new HemisphereLight(new Color(LIGHT.sky, LIGHT.sky, LIGHT.sky), new Color(LIGHT.ground, LIGHT.ground, LIGHT.ground), Math.PI));
+    const key = new DirectionalLight(0xffffff, LIGHT.key * Math.PI);
     key.position.set(1, 2, 1.5);
     scene.add(key);
-    const fill = new DirectionalLight(0xffffff, 0.3);
-    fill.position.set(-1, -0.5, -1);
-    scene.add(fill);
     const frame = new LineSegments(new EdgesGeometry(new BoxGeometry(vol.X, vol.Y, vol.Z)), new LineBasicMaterial({ color: 0xc9cdd1 }));
     frame.position.copy(center);
     scene.add(frame);
@@ -738,6 +749,35 @@ export function View3D({
     const hoverBox = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0x595959, transparent: true, opacity: 0.8 }));
     hoverBox.visible = false;
     scene.add(hoverBox);
+    const stepLine = new LineSegments(new BufferGeometry(), new LineDashedMaterial({ color: BRUSH_COLOR, dashSize: 2, gapSize: 1.5, transparent: true, opacity: 1, depthTest: false }));
+    stepLine.visible = false;
+    stepLine.renderOrder = 6;
+    scene.add(stepLine);
+    let stepTimer: ReturnType<typeof setInterval> | null = null;
+    const stepBox = (b: BBox) => {
+      if (stepTimer) clearInterval(stepTimer);
+      stepLine.geometry.dispose();
+      stepLine.geometry = boxEdges(b);
+      stepLine.computeLineDistances();
+      stepLine.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
+      stepLine.visible = true;
+      const m = stepLine.material;
+      m.opacity = 1;
+      const t0 = performance.now();
+      const fade = reducedMotion() ? 0 : 500;
+      stepTimer = setInterval(() => {
+        const t = performance.now() - t0;
+        // 1 秒全亮、最後 0.5 秒淡出（減少動態：1.5 秒後直接收掉）
+        m.opacity = t < 1500 - fade ? 1 : Math.max(0, (1500 - t) / Math.max(1, fade));
+        if (t >= 1500) {
+          stepLine.visible = false;
+          if (stepTimer) clearInterval(stepTimer);
+          stepTimer = null;
+        }
+        kick();
+      }, 50);
+      kick();
+    };
     const ghost = new LineSegments(new BufferGeometry(), new LineDashedMaterial({ color: BRUSH_COLOR, dashSize: 3, gapSize: 2, depthTest: false }));
     ghost.visible = false;
     ghost.renderOrder = 6;
@@ -860,7 +900,15 @@ export function View3D({
       col.needsUpdate = true;
       kick();
     };
-    handle.current = { setView, recolor, flash, highlightFace, lookAt: (p) => lookAtPoint(new Vector3(p[0] + 0.5, vol.Y - p[1] - 0.5, p[2] + 0.5)) };
+    handle.current = {
+      setView,
+      recolor,
+      flash,
+      highlightFace,
+      lookAt: (p) => lookAtPoint(new Vector3(p[0] + 0.5, vol.Y - p[1] - 0.5, p[2] + 0.5)),
+      focusBox: (b) => setView('fit', b),
+      stepBox,
+    };
     camRef.current = { pivotAt, lookAtPoint };
     host.addEventListener('wheel', onWheel, { passive: false });
 
@@ -959,6 +1007,7 @@ export function View3D({
       controls.removeEventListener('change', kick);
       kickEvents.forEach((ev) => host.removeEventListener(ev, kick));
       flashTimer.forEach(clearTimeout);
+      if (stepTimer) clearInterval(stepTimer);
       ro.disconnect();
       host.removeEventListener('pointerdown', onDown, { capture: true });
       host.removeEventListener('wheel', onWheel);

@@ -524,6 +524,8 @@ export default function Section3DPage() {
   useEffect(() => {
     if (!ed.last) return;
     view.current?.flash();
+    // 改後不標色（plan v12 §5.1 D1）：只在改到的外框畫橘色虛線，1.5 秒淡出
+    if (ed.last.box && ed.stepFlash && mode === 'now') view.current?.stepBox(ed.last.box);
     message.open({
       key: 'last',
       type: 'success',

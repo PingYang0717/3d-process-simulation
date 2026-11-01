@@ -61,6 +61,11 @@ export function SettingsDrawer({
             />
           </Row>
         </Section>
+        <Section title="顯示">
+          <Row label="套用後閃一下改到的範圍" sub="改後模式不標色；套用一步後在改到的外框畫橘色虛線，1.5 秒淡出（不碰網格）">
+            <Switch checked={ed.stepFlash} onChange={ed.setStepFlash} />
+          </Row>
+        </Section>
         <Section title="2D 剖面">
           <Row label="選到結構時自動放大到它" sub="2D 剖面的主切面">
             <Switch checked={ed.autoZoom} onChange={ed.setAutoZoom} />

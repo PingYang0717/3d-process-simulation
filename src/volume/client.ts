@@ -29,8 +29,47 @@ function get() {
   return worker;
 }
 
+/** 一筆 Worker 請求的摘要（開發模式 window.__calls，e2e 用；不留大陣列）。 */
+export interface CallNote {
+  type: string;
+  at: number;
+  diff?: boolean;
+  showDiff?: boolean;
+  filter?: string;
+  owner?: string;
+  keep?: string;
+}
+const noteOf = (type: string, req: Record<string, unknown>): CallNote => {
+  const f = req.filter as Record<string, unknown> | undefined;
+  return {
+    type,
+    at: Date.now(),
+    ...(req.diff !== undefined ? { diff: !!req.diff } : {}),
+    ...(req.showDiff !== undefined ? { showDiff: !!req.showDiff } : {}),
+    ...(f ? { filter: 'diff' in f ? 'diff' : 'mat' in f ? 'mat' : 'comps' } : {}),
+    ...(typeof req.owner === 'string' ? { owner: req.owner } : {}),
+    ...(typeof req.keep === 'string' ? { keep: req.keep } : {}),
+  };
+};
+const DEV = (() => {
+  try {
+    return !!import.meta.env?.DEV;
+  } catch {
+    return false;
+  }
+})();
+/** 開發模式：最近 5,000 筆請求（plan v12 §5.1「永不染色」的 e2e 斷言、§5.4「點卡片不 restore」）。 */
+function record(type: string, req: unknown) {
+  if (!DEV || typeof window === 'undefined') return;
+  const w = window as unknown as { __calls?: CallNote[] };
+  const list = (w.__calls ??= []);
+  list.push(noteOf(type, (req ?? {}) as Record<string, unknown>));
+  if (list.length > 5000) list.splice(0, list.length - 5000);
+}
+
 /** transfer 只放呼叫端之後不再用的陣列（會被搬走）。Worker 依送出順序一個一個處理。 */
 export function call<K extends Kind>(type: K, req: Requests[K]['req'], transfer: Transferable[] = []): Promise<Requests[K]['res']> {
+  record(type, req);
   const id = ++seq;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve: resolve as (v: unknown) => void, reject });

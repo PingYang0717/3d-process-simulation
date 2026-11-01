@@ -271,7 +271,10 @@ export function useEditor() {
   );
   /** 每一步送 Worker 前先叫它：View3D 在主執行緒用裁切的小塊立刻畫出結果（正式結果幾秒後覆蓋）。 */
   const previewHook = useRef<((op: Op) => void) | null>(null);
-  const [last, setLast] = useState<{ text: string; at: number } | null>(null);
+  /** 剛做了什麼：訊息＋那一步改到的外框（改後模式畫橘色虛線外框淡出，plan v12 §5.1 D1）。 */
+  const [last, setLast] = useState<{ text: string; at: number; box?: BBox } | null>(null);
+  /** 套用一步後閃橘色虛線外框（設定可關）。 */
+  const [stepFlash, setStepFlash] = usePersisted('stepFlash', true);
   const [menu, setMenu] = useState<MenuState | null>(null);
   /** 計算中的說明（例如「計算中…」）；有值時其他改體素的動作先擋下。 */
   const [busy, setBusy] = useState<string | null>(null);
@@ -509,14 +512,14 @@ export function useEditor() {
       setSplits((all) => [...all, { ...sp, name, cur: next, ops: [op], hist: [entry], future: [] }]);
       setActiveId(sp.id);
       keepSel(next);
-      setLast({ text: `原始保持不變，已自動建立 ${name}：${headText(op, o)}${resultText(rep)}`, at: Date.now() });
+      setLast({ text: `原始保持不變，已自動建立 ${name}：${headText(op, o)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
       return;
     }
     setSplits((all) =>
       all.map((x) => (x.id === sp.id ? { ...x, cur: next, ops: [...x.ops, op], hist: [...x.hist, entry].slice(-HISTORY_LIMIT), future: [] } : x)),
     );
     keepSel(next);
-    setLast({ text: `${headText(op, from)}${resultText(rep)}`, at: Date.now() });
+    setLast({ text: `${headText(op, from)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
   };
 
   const drain = async () => {
@@ -1255,6 +1258,8 @@ export function useEditor() {
     ledger,
     last,
     setLast,
+    stepFlash,
+    setStepFlash,
     menu,
     setMenu,
     translate,

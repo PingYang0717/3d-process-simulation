@@ -22,7 +22,7 @@ import {
   translateMask,
 } from './volume';
 import { type Scope, fromZRange, isFullScope, scopeText } from './scope';
-import { type ProfileOp, applyProfileMask } from './profile';
+import { type ProfileOp, applyProfileMask, keyBoxes } from './profile';
 
 export type { ProfileOp } from './profile';
 
@@ -205,7 +205,7 @@ export function applyOp(s: EditState, input: Op | LegacyOp, ctx: OpContext): Edi
   if (!mask) return s;
   if (op.kind === 'profile') {
     const masks = new Map(op.keys.map((k) => [k, maskOf(s.L, new Set([k]))!] as const).filter(([, m]) => !!m));
-    const vol = applyProfileMask(s.vol, ctx.orig, masks, op, [0, 0, 0]);
+    const vol = applyProfileMask(s.vol, ctx.orig, masks, op, [0, 0, 0], undefined, undefined, keyBoxes(s.L, op.keys));
     return { vol, L: relabel(s.vol, s.L, mask, [0, 0, 0], vol, ctx.matName, ctx.newKey) };
   }
   let vol: Volume;

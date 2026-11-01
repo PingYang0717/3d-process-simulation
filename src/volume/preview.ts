@@ -19,7 +19,7 @@ import {
 } from './volume';
 import { type EditState, type LegacyOp, type Op, bboxOfKeys, cdSteps, radiusOf, taperSteps, upgradeOp } from './ops';
 import { type Scope, axisIndex, planeAxes } from './scope';
-import { type ProfileOp, type RingsFor, applyProfileMask, decodeRle, dirVec, rleBox } from './profile';
+import { type ProfileOp, type RingsFor, applyProfileMask, decodeRle, dirVec, keyBoxes, rleBox } from './profile';
 import type { Report } from './kernel';
 
 export interface Preview {
@@ -346,7 +346,7 @@ export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap 
   if (op.kind === 'profile') {
     // profile 只用每個 key 自己的 mask（不必另外做一份聯集）
     const masks = new Map(op.keys.map((k) => [k, cropMask(s.L, new Set([k]), s.vol, box)] as const));
-    return { box, data: applyProfileMask(vol, o, masks, op, [box.x0, box.y0, box.z0], report, ringsFor).data };
+    return { box, data: applyProfileMask(vol, o, masks, op, [box.x0, box.y0, box.z0], report, ringsFor, keyBoxes(s.L, op.keys)).data };
   }
   const mask = cropMask(s.L, new Set(op.keys), s.vol, box);
   // scope 換成裁切範圍裡的座標（超出的部分本來就不會被改）

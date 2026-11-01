@@ -2,7 +2,7 @@
 // 一份「要加的格子」與「要拿的格子」（切面座標，每格帶往外的方向碼），套用到 scope 裡的每一片：
 // 先拿再加；加的格子由近到遠、要和這一片已經是結構的格子 4 鄰接才填；這一片沒有結構就整片略過。
 // 實際改體素一律走 kernel（和 3D 的推面、補平同一套規則）。
-import type { Backfill, Vec3, Volume } from './volume';
+import type { BBox, Backfill, Labeled, Vec3, Volume } from './volume';
 import { type Report, addCell, removeCell } from './kernel';
 import { type Scope, axisIndex, planeAxes, to3D } from './scope';
 import { type ProfileCell, type Rle2D, decodeRle } from './rle';
@@ -55,7 +55,34 @@ export function dirVec(axis: Scope['axis'], code: number): Vec3 {
  * 前提：vol 在切面上包住結構這一片整個外框（profileBox 有 gestures 時就是這樣），描出來的環才和範圍無關。
  */
 export type RingsFor = (key: string, t: number, make: () => TracedHandle) => TracedHandle;
-export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, Uint8Array>, op: ProfileOp, off: Vec3, report?: Report, ringsFor?: RingsFor): Volume {
+
+/** 每個 key 的外框（整個陣列的座標），給 applyProfileMask 剪掉不必掃的片與範圍（plan v14 P2）。 */
+export function keyBoxes(L: Labeled, keys: string[]): Map<string, BBox> {
+  const want = new Set(keys);
+  const out = new Map<string, BBox>();
+  for (const c of L.comps) {
+    if (!want.has(c.key)) continue;
+    const b = out.get(c.key);
+    const n = c.bbox;
+    out.set(c.key, b ? { x0: Math.min(b.x0, n.x0), y0: Math.min(b.y0, n.y0), z0: Math.min(b.z0, n.z0), x1: Math.max(b.x1, n.x1), y1: Math.max(b.y1, n.y1), z1: Math.max(b.z1, n.z1) } : n);
+  }
+  return out;
+}
+
+/**
+ * boxes：每個 key 的外框（整個陣列的座標，和 masks 同源）。有的話片在外框外直接略過、「這片有沒有結構」只掃外框那一塊
+ * （plan v14 P2；結果和不給逐位元組相同）。
+ */
+export function applyProfileMask(
+  vol: Volume,
+  orig: Volume,
+  masks: Map<string, Uint8Array>,
+  op: ProfileOp,
+  off: Vec3,
+  report?: Report,
+  ringsFor?: RingsFor,
+  boxes?: Map<string, BBox>,
+): Volume {
   const { X, Y, Z } = vol;
   const out = new Uint8Array(vol.data);
   const live: Volume = { X, Y, Z, data: out };
@@ -84,13 +111,22 @@ export function applyProfileMask(vol: Volume, orig: Volume, masks: Map<string, U
     for (const key of op.keys) {
       const mask = masks.get(key);
       if (!mask || !absolute[key]) continue;
-      // 這一片有沒有這個結構（只看 add／remove 附近不夠：結構可能整片不在）
+      // 這一片有沒有這個結構（只看 add／remove 附近不夠：結構可能整片不在）；有外框就只掃外框那一塊
       let has = false;
-      const pl = [0, 0, 0];
-      pl[a] = t;
-      const [A, B] = [dims[ua], dims[va]];
-      for (let v = 0, base = t * st; v < B && !has; v++, base += sv)
-        for (let u = 0, i = base; u < A; u++, i += su)
+      let [uLo, uHi, vLo, vHi] = [0, dims[ua] - 1, 0, dims[va] - 1];
+      const kb = boxes?.get(key);
+      if (kb) {
+        const bl = [kb.x0, kb.y0, kb.z0];
+        const bh = [kb.x1, kb.y1, kb.z1];
+        const tg = t + off[a];
+        if (tg < bl[a] || tg > bh[a]) continue;
+        uLo = Math.max(uLo, bl[ua] - ou);
+        uHi = Math.min(uHi, bh[ua] - ou);
+        vLo = Math.max(vLo, bl[va] - ov);
+        vHi = Math.min(vHi, bh[va] - ov);
+      }
+      for (let v = vLo, base = t * st + vLo * sv; v <= vHi && !has; v++, base += sv)
+        for (let u = uLo, i = base + uLo * su; u <= uHi; u++, i += su)
           if (mask[i]) {
             has = true;
             break;

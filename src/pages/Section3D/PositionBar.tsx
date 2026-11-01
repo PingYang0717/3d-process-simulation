@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Button, Flex, InputNumber, Segmented, Slider, Space, Tooltip, Typography } from 'antd';
 import { LeftOutlined, RightOutlined } from '@ant-design/icons';
 import type { Axis, Vec3 } from '../../volume/volume';
-import { AXES, axisIndex, axisLen, boxRange } from '../../volume/scope';
+import { AXES, type Scope, axisIndex, axisLen, boxRange } from '../../volume/scope';
 import type { Editor, ScopeMode } from './editor';
 
 const { Text } = Typography;
@@ -16,6 +16,20 @@ export function scopeWords(ed: Editor) {
   if (ed.scopeMode === 'custom') return { short: `${a} ${ed.scope.lo}～${ed.scope.hi}`, long: `${a} ${ed.scope.lo}～${ed.scope.hi}` };
   const r = ed.selRange;
   return { short: '整根', long: r ? `整個結構（${a} ${r[0]}～${r[1]}）` : '整個結構' };
+}
+
+/**
+ * 實際要送出的範圍的字（plan v14 §5.2：顯示層不再自己推算，卡片下方印的就是 op.scope）。
+ * 和編輯器的範圍相同＝scopeWords；否則依數字說「此片」「整個結構」或「x 0～287」。
+ */
+export function scopeWordsOf(ed: Editor, scope?: Scope | null) {
+  const s = ed.scope;
+  if (!scope || (scope.axis === s.axis && scope.lo === s.lo && scope.hi === s.hi)) return scopeWords(ed);
+  const a = scope.axis;
+  if (scope.lo === scope.hi) return { short: '此片', long: `此片（${a} = ${scope.lo}）` };
+  const r = ed.selBox ? boxRange(ed.selBox, a) : null;
+  if (r && r[0] === scope.lo && r[1] === scope.hi) return { short: '整根', long: `整個結構（${a} ${scope.lo}～${scope.hi}）` };
+  return { short: `${a} ${scope.lo}～${scope.hi}`, long: `${a} ${scope.lo}～${scope.hi}` };
 }
 
 /**
@@ -236,7 +250,7 @@ export function PositionBar({ ed, axis, has, onJumpBlocked }: { ed: Editor; axis
 }
 
 /** 自動選切面方向：選取最長的那一軸當法線（fin 沿 z → XY 正面；poly 沿 x → YZ 側面）。 */
-export function longestAxis(ed: Editor): Axis | null {
+export function longestAxis(ed: Pick<Editor, 'selComps'>): Axis | null {
   const b = ed.selComps[0]?.bbox;
   if (!b) return null;
   const len = AXES.map((a) => {

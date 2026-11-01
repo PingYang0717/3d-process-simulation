@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Flex, InputNumber, Segmented, Slider, Switch, Tooltip, Typography } from 'antd';
 import type { Axis } from '../../volume/volume';
-import { axisIndex, fullScope, planeAxes } from '../../volume/scope';
+import { type Scope, axisIndex, boxRange, fullScope, planeAxes } from '../../volume/scope';
 import { type CornerId, type RoundGesture, roundBuild, roundOutline } from '../../slice/round';
 import { type Editor, slicesWith } from './editor';
 import { CardShell, wordsOf } from './OpCard';
@@ -17,12 +17,22 @@ const CORNERS: CornerId[] = ['ul', 'ur', 'll', 'lr'];
 const NEXT: Record<CornerKind, CornerKind> = { none: 'convex', convex: 'concave', concave: 'none' };
 const KIND_WORD: Record<CornerKind, string> = { none: '不圓', convex: '外圓角', concave: '內圓角（往外填）' };
 
-/** 這個軸的剖面與參考片：axis 有給（2D）就用它，否則選取最長軸的法線；片＝十字那一片或最近有結構的一片。 */
-export function roundFrame(ed: Editor, plane?: Axis) {
+/**
+ * 這個軸的剖面與參考片：axis 有給（2D）就用它，否則選取最長軸的法線；片＝十字那一片或最近有結構的一片。
+ * 範圍（plan v14 §5.2）：此片＝參考片；自訂且同軸＝自訂範圍；其餘（整個結構）＝選取外框沿 axis 的起止，
+ * 不再用整條軸（×3 Poly-Si 沿 x 會變成 0～479、每片都要掃一次）。
+ */
+export function roundFrame(ed: Pick<Editor, 'editAxis' | 'cursor' | 'selMask' | 'vol' | 'selBox' | 'scope' | 'scopeMode' | 'selComps'>, plane?: Axis) {
   const axis = plane ?? longestAxis(ed) ?? ed.editAxis;
   const t = ed.cursor[axisIndex(axis)];
   const at = ed.selMask ? (nearestSlice(slicesWith(ed.selMask, ed.vol, axis, ed.selBox), t) ?? t) : t;
-  const scope = ed.scope.axis === axis ? ed.scope : fullScope(ed.vol, axis);
+  let scope: Scope;
+  if (ed.scopeMode === 'slice') scope = { axis, lo: at, hi: at };
+  else if (ed.scopeMode === 'custom' && ed.scope.axis === axis) scope = ed.scope;
+  else if (ed.selBox) {
+    const [lo, hi] = boxRange(ed.selBox, axis);
+    scope = { axis, lo, hi };
+  } else scope = fullScope(ed.vol, axis);
   return { axis, at, scope };
 }
 
@@ -38,7 +48,10 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
   const [rv, setRv] = useState(initial?.rv ?? initial?.r ?? 6);
   const [n, setN] = useState(initial?.n ?? 2);
   const [mode, setMode] = useState<RoundGesture['mode']>(initial?.mode ?? 'match');
-  const { axis, at, scope } = roundFrame(ed, plane);
+  const f = roundFrame(ed, plane);
+  const { axis, at } = f;
+  // 每次 render 都是新物件：用數字當 deps，Op 才不會每幀重算
+  const scope = useMemo(() => f.scope, [f.scope.axis, f.scope.lo, f.scope.hi]); // eslint-disable-line react-hooks/exhaustive-deps
   const g: RoundGesture = useMemo(
     () => ({
       kind: 'round',
@@ -73,7 +86,7 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
   const cornerAt: Record<CornerId, [number, number]> = { ul: [box.u0, box.v0], ur: [box.u1 + 1, box.v0], ll: [box.u0, box.v1 + 1], lr: [box.u1 + 1, box.v1 + 1] };
   const nm = (v: number) => `${(v * ed.nmPerVoxel).toFixed(1)} nm`;
   const words = op
-    ? `${whoText(ed.L, op.keys, ed.matName)} ${op.text ?? ''} · 削 ${(stats?.cut ?? 0).toLocaleString()} 格、填 ${(stats?.fill ?? 0).toLocaleString()} 格（參考片 ${axis} = ${at}）· ${wordsOf(ed).scope}`
+    ? `${whoText(ed.L, op.keys, ed.matName)} ${op.text ?? ''} · 削 ${(stats?.cut ?? 0).toLocaleString()} 格、填 ${(stats?.fill ?? 0).toLocaleString()} 格（參考片 ${axis} = ${at}）· ${wordsOf(ed, op.scope).scope}`
     : g.corners.length
       ? '這個設定不會改到任何格子'
       : '點小圖的角選要圓哪幾個';

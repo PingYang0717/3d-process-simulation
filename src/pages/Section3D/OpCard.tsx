@@ -7,10 +7,10 @@ import { BorderOuterOutlined, DownOutlined, DragOutlined, MinusOutlined, PlusOut
 import { type Axis, type Material, type Vec3, VOID, kindOf, thicknessOf } from '../../volume/volume';
 import type { Op, Policy } from '../../volume/ops';
 import { levelRefTo } from '../../volume/ops';
-import { uvTo3D } from '../../volume/scope';
+import { type Scope, uvTo3D } from '../../volume/scope';
 import { MatLabel } from '../../ui/Swatch';
 import type { Editor } from './editor';
-import { ScopeControl, scopeWords } from './PositionBar';
+import { ScopeControl, scopeWords, scopeWordsOf } from './PositionBar';
 import { FacePicker } from './FacePicker';
 import { type WordsCtx, describeOp, faceName } from './opWords';
 import { RoundCard } from './RoundCard';
@@ -46,14 +46,14 @@ const defaultDir = (plane?: Axis): Vec3 => {
   return ds.find((d) => sameDir(d, up)) ?? ds[0];
 };
 
-export const wordsOf = (ed: Editor): WordsCtx => ({ L: ed.L, nm: ed.nmPerVoxel, matName: ed.matName, scope: scopeWords(ed).short });
+export const wordsOf = (ed: Editor, scope?: Scope | null): WordsCtx => ({ L: ed.L, nm: ed.nmPerVoxel, matName: ed.matName, scope: (scope ? scopeWordsOf(ed, scope) : scopeWords(ed)).short });
 
-/** 範圍：卡片下方一行「套用到：整根 ▾」，點開是完整的範圍控制。 */
-export function ScopeLine({ ed }: { ed: Editor }) {
+/** 範圍：卡片下方一行「套用到：整根 ▾」，點開是完整的範圍控制。scope＝實際要送的範圍（op.scope；沒有就用編輯器的）。 */
+export function ScopeLine({ ed, scope }: { ed: Editor; scope?: Scope | null }) {
   return (
     <Popover trigger="click" placement="bottomLeft" content={<div style={{ width: 320 }}><ScopeControl ed={ed} showAxis /></div>}>
       <Button type="link" size="small" className="scope-line">
-        套用到：{scopeWords(ed).long} <DownOutlined style={{ fontSize: 10 }} />
+        套用到：{scopeWordsOf(ed, scope).long} <DownOutlined style={{ fontSize: 10 }} />
       </Button>
     </Popover>
   );
@@ -176,7 +176,7 @@ export function CardShell({
       )}
       {note}
       <Flex align="center" gap={8} wrap>
-        <ScopeLine ed={ed} />
+        <ScopeLine ed={ed} scope={op?.scope} />
         <span style={{ flex: 1 }} />
         <Tooltip title="Enter">
           <Button type="primary" size={compact ? 'small' : 'middle'} disabled={!op || busy} loading={!!ed.busy && !busy} onClick={apply}>

@@ -646,6 +646,8 @@ function synthVtiFile(scale) {
       const rss0 = rendererMB();
       const peak = pollPeak();
       const t1 = Date.now();
+      // v15 C2：匯出 zip 走 showSaveFilePicker 時 headless 不會有 download 事件；關掉 picker 走 Blob 退路
+      await page.evaluate(() => localStorage.setItem('noSavePicker', '1'));
       await page.locator('button[aria-label="匯出"]').click();
       await page.getByRole('menuitem', { name: /打包 zip（單一編號 \.vti/ }).click();
       const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 600000 }), page.locator('.ant-modal').getByRole('button', { name: '匯出 zip' }).click()]);

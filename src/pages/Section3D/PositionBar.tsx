@@ -60,7 +60,9 @@ function useTicks(ed: Editor, axis: Axis) {
 }
 
 /** 範圍控制：整個結構／此片／自訂（雙把手滑桿）。只在卡片下方「套用到：… ▾」點開（plan v10 §4.7）；位置列只顯示。 */
-export function ScopeControl({ ed, compact = false, showAxis = false }: { ed: Editor; compact?: boolean; showAxis?: boolean }) {
+export const ScopeControl = memoEd(ScopeControlImpl, ['comps', 'cursor', 'customRange', 'editAxis', 'hidden', 'nmPerVoxel', 'scope', 'scopeMode', 'sel', 'selBox', 'selRange', 'vol', 'setCustom', 'setEditAxis', 'setScopeMode'], 'ScopeControl');
+/** 範圍控制在 render 讀 `ed.cursor`（滑桿上標十字那一片）；自己 memoEd，卡片的 `CARD_USES` 才不必含 cursor（plan v15 B2）。 */
+function ScopeControlImpl({ ed, compact = false, showAxis = false }: { ed: Editor; compact?: boolean; showAxis?: boolean }) {
   const axis = ed.editAxis;
   const max = axisLen(ed.vol, axis) - 1;
   const r = ed.selRange;

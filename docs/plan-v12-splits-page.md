@@ -314,4 +314,57 @@ README（檔案表、效能表加 v12 欄）、HelpDrawer、本文件 §11 實�
 
 ## 11. 實作紀錄
 
-（實作時補。）
+2026-11-01，分支 `claude/upbeat-einstein-wod16i`，M12.0～M12.4 各一個 commit。量測環境同 §2（雲端容器、Node 22、headless Chromium 軟體 WebGL），數字有雜訊。
+
+### 11.1 做了什麼（照里程碑）
+
+- **M12.0 顏色**：`views.tsx` 換成 `HemisphereLight(天 0.62, 地 0.50)`＋`DirectionalLight 0.30`、去掉 fill。只換係數不夠：頂點色是調色盤的 sRGB 值，three r160 把它當線性值再做 sRGB 編碼輸出，最亮的面本來就會比調色盤亮、偏色。所以另外 `ColorManagement.enabled = false`、`renderer.outputColorSpace = LinearSRGBColorSpace`：畫面＝調色盤 × k，均勻縮放不改色相與（HSV）飽和度；Lambert BRDF 除以 π，強度乘 π。副作用是好的：剖口貼圖（CanvasTexture）也不再被 sRGB 編碼加亮，和 2D 切面同色。`client.ts` 的 `call` 在開發模式記 `window.__calls`（只留 type、diff、showDiff、filter、owner，不留陣列）。D1 的橘色虛線外框：`View3DHandle.stepBox`（`editor.last.box`＝那一步補丁外框，1 秒全亮＋0.5 秒淡出），設定「顯示 → 套用後閃一下改到的範圍」。
+- **M12.1 差異模式**：`Book.diffBox`／`tight`／`touch`；`diffBoxOf` 在 union 裡掃一次 diff 收緊；新請求 `diffBox`；`layer` 加 `{ diff: true }`（材質色、被拿掉的 `REMOVED` 紅、`hidden`）。`views.tsx`：差異模式不再有獨立的 ghost 網格，主網格的材質原地換成灰 0.38（`vertexColors` 關），差異層＝`diffFill`／`diffEdges` 兩個 chunk 圖層（每 chunk 一份 `EdgesGeometry`，總 quads 超過 `EDGE_QUADS_MAX` 不描）。刪掉 `diffMesh` handler 與 `meshCache`；舊函式留在 `ref/diffMeshOld.ts` 當對照。
+- **M12.2 生命週期**：`src/splits/lifecycle.ts`（純函式）。Worker：`replayPatch`（scratch 帳簿：只把上一次 `touch` 的範圍從原始貼回、再貼 src 的 `touch`，O(外框)）、`restore`（`parents` 記成「從原始、改了 box」）、`applyParked`、`exportMeta`＋`export`（非同步，`worker.ts` 改成接 Promise）。主執行緒 `editor.ts`：`Split.state`／`patch`／`stats`／`seq`、`SplitBuffers.touch`、`parkOne`、`ensureLive`、`enforceK`（`toPark`：目前的與 pinned 不 park，其他照 LRU 留到 K）、非同步 `setActiveId`、`addDesign` 直接拿補丁、`commitTo` 對 parked 走 `applyParked`、`exportBytes`。`slabs.ts`：任何 split 的一片（快取 96 MB）；並排、疊圖、縮圖都吃它。網格：`chunks` 多帶 `alts`（主執行緒快取裡同畫法的版本），restore 回來的 split 從原始那一組增量（原始那一組釘在快取裡）。
+- **M12.3 實驗頁**：`ExperimentPage`、`DesignPanel`、`FactorCard`、`LevelsEditor`、`ComboTable`、`StructurePicker`、`ResultGrid`、`SplitCard`、`thumbs.ts`、`SplitPicker`；刪 `SplitBar.tsx`、`ExperimentTab.tsx`（類別色盤搬到 `colors.ts`）。`factors.ts` 加 `validateLevels`、`comboProblems`、`presetLevels`、`evenLevels`、`switchMode`、`lockedNominal`；`opWords.ts` 加 `factorWords`、`OP_LABEL`、`OP_HELP`。`MatrixTab` 變成表格檢視（`ids`、`onRow`、live／parked 欄）。頁面狀態 `ed.page`（存 localStorage）、Ctrl+1／Ctrl+2；實驗頁裡編輯用的鍵（方向鍵、復原、`[ ]`、B／D／E）不動模型。視角列「對準差異」與 G 鍵。
+- **M12.4**：README（實驗頁、改後原色、差異 chunk 化、生命週期、檔案表、v12 效能表）、HelpDrawer（第 5 段改寫成「Split 與實驗頁」、匯出另成一段、快捷鍵）、`bench.ts diff|splits`、`scripts/e2e/m12.cjs`；`m9.cjs`、`m11.cjs` 改走新的 Split ▾ 與實驗頁（流程與斷言不變；m11 §2 的 A vs B 改比這一片，見下）。
+
+### 11.2 和計畫不一樣的地方
+
+| # | 計畫 | 實作 | 為什麼 |
+| --- | --- | --- | --- |
+| 1 | 只改燈光係數 | 另外關色彩管理、線性輸出 | 見 11.1 M12.0：不關的話「最亮的面 ≤ 調色盤色」做不到 |
+| 2 | 光照最低 0.66 | 朝下的面 0.50（地光），側面 0.56＋主光 | 照 D2 的係數算出來的；看起來立體感足夠，沒再調 |
+| 3 | `replay` 加 `keep: 'patch'` | 另一個請求 `replayPatch` | 回傳形狀完全不同，分開型別比較乾淨；`replay`（live）留著給 `addSplit` |
+| 4 | 差異層跟 `partsCache` 一起快取 | 不快取，再按 D 重算差異層 | 只算 diff 外框碰到的 chunk，×2 再按一次 220～250 ms，快取的效益不大 |
+| 5 | 補丁＝diff 外框 | 補丁＝「data 或 labels 和原始不同」的外框（在 `touch` 裡收緊） | §9 的 relabel 風險直接解掉：`touch` union 了每一步的 data 外框、relabel 的 S、換編號的結構外框，所以補丁外面 data 與 labels 都和原始逐位元組相同（`lifecycle.test.ts` 驗） |
+| 6 | parked split 沒有 `buf` | 另外留一個 `cur` 殼（comps 與版本號是自己的，陣列是原始的） | 很多地方要 comps（矩陣的 W／H／D、名字、levels）；讀陣列的地方全改走 `slabOf`／`statsOf`／`exportBytes` |
+| 7 | 縮圖軸＝差異投影面積最大；片＝diff 外框中點 | 軸＝diff 外框最長那一軸當法線；片＝改最多的那一片 | 實測（m12、截圖）：沿 z 改 CD／偏移的 poly，投影最大的是 XY，切到的是整片截面、看不出寬度；中點又常落在沒改到的內部。改成沿最長軸切，改動方向落在切面上；同一設計仍共用一個軸 |
+| 8 | 對照組 parked | 對照組借用原始（live、沒有帳簿） | 不佔記憶體也不必 restore |
+| 9 | — | 修 `overlay.ts` 的 `sliceGeom` YZ 方向（u／v 對調） | 縮圖的原始輪廓畫歪才發現；v11 的 YZ 疊圖、`sliceDiff` 也受影響。`overlay.test.ts` 加三軸對 `sliceRGBA` 的對照 |
+| 10 | m11 §2「split 3 的差異＝兩者 diff」 | 改比「這一片」的差異 | 並排是切面級（parked 不還原），卡片上顯示「這片 n 格不同」 |
+
+### 11.3 驗收（§3）
+
+| 項目 | 目標 | 結果 |
+| --- | --- | --- |
+| 改後模式帶 diff 標記的請求（套用、復原、重做、切 split、換隱藏） | 0 | 0（m12 §0） |
+| 改後 3D 畫面「拿掉的紅」±12 的像素 | 0 | 0 |
+| Poly-Si 面（內部像素）比調色盤亮的 | 0 | 0；色相差 0.2°（目標 < 8°）；只看 4 鄰居同色的像素，反鋸齒的邊會和背景混色 |
+| ×2 第一次按 D 到差異層換上 | < 300 ms | 224（bench）／243 ms（e2e）；舊 1,707 |
+| 差異層 quad 數 ≡ 舊 `diffMesh.changed` | 逐面相同 | 單位面集合相同（`diffLayer.test.ts`；chunk 邊界會多切幾刀，quad 數 864 vs 528） |
+| 差異層 chunk 數 | ×1 圓頭 ≤ 6 | ×1 推面 10 個、translate 20 個（m12 用推面）；圓頭沒有單獨量 |
+| ×2 20 個 split 後 heap 增量 | < 250 MB | ＋213 MB（e2e，每個改 3～30 萬格；Node bench 219 MB）；舊 ≈ 3.6 GB |
+| ×2 產生期間主執行緒 heap | < 60 MB | 最高 ＋226 MB：包含最後一個 restore 成 live 的帳簿（94 MB）與 20 個大補丁（每個 ≈ 7 MB）；計畫假設每個只改 3,000～5,000 格，這組改得多，沒有另外量小補丁的情形 |
+| ×2 切到 parked split 到網格換上 | < 1.5 s | 440～590 ms（從原始的網格增量；改成增量前 1.8 s） |
+| 實驗頁 200 個 split：DOM 卡片 | ≤ 40 | 20（捲動中 32） |
+| 滑鼠移動 60 次整頁 render | 0 | 整頁 0、卡片 0 |
+| 捲動一頁的 long task | 0 | ✗ 捲 10 頁有 6～7 個、最長 85～100 ms：縮圖一次畫一張、每張之間讓出主執行緒，軟體 WebGL 的容器裡一張縮圖（切一片＋描輪廓）仍要幾十 ms；真機會短很多，但沒有量 |
+| 點卡片 Worker 請求 | 0 | 0 |
+| 新使用者 3×3 路徑、進度、停留、縮圖同軸與黑線、勾 3 張疊圖、在 3D 看 | 全部 | 全部（m12 §2）；試算期間長任務 1 個、最長 ≈ 90 ms（主執行緒逐列數改動格數） |
+| 圓頭 −5 | 紅字、產生鈕反灰 | 「半徑不能小於 0」、「有 1 個組合無效」反灰（m12 §3） |
+| parked 匯出 ≡ live 匯出 | 逐位元組 | 相同（m12 §5） |
+| 窄螢幕 1000 px | 設計區變抽屜 | 是（m12 §7） |
+| 既有測試 | 全過 | vitest 247／247；e2e m0、m2、m3、m5、m9、m10、m11、m12 全過 |
+
+### 11.4 沒做或留到下一輪
+
+- 捲動中的 long task 沒壓到 0（見上表）；可以把縮圖搬進 Worker（OffscreenCanvas）。
+- 「產生期間主執行緒 heap < 60 MB」只在大補丁的情況量過。
+- 差異層沒有快取（11.2 #4）。
+- 物理 lint、量測器仍不在這一輪（§0）。

@@ -3,6 +3,9 @@
 //       npx vite-node scripts/bench.ts drag [scale ...]：拖拉中每一幀主執行緒做的事（plan v8 §7.2、§8.4）
 //       npx vite-node scripts/bench.ts step [scale ...]：一步的全流程（plan v9 §2）：Worker 原地 apply、主執行緒貼補丁、
 //         chunk、整陣列複製位元組；mem [scale ...]：連做 50 步後的記憶體增量 vs 補丁總量
+//       npx vite-node scripts/bench.ts diff [scale ...]：差異模式（plan v12 §5.2）舊 diffMesh（整個陣列）vs layer diff（只算 diff 外框碰到的 chunk）
+//       npx vite-node scripts/bench.ts splits [scale ...]：產生 20 個 split（plan v12 §5.3）：Worker scratch 重播只回補丁的時間、補丁總量、
+//         heap 增量（對照舊的每個 split 6N＋6N）、restore 一個的時間
 import { MATERIALS, demoVolume, greedyMesh, initialLabeled, unionBBox } from '../src/volume/volume';
 import { type EditState, type Op, applyOp, matNameOf } from '../src/volume/ops';
 import { applyOpLocal } from '../src/volume/apply';
@@ -20,7 +23,7 @@ import { opOfGesture, sliceContext } from '../src/pages/Section3D/handleOps';
 const matName = matNameOf(MATERIALS);
 const ms = (t: number) => `${(performance.now() - t).toFixed(0)} ms`;
 const args = process.argv.slice(2);
-const mode = ['drag', 'step', 'mem', 'draw'].includes(args[0]) ? args[0] : 'old';
+const mode = ['drag', 'step', 'mem', 'draw', 'diff', 'splits'].includes(args[0]) ? args[0] : 'old';
 const dragMode = mode === 'drag';
 const rest = mode === 'old' ? args : args.slice(1);
 const scales = rest.length ? rest.map(Number) : [1, 2, 3];
@@ -252,7 +255,70 @@ async function benchDraw(scale: number) {
   }
 }
 
-if (mode === 'draw') for (const scale of scales) await benchDraw(scale);
+/** 差異模式（plan v12 §5.2）：舊 diffMesh（兩份 Uint16Array(N)、整個模型 greedy mesh 兩次）vs layer diff（diff 外框碰到的 chunk）。 */
+async function benchDiff(scale: number) {
+  const core = await import('../src/volume/workerCore');
+  const { diffMeshOld } = await import('../src/volume/ref/diffMeshOld');
+  const vol = demoVolume(scale);
+  const L = initialLabeled(vol, matName);
+  const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
+  core.handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } });
+  const poly = L.comps.find((c) => c.label === 'Poly-Si 3')!;
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  const ops: Op[] = [{ kind: 'translate', keys: [poly.key], scope: full, d: [0, 0, 2], backfill: 'orig' }];
+  core.handle('replay', { owner: 's1', src: 'base', from: 1, to: 2, comps: L.comps, ops, matNames, keyCounter: 1000 });
+  const b = core.inspect().books.get('s1')!;
+  const o = core.inspect().books.get('base')!;
+  const hidden = new Uint8Array(256);
+  const pal = new Float32Array(768).fill(0.5);
+  let t = performance.now();
+  const old = diffMeshOld({ ...vol, data: b.data }, o.data, b.diff, hidden, pal);
+  // 舊版還有一層整個模型的 ghost
+  const codes = new Uint16Array(vol.data.length);
+  for (let i = 0; i < codes.length; i++) if (b.data[i] && !b.diff![i]) codes[i] = 1;
+  greedyMesh(vol.X, vol.Y, vol.Z, codes, () => [0.7, 0.7, 0.7]);
+  const tOld = ms(t);
+  t = performance.now();
+  const r = core.handle('layer', { sid: 2, key: 'd', filter: { diff: true }, tint: [1, 0, 0], palette: pal, hidden })[0] as { items: { m: { quads: number } }[] };
+  const tNew = ms(t);
+  console.log(`\n範例 ×${scale}（${(vol.data.length / 1e6).toFixed(1)} M voxels）差異模式：舊 diffMesh＋ghost ${tOld}（暫存 ${mb(vol.data.length * 4)}）｜layer diff ${tNew}（${r.items.length} 個 chunk、${r.items.reduce((s, it) => s + it.m.quads, 0)} quads；舊 ${old.quads}）`);
+}
+
+/** 產生 20 個 split（plan v12 §5.3）：Worker scratch 重播只回補丁；對照舊的每個 split 主執行緒＋Worker 各 6N。 */
+async function benchSplits(scale: number) {
+  const core = await import('../src/volume/workerCore');
+  const { patchBytes, restoreBuffers } = await import('../src/splits/lifecycle');
+  const vol = demoVolume(scale);
+  const N = vol.data.length;
+  const L = initialLabeled(vol, matName);
+  const matNames = Object.fromEntries(MATERIALS.map((m) => [m.id, m.name]));
+  const [ld] = core.handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } }) as [{ labels: Int32Array; counts: Float64Array }, unknown];
+  const poly = L.comps.find((c) => c.label === 'Poly-Si 2')!;
+  const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
+  (globalThis as { gc?: () => void }).gc?.();
+  const h0 = process.memoryUsage().heapUsed + process.memoryUsage().arrayBuffers;
+  const t = performance.now();
+  const pats = [];
+  for (let k = 1; k <= 20; k++) {
+    const ops: Op[] = [{ kind: 'translate', keys: [poly.key], scope: full, d: [0, 0, k % 2 ? k : -k], backfill: 'orig' }];
+    pats.push((core.handle('replayPatch', { src: 'base', from: 1, comps: L.comps, ops, matNames, keyCounter: 1000 })[0] as { patch: Parameters<typeof patchBytes>[0] }).patch);
+  }
+  const tGen = ms(t);
+  (globalThis as { gc?: () => void }).gc?.();
+  const h1 = process.memoryUsage().heapUsed + process.memoryUsage().arrayBuffers;
+  const bytes = pats.reduce((s, p) => s + patchBytes(p), 0);
+  const t2 = performance.now();
+  core.handle('restore', { owner: 'r', sid: 99, patch: pats[0]! });
+  restoreBuffers(vol, vol.data, ld.labels, ld.counts, pats[0]!);
+  console.log(
+    `\n範例 ×${scale}（${(N / 1e6).toFixed(1)} M voxels）產生 20 個 split：${tGen}；補丁共 ${mb(bytes)}（scratch 帳簿 ${mb(N * 6)} 一份）；` +
+      `記憶體增量 ${mb(h1 - h0)}（舊：主執行緒＋Worker 各 6N × 20 ＝ ${mb(N * 12 * 20)}）｜restore 一個（Worker＋主執行緒）${ms(t2)}`,
+  );
+}
+
+if (mode === 'diff') for (const scale of scales) await benchDiff(scale);
+else if (mode === 'splits') for (const scale of scales) await benchSplits(scale);
+else if (mode === 'draw') for (const scale of scales) await benchDraw(scale);
 else if (mode === 'step' || mode === 'mem') for (const scale of scales) await benchStep(scale, mode === 'mem' ? 50 : 10);
 else if (dragMode) for (const scale of scales) benchDrag(scale);
 else for (const scale of scales) {

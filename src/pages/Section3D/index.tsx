@@ -38,7 +38,7 @@ import { type CornerId, type RoundGesture, roundOp } from '../../slice/round';
 import { axisIndex, clipBox } from '../../volume/scope';
 import { type Preview, boxVoxels, previewBox, previewOp } from '../../volume/preview';
 import { newReport } from '../../volume/kernel';
-import { type CellCloud, cellCloud, globalIndex } from './cellCloud';
+import { globalIndex } from '../../volume/patch';
 import { previewIn, sidOf } from '../../volume/client';
 import { hiddenTable, palette } from './tables';
 import { type LiveValue, useLive, useLiveValue } from '../../ui/liveValue';
@@ -62,6 +62,15 @@ function HoverReadout({ live, data, vol, matName }: { live: LiveValue<Vec3 | nul
 function WithLivePv<P>({ live, pv, children }: { live: LiveValue<P | null>; pv: P | null; children: (p: P | null) => ReactNode }) {
   const l = useLive(live);
   return <>{children(l ?? pv)}</>;
+}
+/** 3D 右下角：拖拉中範圍太大、3D 沒有即時預覽（plan v14 §5.1）。 */
+function TooBigNote({ live }: { live: LiveValue<boolean> }) {
+  const on = useLive(live);
+  return on ? (
+    <div className="too-big-note" role="status">
+      範圍太大，放開後才會在 3D 看到結果
+    </div>
+  ) : null;
 }
 /** 頁尾：剛套用的訊息（fallback）優先，其次 3D 上滑過的說明，再其次一般提示。 */
 function HoverText({ live, fallback, idle }: { live: LiveValue<string | null>; fallback: string | null; idle: string }) {
@@ -223,6 +232,8 @@ export default function Section3DPage() {
    * 放開／按鈕的預覽（committed）在 apply 之前送出（Worker 依序處理，先回預覽再算正式結果）。
    */
   const livePv = useLiveValue<PV | null>(null);
+  /** 拖拉中範圍超過即時上限、3D 沒有預覽（plan v14 §5.1：不再畫點雲，只在 3D 角落寫一行）。 */
+  const tooBig = useLiveValue(false);
   const live2 = useRef({ inflight: false, pending: null as Op | null, sent: null as Op | null, seq: 0, dragging: false });
   const look = useRef({ ed });
   look.current = { ed };
@@ -248,13 +259,13 @@ export default function Section3DPage() {
           if ('none' in r) {
             livePv.set(null);
             setPv((p) => (committed || (p && !p.committed) ? null : p));
-            if (!committed) setLiveCells(cellCloud(op, look.current.ed.vol));
+            if (!committed) tooBig.set(true);
           } else if (committed) {
             livePv.set(null);
             setPv({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
           } else {
             livePv.set({ box: r.box, data: r.data, mesh: r.mesh ?? undefined, base, committed });
-            setLiveCells(null);
+            tooBig.set(false);
           }
         }
         done();
@@ -264,15 +275,19 @@ export default function Section3DPage() {
   };
   /**
    * 預覽一步：沒有 profile 的 Op 在主執行緒先用 previewBox 判斷上限（同步回傳畫不畫得出來，3D 筆刷用它收掉橘色塊）；
-   * profile 的外框要描襯層，交給 Worker 判斷，超過上限回 none 再畫點雲。
+   * profile 的外框要描襯層，交給 Worker 判斷，超過上限回 none（3D 角落顯示「範圍太大」，plan v14 §5.1）。
    */
   const makePreview = (op: Op, cap: number, committed: boolean) => {
+    if (committed) tooBig.set(false);
     if (mode !== 'now' || op.kind === 'material') return false;
     if (op.kind !== 'profile') {
       const box = previewBox(ed.cur, op);
       if (!box || boxVoxels(box) > cap) {
         if (committed) setPv(null);
-        else setPv((p) => (p && !p.committed ? null : p));
+        else {
+          setPv((p) => (p && !p.committed ? null : p));
+          tooBig.set(true);
+        }
         return false;
       }
     }
@@ -315,6 +330,7 @@ export default function Section3DPage() {
     live2.current.dragging = false;
     live2.current.pending = null;
     livePv.set(null);
+    tooBig.set(false);
     setPv((p) => (p && !p.committed ? null : p));
   };
   // 每一步送 Worker 前先預覽（按鈕、方向鍵、筆刷放開都走 commit）
@@ -424,7 +440,6 @@ export default function Section3DPage() {
   const onLive = (op: Op | null) => {
     if (!op) {
       setDragPv(null);
-      setLiveCells(null);
       endLive();
       return;
     }
@@ -436,13 +451,9 @@ export default function Section3DPage() {
       const p = previewOp(ed.cur, ed.orig.vol, { ...op, scope: { axis: a, lo: t, hi: t } } as Op, 2_000_000, rep);
       setDragPv(p ? { ...p, base: sidOf(ed.cur), committed: false, blocked: globalIndex(p.box, ed.vol, rep.blockedAt) } : null);
     } else setDragPv(null);
-    // 第 2 級：3D 與小切面（Worker）；範圍太大就畫加／拿格子的點雲（§8.3，Worker 回 none 時）
-    if (!makePreview(op, LIVE_PREVIEW_CAP, false)) setLiveCells(cellCloud(op, ed.vol));
+    // 第 2 級：3D 與小切面（Worker）；範圍太大只有主切面（3D 角落寫「範圍太大」）
+    makePreview(op, LIVE_PREVIEW_CAP, false);
   };
-  /** 超過即時預覽上限時，3D 畫的加／拿格子（沿範圍擠出；不算 kernel，被擋的不會顯示）。 */
-  // 拖拉中每幀都換：同樣不進整頁的 state，只有 3D 重 render（plan v9 P7）
-  const liveCells = useLiveValue<CellCloud | null>(null);
-  const setLiveCells = liveCells.set;
   /** 「看這些片」：跳到下一個有被擋住的片（循環）。 */
   const jumpBlocked = () => {
     const r = ed.report;
@@ -1072,8 +1083,6 @@ export default function Section3DPage() {
         </Space.Compact>
       </div>
       <div className="canvas-wrap" ref={wrapRef}>
-        <WithLivePv live={liveCells} pv={null}>
-          {(cells) => (
         <WithLivePv live={livePv} pv={pv}>
           {(p) => (
             <View3D
@@ -1105,7 +1114,6 @@ export default function Section3DPage() {
               nmPerVoxel={ed.nmPerVoxel}
               orig={ed.orig.vol}
               preview={p}
-              cells={cells}
               onPreview={(op) => {
                 if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
                 endLive();
@@ -1136,8 +1144,7 @@ export default function Section3DPage() {
             />
           )}
         </WithLivePv>
-          )}
-        </WithLivePv>
+        <TooBigNote live={tooBig} />
         <div className="viewbar">
           {(
             [

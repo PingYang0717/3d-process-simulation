@@ -8,7 +8,7 @@ import { newReport } from './kernel';
 import type { TracedHandle } from '../slice/relative';
 import { ModelStore, ringsOf } from '../slice/model';
 import { opOfGesture, sliceContext } from '../pages/Section3D/handleOps';
-import { globalIndex } from './apply';
+import { globalIndex } from './patch';
 import * as core from './workerCore';
 
 const matName = matNameOf(MATERIALS);

@@ -31,7 +31,7 @@ npm run build      # 型別檢查 + 打包
 
 **相對式套用（plan v7 M4）**：`profile` Op 另外記下手勢（`gestures`：把手種類、正規化到結構這一片外框的位置、位移），每一片先描自己的輪廓、找同一個節點／邊重做；對不到的片退回參考片的絕對座標，報告記下片數（`slice/relative.ts`，`relative.test.ts`：偏移 1 格的 fin 推斜邊往外 3，每片多的格數相同、沒有被擋）。
 
-**持久幾何層（plan v8）**：進入 2D 編輯時把已選結構的剖面描一次成有頂點 id 的幾何（`slice/model.ts` 的 `SliceModel`），之後拖節點、推邊、搬區域、右欄數值、方向鍵都改這份幾何，不再每一步從 voxel 重描：連拖同一個節點，節點還是那一個、從上一次放開的位置出發；斜邊拖完是一條直線（主輪廓畫頂點連線，8× 以上下面淡淡疊著 voxel 真正的邊界）。拖的時候橘色輪廓跟手（浮點，`slice/snap.ts` 的 `dragDispFloat`），裡面淡綠／淡紅是放開後會加／拿的格子、斜線是會被擋住的（主切面的單片預覽，`SlicePreviewLayer.tsx` 只重畫那一塊），提示「(+1.6, −2.3) → 取 (+2, −2)」；pointermove 用 requestAnimationFrame 合併。放開時幾何先用整數位移更新（不等 Worker），Op 照舊（rasterize → deltaOf → profile）；Worker 回來後只驗證「幾何光柵化 === 這一片 voxel」，對不上（被擋住、3D 那邊改了這片）以 voxel 為準重描、舊節點 ≤ 1.5 格對應沿用 id，訊息「幾何已對齊到實際結果」。每個版本留一份幾何快照，Ctrl+Z／Y 時節點回到那時的位置。幾何改過的結構，profile Op 多帶 `refExact`：參考片用 Op 裡的絕對格子（看到的＝commit 的），其他片照舊相對式；剛描好的幾何產生的 Op 和 v7 逐欄相同（`model.test.ts` 黃金測試）。profile 的即時預覽外框改成只包加／拿的格子＋結構這一段＋實際襯層要讀到的格數（`preview.ts` 的 `profileBox`），拖 fin 節點時 3D 也即時；還是超過 40 萬格時 3D 畫加／拿格子沿範圍擠出的點雲（`cellCloud.ts`，概略）。設定裡可以改回「階梯」輪廓與「邊拖邊吸附」。實作紀錄與量測：`docs/plan-v8-geometry-layer.md`。
+**持久幾何層（plan v8）**：進入 2D 編輯時把已選結構的剖面描一次成有頂點 id 的幾何（`slice/model.ts` 的 `SliceModel`），之後拖節點、推邊、搬區域、右欄數值、方向鍵都改這份幾何，不再每一步從 voxel 重描：連拖同一個節點，節點還是那一個、從上一次放開的位置出發；斜邊拖完是一條直線（主輪廓畫頂點連線，8× 以上下面淡淡疊著 voxel 真正的邊界）。拖的時候橘色輪廓跟手（浮點，`slice/snap.ts` 的 `dragDispFloat`），裡面淡綠／淡紅是放開後會加／拿的格子、斜線是會被擋住的（主切面的單片預覽，`SlicePreviewLayer.tsx` 只重畫那一塊），提示「(+1.6, −2.3) → 取 (+2, −2)」；pointermove 用 requestAnimationFrame 合併。放開時幾何先用整數位移更新（不等 Worker），Op 照舊（rasterize → deltaOf → profile）；Worker 回來後只驗證「幾何光柵化 === 這一片 voxel」，對不上（被擋住、3D 那邊改了這片）以 voxel 為準重描、舊節點 ≤ 1.5 格對應沿用 id，訊息「幾何已對齊到實際結果」。每個版本留一份幾何快照，Ctrl+Z／Y 時節點回到那時的位置。幾何改過的結構，profile Op 多帶 `refExact`：參考片用 Op 裡的絕對格子（看到的＝commit 的），其他片照舊相對式；剛描好的幾何產生的 Op 和 v7 逐欄相同（`model.test.ts` 黃金測試）。profile 的即時預覽外框改成只包加／拿的格子＋結構這一段＋實際襯層要讀到的格數（`preview.ts` 的 `profileBox`），拖 fin 節點時 3D 也即時；還是超過 40 萬格時 3D 不畫預覽，右下角寫「範圍太大，放開後才會在 3D 看到結果」（plan v14 拿掉了原本的格子點雲）。設定裡可以改回「階梯」輪廓與「邊拖邊吸附」。實作紀錄與量測：`docs/plan-v8-geometry-layer.md`。
 
 **範圍（Scope）**：取代以前只能沿 z 的「要改哪裡」。一個軸＋起止索引，軸＝主切面的法線；三種模式：整個結構（預設）、此片、自訂一段（滑桿上標結構起止與旁邊結構的起止）。每張卡片下方「套用到：整根 ▾」點開就是範圍控制；位置列只顯示。所有 Op 存 `scope: {axis, lo, hi}`；舊的 `zRange: [a, b]` 讀進來會轉成 `scope: {axis: 'z', lo: a, hi: b}`（`upgradeOp`），重播逐體素相同（`scope.test.ts`）。
 
@@ -90,7 +90,7 @@ npm run build      # 型別檢查 + 打包
 | `src/pages/Section3D/views.lazy.tsx` | `View3D`／`SliceView`／`SliceEditor` 的 lazy 包裝：three.js 等載入檔案後才抓，歡迎頁不用等 |
 | `scripts/e2e/m0.cjs`、`m2.cjs`、`m3.cjs`、`m5.cjs`、`m9.cjs`、`m10.cjs`、`m11.cjs`、`m12.cjs`、`perf.cjs` | 驗收與量測（Playwright）：`npm run dev` 後 `node scripts/e2e/m5.cjs`；`perf.cjs` 另外量 2D 拖拉 60 步的 long task；`npx vite-node scripts/bench.ts drag 1 2 3` 量拖拉每幀的計算 |
 | `src/slice/` | 2D 剖面編輯的純函式：`trace.ts`（描輪廓、簡化、角）、`raster.ts`（光柵化、前後差＋方向碼）、`gestures.ts`（熱區、手勢 → Op）、`snap.ts`（拖法：浮點 ghost 與放開時的整數位移）、`model.ts`（持久幾何層：建立、位移、驗證、重描保留 id、每版本快照）、`relative.ts`、`mirror.ts` |
-| `src/pages/Section3D/SlicePreviewLayer.tsx`、`cellCloud.ts` | 主切面的預覽層（只重畫預覽那一塊，拖拉中淡綠／淡紅）；超過即時預覽上限時 3D 的加／拿格子點雲 |
+| `src/pages/Section3D/SlicePreviewLayer.tsx` | 主切面的預覽層（只重畫預覽那一塊，拖拉中淡綠／淡紅） |
 | `src/volume/kernel.ts`、`apply.ts`、`patch.ts`、`chunks.ts`、`profile.ts`、`report.ts` | 核心規則、只在外框裡算（`applyOpInPlace` 原地）、補丁（`applyStepInPlace`、`carryStepStats`）、chunk 網格、profile Op、一步的報告 |
 | `src/volume/previewMesh.ts`、`meshBuilder.ts`、`src/pages/Section3D/drawSlice.ts`、`tables.ts`、`src/ui/liveValue.ts` | 預覽網格（Worker 與主執行緒共用）、網格建構器、LUT 版切面像素、送 Worker 的畫法表、不經整頁 state 的即時值（plan v9） |
 | `src/ui/` | Swatch、StatTile、download、theme（antd 主題；色票和 `styles.css` 的 `:root` 變數對齊）、persist（`usePersisted`：欄寬、筆刷、襯層跟推、nm 比例存 localStorage；`overlayOpen`：Modal／Drawer 開著時單鍵快捷鍵不動 3D） |
@@ -108,7 +108,7 @@ plan v9（`docs/plan-v9-performance.md`）之後：
 - **網格切 chunk**（`chunks.ts`）：3,000 萬以下 32³、以上 64³；一步之後只重算和補丁外框相交的 chunk。chunk 網格快取在主執行緒（最近 3 組，沒動到的 chunk 在多組間共用），看原始（B）、切 split、復原到快取裡的版本不必再跟 Worker 要。BVH 等射線真的碰到那個 chunk 才建（閒置時補建）。
 - **選取層、空洞層也切 chunk**：選取層的 key 是選了哪些結構（key 不隨 relabel 換編號）＋範圍，每一步只重算 relabel 範圍 S 碰到的 chunk；選到基板也只在第一次付全量。
 - **拖拉第 2 級預覽在 Worker**：主執行緒每幀只算主切面這一片（第 1 級）；整個範圍的預覽與預覽網格在 Worker（同時最多一個在飛、永遠送最新的）。每片的輪廓同一次拖拉只描一次，輪廓一模一樣的片共用一份、只重做一次手勢。
-- **畫面層不重 render**：滑鼠所在的格子、3D 的 hover 說明、拖拉中每幀換的預覽與點雲都走 live value（`ui/liveValue.ts`），只有用到的小元件重 render；主切面上滑鼠移動整頁 render 0 次。剖口貼圖用同一張 canvas 與同一個貼圖物件；切面像素用 LUT（`drawSlice.ts`，和舊版逐位元組相同）。
+- **畫面層不重 render**：滑鼠所在的格子、3D 的 hover 說明、拖拉中每幀換的預覽都走 live value（`ui/liveValue.ts`），只有用到的小元件重 render；主切面上滑鼠移動整頁 render 0 次。剖口貼圖用同一張 canvas 與同一個貼圖物件；切面像素用 LUT（`drawSlice.ts`，和舊版逐位元組相同）。
 - **只在有變化時重畫 3D**：鏡頭動、動畫、滑鼠、會改畫面的 props、Worker 結果到了才畫；沒剖開時只畫正面。
 - **Worker 忙時排隊**：最多再排 3 步，依序接在前一步的結果後面；再多就提示「還在算前面的步驟」。排隊中按 Ctrl+Z 先清掉排隊的步驟。
 - **選取層不閃爍**：選取層頂點沿法線外推 0.03 voxel、不寫深度，主網格開 polygonOffset；相機 near 依陣列大小設。
@@ -133,7 +133,7 @@ plan v9（`docs/plan-v9-performance.md`）之後：
 | drawSlice 一張（×3，480×384 那一面） | 33 ms | 2.5 ms |
 | 點選一個結構的掃描（×3，poly／基板） | 484／534 | 76／190 |
 
-沒達到 plan v9 §2 目標的：×3 一步（apply＋chunk ≈ 0.8～1.2 s，目標 < 1 s）、×2 拖 fin 整根的第 2 級（外框 170 萬格超過即時上限 40 萬，在 Worker 也要 130 ms，所以照舊畫點雲）、drawSlice ×3 仍 2～7 ms（目標 < 1 ms；沿 x 的切面是跨 plane 讀記憶體）、×3 點選基板 190 ms（目標 < 50 ms；結果陣列仍是整個陣列大小，見 plan v9 §10）。
+沒達到 plan v9 §2 目標的：×3 一步（apply＋chunk ≈ 0.8～1.2 s，目標 < 1 s）、×2 拖 fin 整根的第 2 級（外框 170 萬格超過即時上限 40 萬，在 Worker 也要 130 ms，所以 3D 只寫「範圍太大」、放開後才畫）、drawSlice ×3 仍 2～7 ms（目標 < 1 ms；沿 x 的切面是跨 plane 讀記憶體）、×3 點選基板 190 ms（目標 < 50 ms；結果陣列仍是整個陣列大小，見 plan v9 §10）。
 
 plan v12（`docs/plan-v12-splits-page.md`）：`npx vite-node scripts/bench.ts diff|splits [scale ...]`、`node scripts/e2e/m12.cjs`。
 

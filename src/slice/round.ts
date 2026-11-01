@@ -182,10 +182,53 @@ export function roundText(g: RoundGesture, nm?: number) {
   return `${parts.join('、') || '圓頭'} ${r}、n = ${fmt(g.n)}${mode}`;
 }
 
+/** 參考片上的統計（面板上「削 1,240 格、填 0 格」）：cut／fill = 格數；limit = 半徑上限（各 key 外框的 min(半寬, 半高) 取最小）；clamped = 有被夾住的半徑。 */
+export interface RoundStats {
+  cut: number;
+  fill: number;
+  limit: number;
+  clamped: boolean;
+}
+
 /**
- * 產生圓頭 Op（2D、3D 的面板、把手、右鍵都呼叫這一個）：每個 key 在參考片 at 上算一份絕對的 add／remove，
- * rounds[key] = g（其他片用自己的外框重算），refExact。沒有任何格子會變回傳 null。
+ * 圓頭的 Op 與參考片統計一次算好（plan v14 P5：面板不再為統計多算一次 roundCells）。
+ * op：每個 key 在參考片 at 上算一份絕對的 add／remove，rounds[key] = g（其他片用自己的外框重算），refExact；沒有任何格子會變＝null。
  */
+export function roundBuild(
+  L: Labeled,
+  vol: Volume,
+  keys: string[],
+  scope: Scope,
+  at: number,
+  g: RoundGesture,
+  follow: boolean,
+  backfill: Backfill,
+  nm?: number,
+): { op: ProfileOp | null; stats: RoundStats } {
+  const perKey: ProfileOp['perKey'] = {};
+  const rounds: Record<string, RoundGesture> = {};
+  let any = false;
+  let cut = 0;
+  let fill = 0;
+  let limit = Infinity;
+  for (const key of keys) {
+    const c = keyCells(L, vol, scope.axis, at, key, g);
+    if (!c) continue;
+    if (c.add.length || c.remove.length) any = true;
+    perKey[key] = { add: encodeRle(c.add), remove: encodeRle(c.remove) };
+    rounds[key] = g;
+    cut += c.remove.length;
+    fill += c.add.length;
+    limit = Math.min(limit, roundLimit(c.box));
+  }
+  const want = Math.max(g.ru ?? g.r, g.rv ?? g.r);
+  const stats = { cut, fill, limit: Number.isFinite(limit) ? limit : 0, clamped: Number.isFinite(limit) && g.corners.some((c) => !c.concave) && want > limit };
+  if (!any) return { op: null, stats };
+  const ks = keys.filter((k) => perKey[k]);
+  return { op: { kind: 'profile', keys: ks, scope, at, perKey, follow, backfill, text: roundText(g, nm), rounds, refExact: true }, stats };
+}
+
+/** 產生圓頭 Op（2D、3D 的面板、把手、右鍵、實驗頁都呼叫這一個）。沒有任何格子會變回傳 null。 */
 export function roundOp(
   L: Labeled,
   vol: Volume,
@@ -197,38 +240,12 @@ export function roundOp(
   backfill: Backfill,
   nm?: number,
 ): ProfileOp | null {
-  const perKey: ProfileOp['perKey'] = {};
-  const rounds: Record<string, RoundGesture> = {};
-  let any = false;
-  for (const key of keys) {
-    const c = keyCells(L, vol, scope.axis, at, key, g);
-    if (!c) continue;
-    if (c.add.length || c.remove.length) any = true;
-    perKey[key] = { add: encodeRle(c.add), remove: encodeRle(c.remove) };
-    rounds[key] = g;
-  }
-  if (!any) return null;
-  const ks = keys.filter((k) => perKey[k]);
-  return { kind: 'profile', keys: ks, scope, at, perKey, follow, backfill, text: roundText(g, nm), rounds, refExact: true };
+  return roundBuild(L, vol, keys, scope, at, g, follow, backfill, nm).op;
 }
 
-/**
- * 參考片上的統計（面板上「削 1,240 格、填 0 格」）：cut／fill = 格數；limit = 半徑上限（各 key 外框的 min(半寬, 半高) 取最小）；
- * clamped = 有被夾住的半徑。
- */
-export function roundStats(L: Labeled, vol: Volume, keys: string[], axis: Axis, at: number, g: RoundGesture) {
-  let cut = 0;
-  let fill = 0;
-  let limit = Infinity;
-  for (const key of keys) {
-    const c = keyCells(L, vol, axis, at, key, g);
-    if (!c) continue;
-    cut += c.remove.length;
-    fill += c.add.length;
-    limit = Math.min(limit, roundLimit(c.box));
-  }
-  const want = Math.max(g.ru ?? g.r, g.rv ?? g.r);
-  return { cut, fill, limit: Number.isFinite(limit) ? limit : 0, clamped: Number.isFinite(limit) && g.corners.some((c) => !c.concave) && want > limit };
+/** 只要參考片統計（測試與舊呼叫端）。 */
+export function roundStats(L: Labeled, vol: Volume, keys: string[], axis: Axis, at: number, g: RoundGesture): RoundStats {
+  return roundBuild(L, vol, keys, { axis, lo: at, hi: at }, at, g, false, 'orig').stats;
 }
 
 /**

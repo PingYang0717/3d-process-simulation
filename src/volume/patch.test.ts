@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { type Comp, MATERIALS, countArray, demoVolume, diffMask, initialLabeled } from './volume';
 import { type EditState, type Op, matNameOf } from './ops';
 import { applyOpInPlace, applyOpLocal } from './apply';
-import { type Step, applyStep, applyStepInPlace, carryStepStats } from './patch';
+import { type Step, applyStep, applyStepInPlace, carryStepStats, globalIndex } from './patch';
 
 const matName = matNameOf(MATERIALS);
 const same = (a: ArrayLike<number>, b: ArrayLike<number>) => {
@@ -163,5 +163,15 @@ describe('diff 與體積帳差量更新（§4.4，stats）', () => {
       }
       check();
     }
+  });
+});
+
+describe('globalIndex（plan v14 §5.1：從 cellCloud 搬來）', () => {
+  it('裁切範圍的 index 換回整個陣列的 index', () => {
+    const dims = { X: 10, Y: 8 };
+    const box = { x0: 2, x1: 4, y0: 1, y1: 2, z0: 3, z1: 5 };
+    // 外框裡 (x, y, z) = (1, 1, 2) → 整個陣列 (3, 2, 5)
+    const local = (2 * 2 + 1) * 3 + 1;
+    expect(globalIndex(box, dims, [0, local])).toEqual([(3 * 8 + 1) * 10 + 2, (5 * 8 + 2) * 10 + 3]);
   });
 });

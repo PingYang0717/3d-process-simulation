@@ -6,6 +6,18 @@ import { type BBox, type Comp, type LabelMove, type Labeled, type Volume, moveLa
 type Dims = { X: number; Y: number; Z: number };
 type Arr = Uint8Array | Int32Array;
 
+/** 裁切範圍的 index → 整個陣列的 index。 */
+export function globalIndex(box: BBox, dims: { X: number; Y: number }, local: number[]) {
+  const W = box.x1 - box.x0 + 1;
+  const H = box.y1 - box.y0 + 1;
+  return local.map((i) => {
+    const x = i % W;
+    const y = ((i - x) / W) % H;
+    const z = (i - x - y * W) / (W * H);
+    return ((z + box.z0) * dims.Y + y + box.y0) * dims.X + x + box.x0;
+  });
+}
+
 export const boxSize = (b: BBox) => (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1) * (b.z1 - b.z0 + 1);
 
 /** 外框裡的資料（複製）。 */

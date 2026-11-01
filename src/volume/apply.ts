@@ -2,10 +2,10 @@
 // 找出真正改到的外框，貼回陣列；relabel 直接吃這個外框，不必掃整個陣列找哪裡不同。
 // plan v9 §4.3：applyOpInPlace 直接改 data／labels（不影印整個陣列）；applyOpLocal 是複製後呼叫它的純函式包裝。
 // 結果和 applyOp 逐體素相同（apply.test.ts）。
-import { type BBox, type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
+import { type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
 import { type EditState, type LegacyOp, type Op, type OpContext, upgradeOp } from './ops';
 import { previewBox, previewOp } from './preview';
-import { type Step, cropArr, diffInBox, pasteArr } from './patch';
+import { type Step, cropArr, diffInBox, globalIndex, pasteArr } from './patch';
 import { type Report, newReport } from './kernel';
 import { axisIndex } from './scope';
 
@@ -83,18 +83,6 @@ export function applyOpInPlace(s: EditState, input: Op | LegacyOp, ctx: OpContex
     },
   };
   return { comps: info.comps, step, report };
-}
-
-/** 裁切範圍的 index → 整個陣列的 index。 */
-export function globalIndex(box: BBox, dims: { X: number; Y: number }, local: number[]) {
-  const W = box.x1 - box.x0 + 1;
-  const H = box.y1 - box.y0 + 1;
-  return local.map((i) => {
-    const x = i % W;
-    const y = ((i - x) / W) % H;
-    const z = (i - x - y * W) / (W * H);
-    return ((z + box.z0) * dims.Y + y + box.y0) * dims.X + x + box.x0;
-  });
 }
 
 /** 純函式版本：複製 data／labels 後原地套用，s 不變。 */

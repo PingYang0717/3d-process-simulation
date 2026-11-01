@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { Flex, InputNumber, Segmented, Slider, Switch, Tooltip, Typography } from 'antd';
 import type { Axis } from '../../volume/volume';
 import { axisIndex, fullScope, planeAxes } from '../../volume/scope';
-import { type CornerId, type RoundGesture, roundOp, roundOutline, roundStats } from '../../slice/round';
+import { type CornerId, type RoundGesture, roundBuild, roundOutline } from '../../slice/round';
 import { type Editor, slicesWith } from './editor';
 import { CardShell, wordsOf } from './OpCard';
 import { longestAxis, nearestSlice } from './PositionBar';
@@ -51,11 +51,13 @@ export function RoundCard({ ed, compact, plane, initial }: { ed: Editor; compact
     [corners, r, asym, ru, rv, n, mode],
   );
   const keys = useMemo(() => [...ed.sel], [ed.sel]);
-  const op = useMemo(
-    () => (g.corners.length && keys.length ? roundOp(ed.L, ed.vol, keys, scope, at, g, ed.follow, ed.backfill, ed.nmPerVoxel) : null),
+  // Op 與參考片統計一次算好（plan v14 P5）
+  const built = useMemo(
+    () => (g.corners.length && keys.length ? roundBuild(ed.L, ed.vol, keys, scope, at, g, ed.follow, ed.backfill, ed.nmPerVoxel) : null),
     [g, keys, ed.L, ed.vol, scope, at, ed.follow, ed.backfill, ed.nmPerVoxel],
   );
-  const stats = useMemo(() => (keys.length && g.corners.length ? roundStats(ed.L, ed.vol, keys, axis, at, g) : null), [ed.L, ed.vol, keys, axis, at, g]);
+  const op = built?.op ?? null;
+  const stats = built?.stats ?? null;
   // 剖面小圖：選取外框投影到切面（示意，比例照實際）
   const [ua, va] = planeAxes(axis);
   const b = ed.selBox;

@@ -4,7 +4,7 @@
 import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, greedyMesh, labelComponents } from './volume';
 import { type Scope, clipBox } from './scope';
 import { type Op, upgradeOp } from './ops';
-import { applyOpInPlace, globalIndex } from './apply';
+import { applyOpInPlace } from './apply';
 import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
@@ -13,7 +13,7 @@ import { type Step, applyStepInPlace, carryStepStats, tightBox, unionBox } from 
 import type { Report } from './kernel';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
 import { type SplitPatch, type SplitStats, applyPatch, extractPatch, patchStats, stepTouch } from '../splits/lifecycle';
-import { pasteArr, cropArr } from './patch';
+import { pasteArr, cropArr, globalIndex } from './patch';
 import { type ExportMaterial, type FractionArray, encodeVti, encodeVtiLike } from './vti';
 import { encodeNpy } from './volume';
 

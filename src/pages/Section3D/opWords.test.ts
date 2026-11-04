@@ -39,6 +39,6 @@ describe('describeOp', () => {
     expect(describeOp(w, op)).toBe('Poly-Si 2 上面兩個角圓角 r = 6、n = 2 · 整根');
   });
   it('面的名字', () => {
-    expect([faceName([0, -1, 0]), faceName([0, 1, 0]), faceName([-1, 0, 0]), faceName([0, 0, 1])]).toEqual(['頂面', '底面', '左面', '後面']);
+    expect([faceName([0, -1, 0]), faceName([0, 1, 0]), faceName([-1, 0, 0]), faceName([0, 0, 1])]).toEqual(['頂面', '底面', '左面', '前面']);
   });
 });

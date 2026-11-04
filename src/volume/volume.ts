@@ -74,7 +74,7 @@ export type Backfill = 'orig' | 'outer' | 'above' | number;
 export const AIR = 0;
 export const VOID = 254;
 
-/** 內建範例的名稱表；載入檔案時不用它（見 materialsFor）。 */
+/** 內建範例的名稱表（0～7 是 demoVolume 用的，8～10 只有 demoComplexVolume 用到）；載入檔案時不用它（見 materialsFor）。 */
 export const MATERIALS: Material[] = [
   { id: 0, name: 'Air', color: '#ffffff' },
   { id: 1, name: 'Si (p)', color: '#ddd8cb' },
@@ -84,6 +84,9 @@ export const MATERIALS: Material[] = [
   { id: 5, name: 'TiN', color: '#8e9aaf' },
   { id: 6, name: 'Poly-Si', color: '#e8604c' },
   { id: 7, name: 'SiN', color: '#c9b6e8' },
+  { id: 8, name: 'SiGe epi', color: '#e3b505' },
+  { id: 9, name: 'W', color: '#4b4f63' },
+  { id: 10, name: 'SiO₂ ILD', color: '#dcebd5' },
   { id: VOID, name: 'VOID（空洞）', color: '#1f1f1f' },
 ];
 
@@ -1658,8 +1661,9 @@ export const DIRECTIONS: Direction[] = [
   { id: 'down', name: '往下', hint: '畫面下方，y 索引變大', arrow: '↓', axis: 'y', d: [0, 1, 0] },
   { id: 'xm', name: '往左', hint: 'x 索引變小', arrow: '←', axis: 'x', d: [-1, 0, 0] },
   { id: 'xp', name: '往右', hint: 'x 索引變大', arrow: '→', axis: 'x', d: [1, 0, 0] },
-  { id: 'zm', name: '往前', hint: '深度方向，z 索引變小', arrow: '⤓', axis: 'z', d: [0, 0, -1] },
-  { id: 'zp', name: '往後', hint: '深度方向，z 索引變大', arrow: '⤒', axis: 'z', d: [0, 0, 1] },
+  // 前＝朝向觀者（預設視角與「正視」的相機都在 +z 看向 −z），和 3D 畫面一致；之前 +z 叫「後」正好相反（審查問題 3）
+  { id: 'zm', name: '往後', hint: '深度方向，離你遠一點，z 索引變小', arrow: '⤒', axis: 'z', d: [0, 0, -1] },
+  { id: 'zp', name: '往前', hint: '深度方向，朝向你，z 索引變大', arrow: '⤓', axis: 'z', d: [0, 0, 1] },
 ];
 
 export const directionName = (d: Vec3) =>

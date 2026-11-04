@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Alert, Button, Checkbox, Empty, Flex, InputNumber, Segmented, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, Checkbox, Collapse, Empty, Flex, InputNumber, Segmented, Table, Tooltip, Typography } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
 import { bboxDims, isVoid } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
@@ -251,23 +251,30 @@ function InspectorImpl({ ed }: { ed: Editor }) {
           <HandleRow ed={ed} key={`${ed.handle.kind}${ed.handle.origin.join()}`} />
         </Section>
       )}
-      <Section title="長／縮">
-        <PushCard ed={ed} />
-      </Section>
-      <Section title="方頭／圓頭">
-        <ShapeCard ed={ed} />
-      </Section>
-      <Section title="移動">
-        <MoveCard ed={ed} />
-      </Section>
-      <Section title="材質">
-        <MaterialCard ed={ed} />
-      </Section>
-      {ed.sel.size === 1 && (
-        <Section title="缺陷">
-          <DefectCard ed={ed} />
-        </Section>
-      )}
+      {/* 操作卡片改成手風琴（審查問題 1）：之前五張全攤開右欄 2,000 px 高、永遠在捲；一次只掛一張，開著的那張也才會在 3D 亮面 */}
+      <Collapse
+        accordion
+        className="insp-ops"
+        defaultActiveKey="push"
+        destroyOnHidden
+        items={[
+          { key: 'push', label: <OpTitle name="長／縮" hint="一面、兩側 CD、整層、側壁斜度" />, children: <PushCard ed={ed} /> },
+          { key: 'shape', label: <OpTitle name="方頭／圓頭" hint="把頭弄平、弄圓" />, children: <ShapeCard ed={ed} /> },
+          { key: 'move', label: <OpTitle name="移動" hint="整塊搬幾格" />, children: <MoveCard ed={ed} /> },
+          { key: 'mat', label: <OpTitle name="材質" hint="換成別的材質" />, children: <MaterialCard ed={ed} /> },
+          ...(ed.sel.size === 1 ? [{ key: 'defect', label: <OpTitle name="缺陷" hint="放 void、片、球" />, children: <DefectCard ed={ed} /> }] : []),
+        ]}
+      />
+    </>
+  );
+}
+
+/** 手風琴標題：名字＋灰色一句提示。 */
+function OpTitle({ name, hint }: { name: string; hint: string }) {
+  return (
+    <>
+      {name}
+      <span className="insp-op-hint">{hint}</span>
     </>
   );
 }

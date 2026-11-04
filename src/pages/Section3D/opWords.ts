@@ -11,14 +11,14 @@ export interface WordsCtx {
 }
 
 const AXIS = ['x', 'y', 'z'] as const;
-/** 兩端的白話名字（x：左右、y：上下、z：前後；小端＝索引小的那一側，和 DIRECTIONS 一致）。 */
-export const SIDE_NAME: Record<0 | 1 | 2, [string, string]> = { 0: ['左', '右'], 1: ['上', '下'], 2: ['前', '後'] };
+/** 兩端的白話名字（x：左右、y：上下、z：後前；小端＝索引小的那一側，和 DIRECTIONS 一致：+z 朝向觀者＝前）。 */
+export const SIDE_NAME: Record<0 | 1 | 2, [string, string]> = { 0: ['左', '右'], 1: ['上', '下'], 2: ['後', '前'] };
 const axisOf = (d: Vec3) => (d[0] ? 0 : d[1] ? 1 : 2);
-/** 方向 → 那一面的名字（體素 y 向下：−y＝頂面）。 */
+/** 方向 → 那一面的名字（體素 y 向下：−y＝頂面；+z 朝向觀者＝前面）。 */
 export function faceName(d: Vec3) {
   const a = axisOf(d);
   const s = d[a] > 0;
-  return a === 1 ? (s ? '底面' : '頂面') : a === 0 ? (s ? '右面' : '左面') : s ? '後面' : '前面';
+  return a === 1 ? (s ? '底面' : '頂面') : a === 0 ? (s ? '右面' : '左面') : s ? '前面' : '後面';
 }
 const lo = (b: BBox) => [b.x0, b.y0, b.z0];
 const hi = (b: BBox) => [b.x1, b.y1, b.z1];
@@ -68,7 +68,7 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     const [dx, dy, dz] = op.d;
     if (dx) parts.push(`往${dx > 0 ? '右' : '左'} ${Math.abs(dx)}`);
     if (dy) parts.push(`往${dy < 0 ? '上' : '下'} ${Math.abs(dy)}`);
-    if (dz) parts.push(`往${dz > 0 ? '後' : '前'} ${Math.abs(dz)}`);
+    if (dz) parts.push(`往${dz > 0 ? '前' : '後'} ${Math.abs(dz)}`);
     return `${who} 整塊${parts.join('、')} 格${op.follow ? ' · 襯層一起搬' : ''}${tail}`;
   }
   if (op.kind === 'material') {
@@ -95,7 +95,7 @@ export function describeOp(w: WordsCtx, op: Op, extra?: { count?: number }): str
     return `${who} 裡放 ${w.matName(op.mat)} ${shape}：中心 (${op.center.map((v) => v.toFixed(2)).join(', ')})、${op.size.join('×')} 格（${op.size.map((v) => (v * w.nm).toFixed(1).replace(/\.0$/, '')).join('×')} nm）`;
   }
   if (op.kind === 'taper') {
-    const [t0, t1] = op.along === 1 ? ['頂', '底'] : op.along === 0 ? ['左端', '右端'] : ['前端', '後端'];
+    const [t0, t1] = op.along === 1 ? ['頂', '底'] : op.along === 0 ? ['左端', '右端'] : ['後端', '前端'];
     const sg = (v: number) => (v > 0 ? `+${v}` : v < 0 ? `−${-v}` : '0');
     const kind = op.bottom > op.top ? '（footing）' : op.bottom < op.top ? '（倒梯形）' : '';
     return `${who} ${faceName(op.face)}側壁：${t0} ${sg(op.top)}、${t1} ${sg(op.bottom)} 格（線性${kind}）${op.both ? ' · 兩側對稱' : ''}${op.policy === 'overwrite' ? ' · 允許穿層' : ''}${tail}`;

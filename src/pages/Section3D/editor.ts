@@ -691,12 +691,62 @@ export function useEditor() {
    * 第一次要改之前：把原始複製進這個 split 的帳簿（主執行緒與 Worker 各一次），之後原地改。
    * 借用中的 split 內容一定是原始（新 split、丟掉所有改動、借用中的複本）。
    */
+  /**
+   * 第一次在原始上改動，要先把原始抄一份當新 split 的帳簿：data（1 B／格）＋labels（4 B／格）＋diff（1 B／格），
+   * ×3 範例 5,300 萬格就是 318 MB。之前這一整份是在按「套用」的 click handler 裡同步抄的，實測主執行緒卡 2.1 s（審查問題 4）。
+   * 現在載入完就在 idle 時分段先抄好（每次最多 6 ms），own() 直接拿；還沒抄完就只補剩下的那一段。
+   * 用掉之後 spareGen +1 再抄一份備著（使用者回到原始再改一次也不會卡）。
+   */
+  const spare = useRef<{ src: EditState; buf: SplitBuffers; at: number } | null>(null);
+  const [spareGen, setSpareGen] = useState(0);
+  useEffect(() => {
+    const o = origState;
+    const oc = origCountsRef.current;
+    spare.current = null;
+    if (!o || !oc) return;
+    const N = o.vol.data.length;
+    const entry = { src: o, buf: { data: new Uint8Array(N), labels: new Int32Array(N), diff: new Uint8Array(N), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) } as SplitBuffers, at: 0 };
+    spare.current = entry;
+    const STEP = 1 << 21;
+    let cancelled = false;
+    const idle = (cb: () => void) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(cb, { timeout: 1000 }) : window.setTimeout(cb, 16));
+    const run = () => {
+      if (cancelled || spare.current !== entry) return;
+      const t0 = performance.now();
+      while (entry.at < N && performance.now() - t0 < 6) {
+        const end = Math.min(N, entry.at + STEP);
+        entry.buf.data.set(o.vol.data.subarray(entry.at, end), entry.at);
+        entry.buf.labels.set(o.L.labels.subarray(entry.at, end), entry.at);
+        entry.at = end;
+      }
+      if (entry.at < N) idle(run);
+    };
+    idle(run);
+    return () => {
+      cancelled = true;
+    };
+  }, [origState, spareGen]);
   const own = (sp: Split): Split => {
     if (sp.buf) return sp;
     if (sp.state === 'parked') throw new Error(`split ${sp.name} 還沒載入（parked）`);
     const o = origRef.current!;
     const oc = origCountsRef.current!;
-    const buf: SplitBuffers = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) };
+    let buf: SplitBuffers;
+    const s = spare.current;
+    if (s && s.src === o) {
+      // 先抄好的那一份：沒抄完的尾巴現在補（通常早就抄完了）
+      const N = o.vol.data.length;
+      if (s.at < N) {
+        s.buf.data.set(o.vol.data.subarray(s.at), s.at);
+        s.buf.labels.set(o.L.labels.subarray(s.at), s.at);
+        s.at = N;
+      }
+      buf = s.buf;
+      spare.current = null;
+      setSpareGen((g) => g + 1);
+    } else {
+      buf = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) };
+    }
     const version = sidOf(sp.cur);
     void forkIn(sp.id, sp.cur).catch(() => {});
     return { ...sp, buf, cur: wrap(sp.id, buf, sp.cur.L.comps, version, o.vol) };

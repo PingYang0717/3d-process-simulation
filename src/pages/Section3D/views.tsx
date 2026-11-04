@@ -69,10 +69,11 @@ import { type Scope, axisIndex, axisLen } from '../../volume/scope';
 const INFLATE = 0.03;
 /** 筆刷圈、法線箭頭、拖拉預覽共用的顏色（和十字的淡橘區分）。 */
 const BRUSH_COLOR = 0xfa541c;
-/** 把手：面把手橘、角把手紫，滑過／拖拉中亮黃。 */
-const HANDLE_COLOR = 0xfa541c;
+/** 把手：面把手照軸上色（和左下角 gizmo 一樣：x 紅、y 綠、z 藍），角把手紫，滑過／拖拉中亮黃（審查問題 3）。 */
 const CORNER_COLOR = 0x722ed1;
 const HANDLE_HOT = 0xfaad14;
+const AXIS_HEX = [0xe5484d, 0x30a46c, 0x3e63dd];
+const handleColor = (d: Vec3) => AXIS_HEX[d[0] ? 0 : d[1] ? 1 : 2];
 /** 按下後要先拖過這麼多像素才算拖拉，否則一律當點選（避免手抖就改到體素）。 */
 const DRAG_DEAD_ZONE = 8;
 /** 同一個位置再點一次（時間、距離內）＝沿射線選下一個結構。 */
@@ -1321,7 +1322,7 @@ export function View3D({
     if (tool !== 'handles' || !selBBox || mode === 'orig') return;
     const world = (p: Vec3) => new Vector3(p[0], vol.Y - p[1], p[2]);
     for (const f of faceHandles(selBBox)) {
-      const a = new ArrowHelper(new Vector3(f.dir[0], -f.dir[1], f.dir[2]), world(f.pos), 1, HANDLE_COLOR);
+      const a = new ArrowHelper(new Vector3(f.dir[0], -f.dir[1], f.dir[2]), world(f.pos), 1, handleColor(f.dir));
       for (const m of [a.line.material, a.cone.material] as (LineBasicMaterial | MeshBasicMaterial)[]) {
         m.depthTest = false;
         m.transparent = true;
@@ -1359,7 +1360,7 @@ export function View3D({
         obj.visible = facesCamera(h.dir, toEye) || on;
         const len = HANDLE_PX * 2 * wpp * (on ? 1.25 : 1);
         (obj as ArrowHelper).setLength(len, len * 0.45, len * 0.3);
-        (obj as ArrowHelper).setColor(on ? HANDLE_HOT : HANDLE_COLOR);
+        (obj as ArrowHelper).setColor(on ? HANDLE_HOT : handleColor(h.dir));
       } else {
         obj.scale.setScalar(HANDLE_PX * 0.9 * wpp * (on ? 1.3 : 1));
         ((obj as Mesh).material as MeshBasicMaterial).color.setHex(on ? HANDLE_HOT : CORNER_COLOR);
@@ -2214,6 +2215,25 @@ export function View3D({
         </div>
       ) : null}
       {(meshing || busy) && <div className="mesh-busy" role="status">{busy ? '計算中…' : '更新 3D 中…'}</div>}
+      {tool === 'handles' && selBBox && mode !== 'orig' && (
+        <div className="handle-legend" role="note">
+          <span>
+            <span className="lg-arrow" />
+            箭頭＝整面長／縮（順著拖＝長）
+          </span>
+          <span>
+            <span className="lg-diamond" />
+            菱形＝圓角
+          </span>
+          <span>
+            <span className="lg-hot" />
+            黃＝抓到的
+          </span>
+          <span>
+            顏色＝軸：<span className="lg-ax" style={{ color: AXIS_RGB.x }}>x 左右</span>／<span className="lg-ax" style={{ color: AXIS_RGB.y }}>y 上下</span>／<span className="lg-ax" style={{ color: AXIS_RGB.z }}>z 前後</span>
+          </span>
+        </div>
+      )}
     </div>
   );
 }

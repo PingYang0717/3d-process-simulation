@@ -11,8 +11,9 @@ import { type Scope, uvTo3D } from '../../volume/scope';
 import { MatLabel } from '../../ui/Swatch';
 import type { Editor } from './editor';
 import { ScopeControl, scopeWords, scopeWordsOf } from './PositionBar';
-import { FacePicker } from './FacePicker';
+import { FaceGlyph, FacePicker } from './FacePicker';
 import { type WordsCtx, SIDE_NAME, describeOp, faceName } from './opWords';
+import { directionName } from '../../volume/volume';
 import { RoundCard } from './RoundCard';
 import type { RoundGesture } from '../../slice/round';
 import type { EdKey } from '../../ui/memoEd';
@@ -115,6 +116,21 @@ function useCardPreview(op: Op | null, previewable = true) {
     [],
   );
   return { ref, active, activate: () => setActive(true), deactivate: () => setActive(false), big: big && active };
+}
+
+/**
+ * 卡片開著的時候 3D 的選取外框（與 2D 的那一條邊）一直亮著「要動的那一面」（審查問題 3：文字說頂面、前面，畫面上要看得到是哪一面）。
+ * 滑過小方塊暫時換成滑過的面，離開就回到選的面；卡片收掉才熄。
+ */
+function useFaceHighlight(dir: Vec3 | null) {
+  const host = useContext(CardHostCtx);
+  const key = dir ? dir.join() : '';
+  useEffect(() => {
+    host.highlight(dir);
+    return () => host.highlight(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, host]);
+  return (d: Vec3 | null) => host.highlight(d ?? dir);
 }
 
 /** 卡片外殼：一句話 → 參數 → 套用到／套用。 */
@@ -226,7 +242,6 @@ const AXN = ['x', 'y', 'z'] as const;
  * 長／縮（plan v11 §4.5～§4.8）：一面（push）｜兩側（CD）｜整層（保形 dilate）｜側壁斜度（taper）。
  */
 export function PushCard({ ed, compact, plane, initialDir }: { ed: Editor; compact?: boolean; plane?: Axis; initialDir?: Vec3 }) {
-  const host = useContext(CardHostCtx);
   const [mode, setMode] = useState<'face' | 'cd' | 'dilate' | 'taper'>('face');
   const [dir, setDir] = useState<Vec3>(() => initialDir ?? defaultDir(plane));
   const [n, setN] = useState(1);
@@ -239,6 +254,7 @@ export function PushCard({ ed, compact, plane, initialDir }: { ed: Editor; compa
   const [bottom, setBottom] = useState(2);
   const [both, setBoth] = useState(true);
   const pol = policyOf(through);
+  const hover = useFaceHighlight(mode === 'dilate' ? null : dir);
   const op = useMemo(() => {
     if (mode === 'cd') return ed.cdOp(a, n, anchor, pol);
     if (mode === 'dilate') return ed.dilateOp(n);
@@ -246,7 +262,7 @@ export function PushCard({ ed, compact, plane, initialDir }: { ed: Editor; compa
     return ed.pushOp(dir, n, undefined, pol);
   }, [mode, ed.cdOp, ed.dilateOp, ed.taperOp, ed.pushOp, a, n, anchor, pol, dir, alongOk, top, bottom, both]); // eslint-disable-line react-hooks/exhaustive-deps
   const thick = useMemo(() => (mode === 'dilate' && ed.selMask ? thicknessOf(ed.vol, ed.selMask, ed.selBox) : 0), [mode, ed.selMask, ed.vol, ed.selBox]);
-  const [t0, t1] = alongOk === 1 ? ['頂', '底'] : alongOk === 0 ? ['左端', '右端'] : ['前端', '後端'];
+  const [t0, t1] = alongOk === 1 ? ['頂', '底'] : alongOk === 0 ? ['左端', '右端'] : ['後端', '前端'];
   return (
     <CardShell ed={ed} op={op} words={op ? describeOp(wordsOf(ed), op) : ''} compact={compact}>
       <Segmented
@@ -262,16 +278,24 @@ export function PushCard({ ed, compact, plane, initialDir }: { ed: Editor; compa
         ]}
       />
       <Flex align="center" gap={12}>
-        {mode !== 'dilate' && <FacePicker value={dir} onChange={setDir} onHover={host.highlight} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} pair={mode === 'cd'} />}
+        {mode !== 'dilate' && <FacePicker value={dir} onChange={setDir} onHover={hover} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} pair={mode === 'cd'} />}
         <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
           {mode === 'face' && (
-            <Text style={{ fontSize: 12 }}>
-              {faceName(dir)}沿法線{n >= 0 ? '往外長' : '往內縮'}；整面一起，只推最外側的表面。
-            </Text>
+            <div className="op-plain">
+              <FaceGlyph dir={dir} kind={n >= 0 ? 'out' : 'in'} />
+              <span>
+                把<b>{faceName(dir)}</b>整面{n >= 0 ? '往外推' : '往內縮'} {Math.abs(n)} 格（{directionName(n >= 0 ? dir : ([-dir[0], -dir[1], -dir[2]] as Vec3))}）；只動最外層表面，形狀不變。畫面上橘色亮起的就是這一面。
+              </span>
+            </div>
           )}
           {mode === 'cd' && (
             <>
-              <Text style={{ fontSize: 12 }}>沿 {AXN[a]} 的總寬；兩側一起時，奇數格多的一格給{SIDE_NAME[a][1]}側。</Text>
+              <div className="op-plain">
+                <FaceGlyph dir={dir} kind="out" />
+                <span>
+                  改<b>{SIDE_NAME[a][0]}／{SIDE_NAME[a][1]}</b>之間的總寬（{AXN[a]} 方向）；兩側一起時，奇數格多的一格給{SIDE_NAME[a][1]}側。
+                </span>
+              </div>
               <Segmented
                 size="small"
                 value={anchor}
@@ -335,9 +359,8 @@ export function refCandidates(ed: Editor, dir: Vec3) {
 }
 
 /** 方頭：選一面，每一排補到那一面最外側那一點（圓頭、斜角變方頭）；或「相對於」另一個結構的面（相對 recess）。 */
-function LevelPart({ ed, compact, plane }: { ed: Editor; compact?: boolean; plane?: Axis }) {
-  const host = useContext(CardHostCtx);
-  const [dir, setDir] = useState<Vec3>(() => defaultDir(plane));
+function LevelPart({ ed, compact, plane, initialDir }: { ed: Editor; compact?: boolean; plane?: Axis; initialDir?: Vec3 }) {
+  const [dir, setDir] = useState<Vec3>(() => initialDir ?? defaultDir(plane));
   const [refKey, setRefKey] = useState<string | null>(null);
   const [side, setSide] = useState<'lo' | 'hi'>('lo');
   const [offNm, setOffNm] = useState(3);
@@ -345,16 +368,20 @@ function LevelPart({ ed, compact, plane }: { ed: Editor; compact?: boolean; plan
   const ref = refKey ? { key: refKey, side, offset } : undefined;
   const op = useMemo(() => ed.levelOp(dir, ref), [ed.levelOp, dir, refKey, side, offset]); // eslint-disable-line react-hooks/exhaustive-deps
   const refs = useMemo(() => refCandidates(ed, dir), [ed.comps, ed.sel, ed.selBox, dir]); // eslint-disable-line react-hooks/exhaustive-deps
+  const hover = useFaceHighlight(dir);
   const a = dir[0] ? 0 : dir[1] ? 1 : 2;
   const to = ref ? levelRefTo(ed.L, dir, ref) : null;
   return (
     <CardShell ed={ed} op={op} words={op ? describeOp(wordsOf(ed), op) : ''} compact={compact} applyText="套用方頭">
       <Flex align="center" gap={12}>
-        <FacePicker value={dir} onChange={setDir} onHover={host.highlight} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} />
+        <FacePicker value={dir} onChange={setDir} onHover={hover} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} />
         <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {faceName(dir)}每一排補到{ref ? '參照面＋偏移' : '最外側那一點'}。只填空氣；薄襯層{ed.follow ? '跟著往外走' : '會擋住（設定裡開「襯層一起推」才跟著走）'}，厚的鄰居不吃。
-          </Text>
+          <div className="op-plain">
+            <FaceGlyph dir={dir} kind="flat" />
+            <span>
+              把<b>{faceName(dir)}</b>補平成方頭：斜角、圓角、凹下去的每一排都補到{ref ? '參照結構的那一面（再加偏移）' : '最凸的那一排'}。只填空氣{ed.follow ? '，薄襯層跟著外移' : '；薄襯層會擋住（設定裡開「襯層一起推」才跟著走）'}，厚的鄰居不吃。
+            </span>
+          </div>
           <Flex align="center" gap={6}>
             <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>相對於</span>
             <Select size="small" allowClear style={{ flex: 1, minWidth: 0 }} placeholder="（絕對：最外側那一點）" value={refKey} onChange={(v) => setRefKey(v ?? null)} options={refs} aria-label="相對於" />
@@ -386,8 +413,9 @@ function LevelPart({ ed, compact, plane }: { ed: Editor; compact?: boolean; plan
 /**
  * 方頭／圓頭：同一個地方決定頭型（plan v10 §4.6）。右上角切換；initial＝從角把手／右鍵帶進來的圓頭參數。
  */
-export function ShapeCard({ ed, compact, plane, start = 'round', initial }: { ed: Editor; compact?: boolean; plane?: Axis; start?: 'round' | 'level'; initial?: Partial<RoundGesture> }) {
-  const [kind, setKind] = useState<'round' | 'level'>(start);
+export function ShapeCard({ ed, compact, plane, start, initial, initialDir }: { ed: Editor; compact?: boolean; plane?: Axis; start?: 'round' | 'level'; initial?: Partial<RoundGesture>; initialDir?: Vec3 }) {
+  // 預設開在方頭（使用者最常要的是「把頭弄平」）；從角把手／右鍵帶圓頭參數進來才開圓頭
+  const [kind, setKind] = useState<'round' | 'level'>(start ?? (initial ? 'round' : 'level'));
   return (
     <Flex vertical gap={8}>
       <Segmented
@@ -395,24 +423,24 @@ export function ShapeCard({ ed, compact, plane, start = 'round', initial }: { ed
         value={kind}
         onChange={(v) => setKind(v as 'round' | 'level')}
         options={[
-          { label: '圓頭', value: 'round' },
           { label: '方頭', value: 'level' },
+          { label: '圓頭', value: 'round' },
         ]}
         style={{ alignSelf: 'flex-end' }}
       />
-      {kind === 'round' ? <RoundCard ed={ed} compact={compact} plane={plane} initial={initial} /> : <LevelPart ed={ed} compact={compact} plane={plane} />}
+      {kind === 'round' ? <RoundCard ed={ed} compact={compact} plane={plane} initial={initial} /> : <LevelPart ed={ed} compact={compact} plane={plane} initialDir={initialDir} />}
     </Flex>
   );
 }
 
 /** 移動：選方向、幾格；方向鍵也可以（1 格、Shift 10 格、PgUp／PgDn 前後）。 */
 export function MoveCard({ ed, compact, plane }: { ed: Editor; compact?: boolean; plane?: Axis }) {
-  const host = useContext(CardHostCtx);
   const [dir, setDir] = useState<Vec3>(() => defaultDir(plane));
   const [n, setN] = useState(1);
   const [shell, setShell] = useState(ed.follow);
   const d: Vec3 = [dir[0] * n, dir[1] * n, dir[2] * n];
   const op = useMemo(() => ed.translateOp(d, shell), [ed.translateOp, d[0], d[1], d[2], shell]); // eslint-disable-line react-hooks/exhaustive-deps
+  const hover = useFaceHighlight(dir);
   return (
     <CardShell
       ed={ed}
@@ -426,8 +454,14 @@ export function MoveCard({ ed, compact, plane }: { ed: Editor; compact?: boolean
       }
     >
       <Flex align="center" gap={12}>
-        <FacePicker value={dir} onChange={setDir} onHover={host.highlight} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} />
+        <FacePicker value={dir} onChange={setDir} onHover={hover} allowed={plane ? inPlane(plane) : undefined} size={compact ? 80 : 96} />
         <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
+          <div className="op-plain">
+            <FaceGlyph dir={dir} kind="out" />
+            <span>
+              整塊<b>{directionName(dir)}</b>搬 {n} 格（亮起的那一面是前進方向）。
+            </span>
+          </div>
           <Steps ed={ed} value={n} onChange={setN} min={0} max={32} label="幾格" />
           <Checkbox checked={shell} onChange={(e) => setShell(e.target.checked)}>
             外面的薄襯層一起搬

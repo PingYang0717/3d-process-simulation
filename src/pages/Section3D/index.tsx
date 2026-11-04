@@ -32,6 +32,7 @@ import { type Op, type SelectMode, type Split, changedOf, slicesWith, useEditor 
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
 import { FloatingToolbar } from './FloatingToolbar';
 import { type CardHost, CardHostCtx, PushCard, ShapeCard } from './OpCard';
+import { faceName } from './opWords';
 import { type EditTab, EditToolbar } from './EditToolbar';
 import { roundFrame } from './RoundCard';
 import { type CornerId, type RoundGesture, roundOp } from '../../slice/round';
@@ -789,7 +790,7 @@ export default function Section3DPage() {
           ...(mn
             ? [
                 { key: 'push', label: `${directionName(mn)}長／縮…`, onClick: () => openCard({ kind: 'push', dir: mn, ...menuPage() }) },
-                { key: 'level', label: `方頭（往${directionName(mn).slice(1)}）`, disabled: !!ed.busy, onClick: () => (ed.levelWhole(mn), closeMenu()) },
+                { key: 'level', label: `方頭（${faceName(mn)}補平）…`, onClick: () => openCard({ kind: 'shape', dir: mn, ...menuPage() }) },
               ]
             : []),
           ...(editing && corner2d
@@ -908,7 +909,28 @@ export default function Section3DPage() {
   const onSliceMenu = useEvent((p: Vec3 | null, x: number, y: number) => {
     const l = p ? ed.L.labels[(p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0]] : -1;
     setMenuAt({ x, y });
-    ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, voxel: p ? (p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0] : null });
+    // 2D 剖面右鍵：離選取外框哪一條邊最近，就當作點到那一面（切面上四個方向之一），選單才會有「{方向}長／縮…」「方頭」
+    // （之前 2D 的選單沒有面法線，這兩項只在 3D 出現；審查問題 2／3）
+    let n: Vec3 | null = null;
+    const b = ed.selBox;
+    if (p && b && editing) {
+      const [ua, va] = ed.editAxis === 'z' ? [0, 1] : ed.editAxis === 'y' ? [0, 2] : [2, 1];
+      const lo = [b.x0, b.y0, b.z0];
+      const hi = [b.x1, b.y1, b.z1];
+      const ds: [number, number, number][] = [
+        [Math.abs(p[ua] - lo[ua]), ua, -1],
+        [Math.abs(hi[ua] - p[ua]), ua, 1],
+        [Math.abs(p[va] - lo[va]), va, -1],
+        [Math.abs(hi[va] - p[va]), va, 1],
+      ];
+      ds.sort((q, r) => q[0] - r[0]);
+      const [d, ax, sg] = ds[0];
+      if (d <= Math.max(3, (hi[ax] - lo[ax] + 1) * 0.35)) {
+        n = [0, 0, 0];
+        n[ax] = sg;
+      }
+    }
+    ed.setMenu({ x, y, key: l >= 0 ? ed.L.comps[l].key : null, voxel: p ? (p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0] : null, n });
   });
   /** 2D 手勢的選項與幾何層（plan v15 B1：值沒變就是同一個物件，SliceEditor 的 sctx 才不會每 render 重算）。 */
   const gesture = useMemo(() => ({ scope: ed.scope, follow: ed.follow, backfill: ed.backfill, nm: ed.nmPerVoxel }), [ed.scope, ed.follow, ed.backfill, ed.nmPerVoxel]);
@@ -1330,7 +1352,7 @@ export default function Section3DPage() {
               {cardAt.kind === 'push' ? (
                 <PushCard ed={ed} compact initialDir={cardAt.dir} />
               ) : (
-                <ShapeCard ed={ed} compact initial={cardAt.round} plane={editing ? ed.editAxis : undefined} />
+                <ShapeCard ed={ed} compact initial={cardAt.round} initialDir={cardAt.dir} plane={editing ? ed.editAxis : undefined} />
               )}
             </div>,
             document.body,

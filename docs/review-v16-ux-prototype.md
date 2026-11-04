@@ -72,7 +72,17 @@ CPU profile 把第一次的 2.5 s 全部指到 `own()`（`editor.ts`）：第一
 `data.slice()`（53 MB）＋`labels.slice()`（Int32，212 MB）＋`new Uint8Array` diff（53 MB）＝318 MB 的配置加複製；接著 `useSelMasks` 因 `vol.data` 身分變了全量重建 `maskOf`。
 
 **改動**：載入完就在 idle 時分段先抄好這一份（每次 ≤ 6 ms），`own()` 直接拿；用掉再抄一份備著。
-**還沒做**：單一 Worker 嚴格 FIFO（preview → fork → apply → chunks → layer）每步仍 1.5～5 s 沒有進度與取消；`changedCount` 對補丁多跑一次重複掃描；chunk 幾何一次全上 GPU。
+**進度與取消（第二輪）**
+- Worker 的 apply／chunks／layer 改成 generator（`workerCore.ts gens`）：每個 yield 回報一次進度（`{ phase, done, total, cancellable }`），
+  `worker.ts` 在 yield 之間 `setTimeout 0` 讓出事件圈，這時收到 `{ cancel: id }` 就在安全點 `return` 掉。請求之間仍嚴格依序（worker.ts 自己排 pendingMsgs）。
+  `handle()`（測試、bench）用 `drain` 同步跑完，結果和以前相同（`cancel.test.ts`）。
+- apply 拆成 `applyOpPrepare`（純算：裁切、補平／推面、找 R）＋`applyOpCommit`（貼回、relabel）。取消點在兩者之間：到那裡為止帳簿一格都沒動，
+  取消就是安全的；過了這個點讓它做完，主執行緒再自動復原這一步（沿用 `undoAfter`）。
+- 主執行緒：`client.ts` 收 `{ progress }` 放進 `progress.ts` 的 store，`cancelCall(type)` 取消該類最新一筆；`editor.ts cancel()` 清掉排隊的步驟、
+  取消 apply／chunks／layer。畫面：`BusyBar.tsx`（文字＋進度條＋取消）、3D 角落的膠囊印「更新 3D 網格 12／36 塊」。
+- 「計算這一步」那一段（補平、推面本身）沒有細進度，用跑馬燈；寫回 60%、3D 網格與選取層有逐塊百分比。
+
+**還沒做**：`changedCount` 對補丁多跑一次重複掃描；chunk 幾何一次全上 GPU；Worker 第一次改要先複製一份帳簿（fork，×3 約 0.5 s）仍排在 apply 前面。
 
 ## 5. 量測腳本（scratchpad，不在 repo）
 

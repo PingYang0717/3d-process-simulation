@@ -32,6 +32,7 @@ import { type Op, type SelectMode, type Split, changedOf, slicesWith, useEditor 
 import { AXIS_TAB, PositionBar, longestAxis, nearestSlice } from './PositionBar';
 import { FloatingToolbar } from './FloatingToolbar';
 import { type CardHost, CardHostCtx, PushCard, ShapeCard } from './OpCard';
+import { BusyBar } from './BusyBar';
 import { faceName } from './opWords';
 import { type EditTab, EditToolbar } from './EditToolbar';
 import { roundFrame } from './RoundCard';
@@ -1551,12 +1552,7 @@ export default function Section3DPage() {
         <main className="stage" id="stage">
           <SplitPicker ed={ed} />
           {ed.sel.size > 0 && <EditToolbar ed={ed} onTab={onTab} />}
-          {ed.busy && (
-            <div className="busy-bar" role="status">
-              <span className="busy-dot" />
-              {ed.busy}
-            </div>
-          )}
+          <BusyBar ed={ed} />
           <div className={'canvas-area' + (focus ? ` editing focus-${focus}` : '')}>
             {pane3d}
             <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>

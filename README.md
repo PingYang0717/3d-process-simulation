@@ -113,6 +113,7 @@ plan v9（`docs/plan-v9-performance.md`）之後：
 - **畫面層不重 render**：滑鼠所在的格子、3D 的 hover 說明、拖拉中每幀換的預覽都走 live value（`ui/liveValue.ts`），只有用到的小元件重 render；主切面上滑鼠移動整頁 render 0 次。剖口貼圖用同一張 canvas 與同一個貼圖物件；切面像素用 LUT（`drawSlice.ts`，和舊版逐位元組相同）。
 - **只在有變化時重畫 3D**：鏡頭動、動畫、滑鼠、會改畫面的 props、Worker 結果到了才畫；沒剖開時只畫正面。
 - **Worker 忙時排隊**：最多再排 3 步，依序接在前一步的結果後面；再多就提示「還在算前面的步驟」。排隊中按 Ctrl+Z 先清掉排隊的步驟。
+- **進度與取消（v16）**：計算中的膠囊有進度條與「取消」。Worker 的 apply／chunks／layer 是 generator（`workerCore.ts gens`），每批回報進度、在 yield 之間收取消訊息；apply 的取消點在「算完、還沒寫回帳簿」（`applyOpPrepare`／`applyOpCommit` 之間），到那裡取消帳簿一格都沒動；已經寫回的做完後自動復原。取消也清掉排隊的步驟、停掉 3D 網格與選取層的更新（`client.ts cancelCall`、`editor.ts cancel`、`BusyBar.tsx`、`progress.ts`）。
 - **選取層不閃爍**：選取層頂點沿法線外推 0.03 voxel、不寫深度，主網格開 polygonOffset；相機 near 依陣列大小設。
 - **換材質即時**：點下去先在主執行緒把現有網格裡屬於選取體素的三角形改色，Worker 的正式網格之後覆蓋（主網格快取同時作廢）。
 

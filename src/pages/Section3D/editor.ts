@@ -76,7 +76,7 @@ export interface Brush {
 }
 /** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
-import { applyIn, applyParkedIn, compsIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf } from '../../volume/client';
+import { applyIn, applyParkedIn, compsIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf, cancelCall, isCancelled } from '../../volume/client';
 import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, copyAxes, newAxes, stepBytes, unionBox } from '../../volume/patch';
 import { demoComplexVolume } from '../../volume/demoComplex';
 import { type SplitPatch, type SplitStats, buffersStats, defaultLiveK, extractPatch, restoreBuffers, stepTouch, toPark } from '../../splits/lifecycle';
@@ -767,6 +767,10 @@ export function useEditor() {
       const next = wrap(sp.id, buf, comps ?? from.L.comps, r.version, from.vol);
       return { next, step: r.step, report: r.report };
     } catch (e) {
+      if (isCancelled(e)) {
+        message.info({ key: 'queue', content: '已取消，這一步沒有套用' });
+        return null;
+      }
       message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
       return null;
     }
@@ -787,6 +791,8 @@ export function useEditor() {
       if (fresh) dropOwners([sp.id]);
       if (!r) return;
     }
+    // 按了取消、但 Worker 已經過了安全點（結果寫回了）：這一步照常記下來，排隊跑完後立刻復原它
+    if (cancelRef.current && r.next) undoAfter.current = true;
     // 報告已在 Worker 摘要（plan v15 C7）：cells 是 Int32Array，SliceEditor 直接讀
     const rep: StepReport & { changed: number } = { ...r.report, op, changed: changedCount(r.step) };
     setReport(rep);
@@ -831,6 +837,7 @@ export function useEditor() {
       }
     } finally {
       running.current = false;
+      cancelRef.current = false;
       setBusy(null);
       setQueued(0);
       if (undoAfter.current) {
@@ -839,6 +846,23 @@ export function useEditor() {
       }
     }
   };
+  /** 使用者按了取消（這一輪排隊有效，drain 結束時清掉）。 */
+  const cancelRef = useRef(false);
+  /**
+   * 取消（plan v16）：清掉還沒開始的步驟；正在算的那一步請 Worker 在安全點停（算完還沒寫回帳簿之前）；
+   * 已經過了安全點的做完後自動復原。3D 網格、選取層的更新也一起停（復原後會重畫）。
+   */
+  const cancel = useCallback(() => {
+    if (!running.current) return;
+    const dropped = Math.max(0, queue.current.length - 1);
+    queue.current.length = Math.min(queue.current.length, 1);
+    setQueued(0);
+    cancelRef.current = true;
+    const asked = cancelCall('apply');
+    cancelCall('chunks');
+    cancelCall('layer');
+    message.info({ key: 'queue', content: `${dropped ? `已清掉排隊的 ${dropped} 步；` : ''}${asked ? '正在算的那一步會在安全點停下（已寫回的會自動復原）' : '已取消'}` });
+  }, [message]);
 
   /**
    * 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。
@@ -1828,6 +1852,7 @@ export function useEditor() {
     setStepFlash,
     menu,
     setMenu,
+    cancel,
     translate: ev.translate,
     translateOp,
     push: ev.push,

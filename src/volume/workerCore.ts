@@ -4,7 +4,7 @@
 import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, VOID, greedyMesh, labelComponents } from './volume';
 import { type Scope, clipBox } from './scope';
 import { type Op, upgradeOp } from './ops';
-import { applyOpInPlace } from './apply';
+import { type AppliedPrep, applyOpCommit, applyOpPrepare } from './apply';
 import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
@@ -354,13 +354,40 @@ const ctxOf = (matNames: Record<number, string>, keyCounter: number) => {
 };
 /** 原地套一個 Op 到 owner 的帳簿，順手更新 diff 與體積帳。 */
 function applyTo(b: Book, comps: Comp[], op: Op, ctx: ReturnType<typeof ctxOf>['ctx']) {
-  const r = applyOpInPlace({ vol: volOf(b), L: { labels: b.labels, comps } }, op, ctx);
+  return applyCommitTo(b, comps, applyOpPrepare({ vol: volOf(b), L: { labels: b.labels, comps } }, op, ctx), ctx);
+}
+/** 第二段：貼進帳簿、relabel、差量更新 diff 與體積帳。 */
+function applyCommitTo(b: Book, comps: Comp[], prep: AppliedPrep, ctx: ReturnType<typeof ctxOf>['ctx']) {
+  const r = applyOpCommit({ vol: volOf(b), L: { labels: b.labels, comps } }, prep, ctx);
   if (r.step.data) {
     b.diffCount = carryStepStats(dims, b.data, origBook().data, b.diff!, b.diffCount, b.counts, r.step, 'fwd', b.axes, b.voidAxes);
     growTouch(b, r.step);
   }
   return r;
 }
+
+/**
+ * 進度（plan v16）：長的請求用 generator 寫，每個 yield 是一次進度回報；worker.ts 在 yield 之間讓出事件圈，
+ * 這時收到「取消」就 return 掉（cancellable＝到這個點為止帳簿一格都沒動，取消是安全的）。
+ * handle()（測試、bench）同步跑完整個 generator，行為和以前一樣。
+ */
+export interface Progress {
+  phase: 'compute' | 'commit' | 'chunks' | 'layer';
+  done: number;
+  total: number;
+  /** 在這個點停下來可以安全取消（帳簿沒改）。 */
+  cancellable: boolean;
+}
+export type Gen<K extends Kind> = Generator<Progress, [Requests[K]['res'], Transferable[]], void>;
+/** 同步跑完一個 generator（忽略進度）。 */
+export function drain<K extends Kind>(g: Gen<K>): [Requests[K]['res'], Transferable[]] {
+  for (;;) {
+    const n = g.next();
+    if (n.done) return n.value;
+  }
+}
+/** 一批幾個 chunk 回報一次進度（每個 yield 之間 worker.ts 會 setTimeout 0 讓出一次）。 */
+const CHUNK_BATCH = 6;
 
 /** 差異模式裡「原本有、現在是空氣」的體素代碼（材質編號只到 254）。 */
 export const REMOVED = 255;
@@ -410,6 +437,150 @@ function meshInBox(vol: Volume, box: BBox, test: (i: number) => boolean, rgb: [n
 }
 
 type Handler<K extends Kind> = (req: Requests[K]['req']) => [Requests[K]['res'], Transferable[]];
+
+function* applyGen({ owner, from, to, comps, op, matNames, keyCounter }: Requests['apply']['req']): Gen<'apply'> {
+  if (owner === BASE_OWNER) throw new Error('原始不能被改');
+  const b = bookAt(owner, from);
+  const { ctx, seq } = ctxOf(matNames, keyCounter);
+  // 第一段純算（最重的部分）：這之前與之後都還沒動帳簿，取消都安全
+  yield { phase: 'compute', done: 0, total: 1, cancellable: true };
+  const prep = applyOpPrepare({ vol: volOf(b), L: { labels: b.labels, comps } }, op, ctx);
+  yield { phase: 'commit', done: 1, total: 1, cancellable: true };
+  let r;
+  try {
+    r = applyCommitTo(b, comps, prep, ctx);
+  } catch (e) {
+    // 算到一半失敗：帳簿可能已經改了一半，整本丟掉（主執行緒會 put 改前的內容回來）
+    books.delete(owner);
+    heads.delete(owner);
+    throw e;
+  }
+  if (r.step.data) {
+    heads.set(owner, to);
+    parents.set(to, { from, box: r.step.data.box, labelBox: r.step.labels?.box ?? r.step.data.box });
+  }
+  compsOf.set(owner, r.comps);
+  // 報告在 Worker 摘要（plan v15 C7）：被擋的格子只回前 BLOCKED_CAP 個，不 clone 整個 blockedAt
+  const report = summarize(r.report, op, dims);
+  return [{ step: r.step, keyCounter: seq(), report }, [...stepBuffers(r.step), report.cells.buffer]];
+}
+
+/** 有進度／可取消的請求（worker.ts 逐段驅動；handle() 用 drain 同步跑完）。 */
+export const gens = { apply: applyGen, chunks: chunksGen, layer: layerGen } as const;
+export type GenKind = keyof typeof gens;
+export const isGenKind = (t: string): t is GenKind => t in gens;
+
+function* chunksGen({ sid, key: _key, hidden, diff, palette, base: base0, alts }: Requests['chunks']['req']): Gen<'chunks'> {
+  const { vol } = stateOf(sid);
+  const g = gridOf(vol);
+  const d = diff ? diffMaskOf(sid) : null;
+  const data = vol.data;
+  const code = (i: number) => {
+    const m = data[i];
+    return m && !hidden[m] ? (d?.[i] ? m | DIFF_BIT : m) : 0;
+  };
+  const color = colorFn(palette);
+  const par = parents.get(sid);
+  // 主執行緒現在畫的不是上一版、但快取裡有上一版（例如 restore 回來的 split 的上一版＝原始）：從那一版增量
+  const base = base0 !== sid && par && base0 !== par.from && alts?.includes(par.from) ? par.from : base0;
+  let ks: number[];
+  let full = true;
+  if (base === sid) {
+    full = false;
+    ks = [];
+  } else if (par && base !== undefined && base === par.from) {
+    full = false;
+    ks = par.box ? chunksTouching(vol, g, par.box) : [];
+  } else ks = Array.from({ length: chunkCount(g) }, (_, k) => k);
+  const items: ChunkItem[] = [];
+  yield { phase: 'chunks', done: 0, total: ks.length, cancellable: true };
+  for (let n = 0; n < ks.length; n++) {
+    const k = ks[n];
+    const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
+    // 全量時空的 chunk 不必回傳；增量時要回（主執行緒拿掉）
+    if (m.quads || !full) items.push({ k, m });
+    if ((n + 1) % CHUNK_BATCH === 0 && n + 1 < ks.length) yield { phase: 'chunks', done: n + 1, total: ks.length, cancellable: true };
+  }
+  const transfer: Transferable[] = [];
+  for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
+  return [{ full, items, ...(full ? {} : { from: base }) }, transfer];
+}
+
+function* layerGen({ sid, filter, tint, inflate, base, palette, hidden }: Requests['layer']['req']): Gen<'layer'> {
+  const { vol, labels, book } = stateOf(sid);
+  const g = gridOf(vol);
+  const data = vol.data;
+  let code: (i: number) => number;
+  let box: BBox | null;
+  let sel = false;
+  let isDiff = false;
+  if ('diff' in filter) {
+    // 差異層（plan v12 §5.2）：只看 diff 外框碰到的 chunk；現在有材質＝材質色、被拿掉的＝紅
+    isDiff = true;
+    const d = book.diff && book.diffCount ? book.diff : null;
+    const o = origBook().data;
+    const hid = hidden ?? new Uint8Array(256);
+    code = d
+      ? (i) => {
+          if (!d[i]) return 0;
+          const m = data[i];
+          if (m) return hid[m] ? 0 : m;
+          return o[i] && !hid[o[i]] ? REMOVED : 0;
+        }
+      : () => 0;
+    box = diffBoxOf(book);
+  } else if ('mat' in filter) {
+    const mat = filter.mat;
+    code = (i) => (data[i] === mat ? 1 : 0);
+    // 空洞層（A5）：帳簿的 VOID 直方圖給貼合外框（O(X+Y+Z)），不掃整個陣列；其他材質在全量時才 boxOf
+    box = mat === VOID ? voidBoxOf(book) : null;
+  } else {
+    sel = true;
+    const on = new Uint8Array(Math.max(1, ...filter.comps.map((c) => c + 1)));
+    filter.comps.forEach((c) => (on[c] = 1));
+    box = clipBox(filter.box, filter.scope);
+    // scope 只看一個軸：沿那個軸的座標在 [lo, hi] 裡
+    const { X, Y } = vol;
+    const plane = X * Y;
+    const { axis, lo, hi } = filter.scope;
+    const along = axis === 'z' ? (i: number) => Math.floor(i / plane) : axis === 'y' ? (i: number) => Math.floor(i / X) % Y : (i: number) => i % X;
+    code = (i) => {
+      const l = labels[i];
+      if (l < 0 || l >= on.length || !on[l]) return 0;
+      const t = along(i);
+      return t >= lo && t <= hi ? (palette ? data[i] : 1) : 0;
+    };
+  }
+  const par = parents.get(sid);
+  let ks: number[];
+  let full = true;
+  if (base === sid) {
+    full = false;
+    ks = [];
+  } else if (par && base !== undefined && base === par.from) {
+    full = false;
+    const d = sel ? par.labelBox : par.box;
+    ks = d ? chunksTouching(vol, g, d) : [];
+  } else {
+    if (!sel && !isDiff && (filter as { mat: number }).mat !== VOID) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
+    ks = box ? chunksTouching(vol, g, box) : [];
+  }
+  const color = (c: number): [number, number, number] =>
+    c === REMOVED && isDiff ? REMOVED_RGB : palette ? [palette[c * 3], palette[c * 3 + 1], palette[c * 3 + 2]] : tint;
+  const items: ChunkItem[] = [];
+  scanStats.layerChunks += ks.length;
+  yield { phase: 'layer', done: 0, total: ks.length, cancellable: true };
+  for (let n = 0; n < ks.length; n++) {
+    const k = ks[n];
+    const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
+    if (inflate) for (let i = 0; i < m.positions.length; i++) m.positions[i] += m.normals[i] * inflate;
+    if (m.quads || !full) items.push({ k, m });
+    if ((n + 1) % CHUNK_BATCH === 0 && n + 1 < ks.length) yield { phase: 'layer', done: n + 1, total: ks.length, cancellable: true };
+  }
+  const transfer: Transferable[] = [];
+  for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
+  return [{ full, items }, transfer];
+}
 
 export const handlers: { [K in Kind]: Handler<K> } = {
   load: ({ sid, vol }) => {
@@ -473,28 +644,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
       }
     return [null, []];
   },
-  apply: ({ owner, from, to, comps, op, matNames, keyCounter }) => {
-    if (owner === BASE_OWNER) throw new Error('原始不能被改');
-    const b = bookAt(owner, from);
-    const { ctx, seq } = ctxOf(matNames, keyCounter);
-    let r;
-    try {
-      r = applyTo(b, comps, op, ctx);
-    } catch (e) {
-      // 算到一半失敗：帳簿可能已經改了一半，整本丟掉（主執行緒會 put 改前的內容回來）
-      books.delete(owner);
-      heads.delete(owner);
-      throw e;
-    }
-    if (r.step.data) {
-      heads.set(owner, to);
-      parents.set(to, { from, box: r.step.data.box, labelBox: r.step.labels?.box ?? r.step.data.box });
-    }
-    compsOf.set(owner, r.comps);
-    // 報告在 Worker 摘要（plan v15 C7）：被擋的格子只回前 BLOCKED_CAP 個，不 clone 整個 blockedAt
-    const report = summarize(r.report, op, dims);
-    return [{ step: r.step, keyCounter: seq(), report }, [...stepBuffers(r.step), report.cells.buffer]];
-  },
+  apply: (req) => drain(gens.apply(req)),
   derive: ({ owner, from, to, step, dir }) => {
     const b = bookAt(owner, from);
     const cs = applyStepInPlace(dims, b.data, b.labels, step, dir);
@@ -592,38 +742,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     const vol = decodeNpy(buf);
     return [{ vol }, [vol.data.buffer]];
   },
-  chunks: ({ sid, key: _key, hidden, diff, palette, base: base0, alts }) => {
-    const { vol } = stateOf(sid);
-    const g = gridOf(vol);
-    const d = diff ? diffMaskOf(sid) : null;
-    const data = vol.data;
-    const code = (i: number) => {
-      const m = data[i];
-      return m && !hidden[m] ? (d?.[i] ? m | DIFF_BIT : m) : 0;
-    };
-    const color = colorFn(palette);
-    const par = parents.get(sid);
-    // 主執行緒現在畫的不是上一版、但快取裡有上一版（例如 restore 回來的 split 的上一版＝原始）：從那一版增量
-    const base = base0 !== sid && par && base0 !== par.from && alts?.includes(par.from) ? par.from : base0;
-    let ks: number[];
-    let full = true;
-    if (base === sid) {
-      full = false;
-      ks = [];
-    } else if (par && base !== undefined && base === par.from) {
-      full = false;
-      ks = par.box ? chunksTouching(vol, g, par.box) : [];
-    } else ks = Array.from({ length: chunkCount(g) }, (_, k) => k);
-    const items: ChunkItem[] = [];
-    for (const k of ks) {
-      const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
-      // 全量時空的 chunk 不必回傳；增量時要回（主執行緒拿掉）
-      if (m.quads || !full) items.push({ k, m });
-    }
-    const transfer: Transferable[] = [];
-    for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
-    return [{ full, items, ...(full ? {} : { from: base }) }, transfer];
-  },
+  chunks: (req) => drain(gens.chunks(req)),
   mesh: ({ sid, hidden, diff, only, palette, tint, inflate }) => {
     const { vol, labels } = stateOf(sid);
     if (only) {
@@ -672,78 +791,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: b.diffCount }, [mask.buffer]];
   },
   count: ({ sid }) => [Array.from(stateOf(sid).book.counts), []],
-  layer: ({ sid, filter, tint, inflate, base, palette, hidden }) => {
-    const { vol, labels, book } = stateOf(sid);
-    const g = gridOf(vol);
-    const data = vol.data;
-    let code: (i: number) => number;
-    let box: BBox | null;
-    let sel = false;
-    let isDiff = false;
-    if ('diff' in filter) {
-      // 差異層（plan v12 §5.2）：只看 diff 外框碰到的 chunk；現在有材質＝材質色、被拿掉的＝紅
-      isDiff = true;
-      const d = book.diff && book.diffCount ? book.diff : null;
-      const o = origBook().data;
-      const hid = hidden ?? new Uint8Array(256);
-      code = d
-        ? (i) => {
-            if (!d[i]) return 0;
-            const m = data[i];
-            if (m) return hid[m] ? 0 : m;
-            return o[i] && !hid[o[i]] ? REMOVED : 0;
-          }
-        : () => 0;
-      box = diffBoxOf(book);
-    } else if ('mat' in filter) {
-      const mat = filter.mat;
-      code = (i) => (data[i] === mat ? 1 : 0);
-      // 空洞層（A5）：帳簿的 VOID 直方圖給貼合外框（O(X+Y+Z)），不掃整個陣列；其他材質在全量時才 boxOf
-      box = mat === VOID ? voidBoxOf(book) : null;
-    } else {
-      sel = true;
-      const on = new Uint8Array(Math.max(1, ...filter.comps.map((c) => c + 1)));
-      filter.comps.forEach((c) => (on[c] = 1));
-      box = clipBox(filter.box, filter.scope);
-      // scope 只看一個軸：沿那個軸的座標在 [lo, hi] 裡
-      const { X, Y } = vol;
-      const plane = X * Y;
-      const { axis, lo, hi } = filter.scope;
-      const along = axis === 'z' ? (i: number) => Math.floor(i / plane) : axis === 'y' ? (i: number) => Math.floor(i / X) % Y : (i: number) => i % X;
-      code = (i) => {
-        const l = labels[i];
-        if (l < 0 || l >= on.length || !on[l]) return 0;
-        const t = along(i);
-        return t >= lo && t <= hi ? (palette ? data[i] : 1) : 0;
-      };
-    }
-    const par = parents.get(sid);
-    let ks: number[];
-    let full = true;
-    if (base === sid) {
-      full = false;
-      ks = [];
-    } else if (par && base !== undefined && base === par.from) {
-      full = false;
-      const d = sel ? par.labelBox : par.box;
-      ks = d ? chunksTouching(vol, g, d) : [];
-    } else {
-      if (!sel && !isDiff && (filter as { mat: number }).mat !== VOID) box = boxOf(vol, (i) => data[i] === (filter as { mat: number }).mat);
-      ks = box ? chunksTouching(vol, g, box) : [];
-    }
-    const color = (c: number): [number, number, number] =>
-      c === REMOVED && isDiff ? REMOVED_RGB : palette ? [palette[c * 3], palette[c * 3 + 1], palette[c * 3 + 2]] : tint;
-    const items: ChunkItem[] = [];
-    scanStats.layerChunks += ks.length;
-    for (const k of ks) {
-      const m = greedyMeshChunk(vol, code, chunkBox(vol, g, k), color);
-      if (inflate) for (let i = 0; i < m.positions.length; i++) m.positions[i] += m.normals[i] * inflate;
-      if (m.quads || !full) items.push({ k, m });
-    }
-    const transfer: Transferable[] = [];
-    for (const it of items) transfer.push(it.m.positions.buffer, it.m.normals.buffer, it.m.colors.buffer);
-    return [{ full, items }, transfer];
-  },
+  layer: (req) => drain(gens.layer(req)),
   preview: ({ sid, comps: comps0, op, cap, hidden, palette, showDiff, seq, mesh }) => {
     const owner = ownerOfSid(sid);
     const { vol, labels, book } = stateOf(sid);

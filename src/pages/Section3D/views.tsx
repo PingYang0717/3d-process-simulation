@@ -61,6 +61,7 @@ import { type Brush, type Sculpt, type SelectMode, selectModeOf } from './editor
 import { type Handle3D, HANDLE_PX, cornerHandles, cornerRadius, faceAxisName, faceDragWords, faceHandles, faceSteps, facesCamera, isHeadOn, pickHandle } from './handles3d';
 import type { CornerId } from '../../slice/round';
 import { ArrowHelper, OctahedronGeometry } from 'three';
+import { progressWords, useProgress } from '../../ui/useProgress';
 
 export type { Sculpt } from './editor';
 import { type Scope, axisIndex, axisLen } from '../../volume/scope';
@@ -2214,7 +2215,7 @@ export function View3D({
           {hoverTag.text}
         </div>
       ) : null}
-      {(meshing || busy) && <div className="mesh-busy" role="status">{busy ? '計算中…' : '更新 3D 中…'}</div>}
+      {(meshing || busy) && <MeshBusy busy={busy} />}
       {tool === 'handles' && selBBox && mode !== 'orig' && (
         <div className="handle-legend" role="note">
           <span>
@@ -2234,6 +2235,17 @@ export function View3D({
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+/** 3D 角落的膠囊：計算中／更新 3D 中（有進度就印幾塊）。 */
+function MeshBusy({ busy }: { busy?: boolean }) {
+  const p = progressWords(useProgress());
+  const text = busy ? (p?.text ?? '計算中…') : p && (p.phase === 'chunks' || p.phase === 'layer') ? p.text : '更新 3D 中…';
+  return (
+    <div className="mesh-busy" role="status">
+      {text}
     </div>
   );
 }

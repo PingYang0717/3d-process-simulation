@@ -2,7 +2,7 @@
 // 找出真正改到的外框，貼回陣列；relabel 直接吃這個外框，不必掃整個陣列找哪裡不同。
 // plan v9 §4.3：applyOpInPlace 直接改 data／labels（不影印整個陣列）；applyOpLocal 是複製後呼叫它的純函式包裝。
 // 結果和 applyOp 逐體素相同（apply.test.ts）。
-import { type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
+import { type BBox, type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
 import { type EditState, type LegacyOp, type Op, type OpContext, upgradeOp } from './ops';
 import { previewBox, previewOp } from './preview';
 import { type Step, cropArr, diffInBox, globalIndex, pasteArr } from './patch';
@@ -27,11 +27,28 @@ export interface AppliedInPlace {
  * 沒改到任何體素時陣列不動、step 全是 null。
  */
 export function applyOpInPlace(s: EditState, input: Op | LegacyOp, ctx: OpContext): AppliedInPlace {
+  return applyOpCommit(s, applyOpPrepare(s, input, ctx), ctx);
+}
+
+/** 第一段算好、還沒貼回陣列的結果（Worker 在這裡可以取消：帳簿一格都還沒動）。 */
+export interface AppliedPrep {
+  op: Op;
+  report: Report;
+  /** null＝這一步不會改到任何體素。 */
+  box: BBox | null;
+  R: BBox | null;
+  data: Uint8Array | null;
+}
+
+/**
+ * 第一段（純算，不改 s）：裁 previewBox、在裁切範圍裡算結果、找出真正改到的外框 R。
+ * 重的都在這裡（補平、推面、relabel 以外的部分）；Worker 把它和 applyOpCommit 之間當成取消點。
+ */
+export function applyOpPrepare(s: EditState, input: Op | LegacyOp, ctx: OpContext): AppliedPrep {
   const op = upgradeOp(input);
   const report = newReport();
-  const none: AppliedInPlace = { comps: s.L.comps, step: { data: null, labels: null }, report };
   const box = previewBox(s, op);
-  if (!box) return none;
+  if (!box) return { op, report, box: null, R: null, data: null };
   const p = previewOp(s, ctx.orig, op, Infinity, report, undefined, box)!;
   if (op.kind === 'profile') {
     // scope 裡、選取外框外面的片：這個結構根本不在，算略過
@@ -43,10 +60,17 @@ export function applyOpInPlace(s: EditState, input: Op | LegacyOp, ctx: OpContex
   report.blockedAt = globalIndex(box, s.vol, report.blockedAt);
   const cropped = cropArr(s.vol.data, s.vol, box);
   const R = diffInBox(cropped, p.data, box);
-  if (!R) return none;
+  return { op, report, box, R, data: p.data };
+}
+
+/** 第二段：貼回 data、原地 relabel（從這裡開始帳簿會改，不能取消）。 */
+export function applyOpCommit(s: EditState, prep: AppliedPrep, ctx: OpContext): AppliedInPlace {
+  const { op, report, box, R } = prep;
+  const none: AppliedInPlace = { comps: s.L.comps, step: { data: null, labels: null }, report };
+  if (!box || !R || !prep.data) return none;
   const before = cropArr(s.vol.data, s.vol, R);
   const data = s.vol.data;
-  pasteArr(data, s.vol, box, p.data);
+  pasteArr(data, s.vol, box, prep.data);
   const after = cropArr(data, s.vol, R);
   // 平移時已選結構的體素照位移對應（名稱延續的投票用）；o＝這一格的舊編號
   const { X, Y, Z } = s.vol;

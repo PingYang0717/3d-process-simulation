@@ -3,10 +3,16 @@ import type { Kind, Requests } from './worker';
 import type { EditState } from './ops';
 import type { Step } from './patch';
 import type { ExportStats } from './vti';
+import { setProgress } from './progress';
+import type { Progress } from './workerCore';
 
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; type: string }>();
+/** 每一類請求最新一筆還在跑的 id（取消用）。 */
+const inflight = new Map<string, number>();
+/** 有進度／可取消的請求（和 workerCore 的 gens 一致）。 */
+const TRACKED = new Set(['apply', 'chunks', 'layer']);
 
 /** 單檔 prototype 把 Worker 原始碼放在這個全域變數；平常由 Vite 另外打包。 */
 declare global {
@@ -20,10 +26,19 @@ function get() {
   worker = src
     ? new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })))
     : new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
-  worker.onmessage = (e: MessageEvent<{ id: number; ok: boolean; result?: unknown; error?: string }>) => {
+  worker.onmessage = (e: MessageEvent<{ id: number; ok?: boolean; result?: unknown; error?: string; progress?: Progress }>) => {
     const p = pending.get(e.data.id);
     if (!p) return;
+    if (e.data.progress) {
+      // 進度：只有這一類最新的那一筆才顯示（舊的還在跑也不蓋）
+      if (inflight.get(p.type) === e.data.id) setProgress(p.type, e.data.progress);
+      return;
+    }
     pending.delete(e.data.id);
+    if (inflight.get(p.type) === e.data.id) {
+      inflight.delete(p.type);
+      if (TRACKED.has(p.type)) setProgress(p.type, null);
+    }
     if (e.data.ok) p.resolve(e.data.result);
     else p.reject(new Error(e.data.error));
   };
@@ -73,9 +88,24 @@ export function call<K extends Kind>(type: K, req: Requests[K]['req'], transfer:
   record(type, req);
   const id = ++seq;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    pending.set(id, { resolve: resolve as (v: unknown) => void, reject, type });
+    inflight.set(type, id);
     get().postMessage({ id, type, req }, transfer);
   });
+}
+
+/** 取消錯誤（Worker 在安全點停掉、或還沒開始就被拿掉）。 */
+export const isCancelled = (e: unknown) => (e as Error)?.message === 'cancelled';
+
+/**
+ * 取消這一類最新一筆還在跑的請求（plan v16）：Worker 在下一個安全點停（apply 在寫回帳簿之前、chunks／layer 在兩批之間），
+ * 那一筆的 Promise 以 'cancelled' reject。已經過了安全點就讓它做完（呼叫端自己決定要不要復原）。
+ */
+export function cancelCall(type: string) {
+  const id = inflight.get(type);
+  if (id === undefined || !worker) return false;
+  worker.postMessage({ cancel: id });
+  return true;
 }
 
 // ---- 常駐狀態：版本號（version）＝ Worker 裡的編號（sid）；帳簿（owner）＝一個 split 的那一份陣列 ----
@@ -169,6 +199,8 @@ export async function applyIn(from: EditState, req: Omit<Requests['apply']['req'
     heads.set(owner, r.step.data ? to : fromId);
     return { ...r, version: to };
   } catch (e) {
+    // 取消：Worker 在寫回之前停的，帳簿仍是 from，不必補送
+    if (isCancelled(e)) throw e;
     // Worker 的帳簿狀態不明：主執行緒還沒貼，內容仍是 from，補送回去
     heads.delete(owner);
     ensure(from);

@@ -1,6 +1,6 @@
 // 編輯後的環 → 這一片的格子（plan v7 §10.2）：掃描線以格子中心判定內外（偶奇規則，內環自動挖空），不反鋸齒；
 // 前後比較得到要加、要拿的格子，每格帶方向碼（往外的軸向）。
-import type { Ring, XY } from './trace';
+import { type Ring, type XY, boundaryLoops } from './trace';
 
 /** 方向碼：0 = +u、1 = −u、2 = +v、3 = −v。 */
 export const DIR_UV: XY[] = [
@@ -52,6 +52,29 @@ export function editRing(r: Ring, disp: XY[]): XY[] {
     }
   });
   return out;
+}
+
+/**
+ * 多邊形光柵化之後的格子邊界（階梯）：拖拉中「放開會變成什麼」的 ghost（所見即所得）。
+ * 和 profileDelta 用同一個 rasterize（偶奇、格子中心），所以畫出來的階梯就是會 commit 的格子。
+ */
+export function rasterOutline(polys: XY[][]): XY[][] {
+  let u0 = Infinity;
+  let v0 = Infinity;
+  let u1 = -Infinity;
+  let v1 = -Infinity;
+  for (const p of polys)
+    for (const [u, v] of p) {
+      u0 = Math.min(u0, Math.floor(u) - 1);
+      v0 = Math.min(v0, Math.floor(v) - 1);
+      u1 = Math.max(u1, Math.ceil(u) + 1);
+      v1 = Math.max(v1, Math.ceil(v) + 1);
+    }
+  if (u0 > u1) return [];
+  const W = u1 - u0 + 1;
+  const H = v1 - v0 + 1;
+  const g = rasterize(polys, u0, v0, W, H);
+  return boundaryLoops((u, v) => u >= u0 && v >= v0 && u <= u1 && v <= v1 && !!g[(v - v0) * W + (u - u0)], u0, v0, u1, v1);
 }
 
 export interface Cell {

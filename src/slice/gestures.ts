@@ -7,10 +7,13 @@ import { encodeRle } from '../volume/rle';
 import { recordGesture } from './relative';
 import { type Ring, type XY, ringPolygon } from './trace';
 import { deltaOf, editRing, rasterize } from './raster';
-import { type DragArg, type NodeDrag, dragDisp, edgeAmount, groupNormal, isAxisEdge, isSingle, resolveNodeDrag, smoothEdgeGroup } from './snap';
+import { type Chamfer, type DragArg, type NodeDrag, chamferAt, dragDisp, edgeAmount, groupNormal, isAxisEdge, isSingle, resolveNodeDrag, smoothEdgeGroup } from './snap';
 
-export { dragDisp, dragDispFloat, dragModeOf, edgeAmount, falloffWeights, groupNormal, isAxisCorner, isAxisEdge, isSingle, resolveNodeDrag, smoothEdgeGroup, snapAmount } from './snap';
-export type { DragArg, DragMode, NodeDrag } from './snap';
+export { chamferAt, dragDisp, dragDispFloat, dragModeOf, edgeAmount, falloffWeights, groupNormal, isAxisCorner, isAxisEdge, isSingle, nearSlant, resolveNodeDrag, smoothEdgeGroup, snapAmount } from './snap';
+export type { Chamfer, DragArg, DragMode, NodeDrag } from './snap';
+
+/** Shift 鎖軸：位移只留主要那一軸（另一軸歸零）；相等時留 u。 */
+export const lockAxis = (d: XY): XY => (Math.abs(d[0]) >= Math.abs(d[1]) ? [d[0], 0] : [0, d[1]]);
 
 export type HandleKind = 'node' | 'edge' | 'region';
 export interface Handle {
@@ -201,7 +204,12 @@ export function gestureKey(rings: Map<string, Ring[]>, h: Handle, delta: XY, shi
  * before 的 inside() 也只掃這個外框。差的格子離外框邊至少 1 格，所以 BFS 的發現順序和整個聯集外框時相同。
  */
 export function profileDelta(rs: Ring[], ring: number, disp: XY[], inside: (u: number, v: number) => boolean) {
-  const after = rs.map((r, i) => (i === ring ? editRing(r, disp) : ringPolygon(r)));
+  return profileDeltaPoly(rs, ring, editRing(rs[ring], disp), inside);
+}
+
+/** 同 profileDelta，但第 ring 環改後的完整折線直接給（方角：不是逐頂點位移能表示的改法）。 */
+export function profileDeltaPoly(rs: Ring[], ring: number, edited: XY[], inside: (u: number, v: number) => boolean) {
+  const after = rs.map((r, i) => (i === ring ? edited : ringPolygon(r)));
   let u0 = Infinity;
   let v0 = Infinity;
   let u1 = -Infinity;
@@ -222,6 +230,41 @@ export function profileDelta(rs: Ring[], ring: number, disp: XY[], inside: (u: n
   const { add, remove } = deltaOf(before, aft, u0, v0, W, H);
   if (!add.length && !remove.length) return null;
   return { add: encodeRle(add), remove: encodeRle(remove) };
+}
+
+/** 斜角 c 的路徑（從 a 順著環的方向走到 b）：a、b 是 pts 的索引。 */
+export const chamferSpan = (c: Chamfer) => (c.step === 1 ? { a: c.node, b: c.to } : { a: c.to, b: c.node });
+
+/** 方角之後的完整折線：a → b 之間的原始折線換成 a → corner → b 兩條直邊，其他段照舊。 */
+export function squaredPolygon(r: Ring, c: Chamfer): XY[] {
+  const n = r.pts.length;
+  const { a, b } = chamferSpan(c);
+  const inPath = new Set<number>();
+  for (let i = a; i !== b; i = (i + 1) % n) inPath.add(i);
+  const out: XY[] = [];
+  r.raw.forEach((seg, i) => {
+    if (!inPath.has(i)) out.push(...seg.slice(0, -1));
+    else if (i === a) out.push(r.pts[a], c.corner);
+  });
+  return out;
+}
+
+/**
+ * 按兩下斜角＝方角：節點 h 是斜角的一端時，產生把斜角補成矩形角的 profile Op（和拖拉同一種 Op、同一條套用路徑）。
+ * 參考片用絕對格子（沒有相對式手勢：每一片同一個 add／remove）。不是斜角、或沒有改到格子回傳 null。
+ */
+export function squareCornerOp(rings: Map<string, Ring[]>, h: Handle, g: GestureCtx): { op: Op; chamfer: Chamfer } | null {
+  if (h.kind !== 'node') return null;
+  const rs = rings.get(h.key);
+  const r = rs?.[h.ring];
+  if (!rs || !r) return null;
+  const chamfer = chamferAt(r, h.index);
+  if (!chamfer) return null;
+  const perKey = profileDeltaPoly(rs, h.ring, squaredPolygon(r, chamfer), (u, v) => g.inside(h.key, u, v));
+  if (!perKey) return null;
+  const [cu, cv] = chamfer.corner;
+  const op: Op = { kind: 'profile', keys: [h.key], scope: g.scope, at: g.at, perKey: { [h.key]: perKey }, follow: g.follow, backfill: g.backfill, text: `斜角補成方角 (${cu}, ${cv})` };
+  return { op, chamfer };
 }
 
 export { DIR_WORD };

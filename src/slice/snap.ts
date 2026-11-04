@@ -22,7 +22,7 @@ export const isSingle = (mode: DragArg) => mode === true || mode === 'single';
 export const dragModeOf = (mode: DragArg): DragMode => (mode === true ? 'single' : mode === false || mode === undefined ? 'auto' : mode);
 
 /** 節點往 step（±1）那一側走到下一個節點：回傳沿途的頂點索引（不含自己、含遠端的角）。 */
-function sidePath(r: Ring, node: number, step: number): number[] {
+export function sidePath(r: Ring, node: number, step: number): number[] {
   const n = r.pts.length;
   const out: number[] = [];
   let i = node;
@@ -51,6 +51,58 @@ export function isAxisCorner(r: Ring, node: number) {
   const a = sideAxis(r, node, 1);
   const b = sideAxis(r, node, -1);
   return !!a && !!b && a !== b;
+}
+
+/** 段 k（pts[k] → pts[k+1]）是不是斜的：兩端 u、v 都不同（斜角、圓弧的一段）。 */
+export function isSlantSeg(r: Ring, k: number) {
+  const n = r.pts.length;
+  const a = r.pts[(k + n) % n];
+  const b = r.pts[(k + 1 + n) % n];
+  return a[0] !== b[0] && a[1] !== b[1];
+}
+
+/**
+ * 把手旁邊有沒有斜角／圓角（拖拉中的提示用）：節點＝相鄰兩段有一段斜的；
+ * 邊＝這一組裡有斜的段，或這一組兩端外面接的那一段是斜的（推平頂時斜角會跟著被內插成階梯，不是 push）。
+ */
+export function nearSlant(r: Ring, h: Handle, shift: DragArg = false) {
+  const n = r.pts.length;
+  if (h.kind === 'node') return isSlantSeg(r, h.index) || isSlantSeg(r, h.index - 1);
+  if (h.kind !== 'edge') return false;
+  const g = smoothEdgeGroup(r, h.index, shift);
+  for (let k = 0; k + 1 < g.length; k++) if (isSlantSeg(r, g[k])) return true;
+  return isSlantSeg(r, g[0] - 1) || isSlantSeg(r, (g[g.length - 1] + n) % n);
+}
+
+/** 斜角（按兩下＝方角）：node 到 to 之間（往 step 走）的路徑是斜角／圓弧，corner 是兩條直邊延長相交的矩形角。 */
+export interface Chamfer {
+  node: number;
+  to: number;
+  step: 1 | -1;
+  corner: XY;
+}
+
+/**
+ * 這個節點是不是斜角的一端：一側是和軸平行的直邊、另一側走到下一個節點 to 的路徑是斜的（斜角或圓弧），
+ * 而 to 的另一側是另一軸的直邊。是的話回傳 corner＝兩條直邊延長相交的角（外框的角）。
+ */
+export function chamferAt(r: Ring, node: number): Chamfer | null {
+  for (const step of [1, -1] as const) {
+    const ax = sideAxis(r, node, -step);
+    if (!ax) continue;
+    const path = sidePath(r, node, step);
+    if (!path.length) continue;
+    const to = path[path.length - 1];
+    if (!r.nodes.has(to) || to === node) continue;
+    const [u0, v0] = r.pts[node];
+    // 直邊（同一個 u 或同一個 v）不是斜角
+    if (path.every((i) => r.pts[i][1] === v0) || path.every((i) => r.pts[i][0] === u0)) continue;
+    const bx = sideAxis(r, to, step);
+    if (!bx || bx === ax) continue;
+    const [u1, v1] = r.pts[to];
+    return { node, to, step, corner: ax === 'h' ? [u1, v0] : [u0, v1] };
+  }
+  return null;
 }
 
 /** 節點實際用的拖法：auto（或 false）依局部形狀選 corner／single；true ≡ single。 */

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { type Ring, type XY, ringPolygon, signedArea, traceRings } from './trace';
 import { editRing } from './raster';
 import type { Handle } from './gestures';
-import { dragDisp, dragDispFloat, falloffWeights, isAxisCorner, resolveNodeDrag, selfIntersects } from './snap';
+import { chamferAt, dragDisp, dragDispFloat, falloffWeights, isAxisCorner, nearSlant, resolveNodeDrag, selfIntersects } from './snap';
 
 /** v9 的 dragDisp 節點那條路（衰減／Shift 單點），逐欄對照用。 */
 function oldNodeDisp(r: Ring, h: Handle, delta: XY, shift: boolean): XY[] {
@@ -98,5 +98,46 @@ describe('節點拖法（plan v10 §4.2、U2）', () => {
     expect(selfIntersects([[0, 0], [2, 2], [2, 0], [0, 2]])).toBe(true);
     expect(selfIntersects([[0, 0], [2, 0], [2, 2], [0, 2]])).toBe(false);
     expect(selfIntersects(Array.from({ length: 300 }, (_, i) => [Math.cos(i), Math.sin(i)] as XY))).toBe(null);
+  });
+});
+
+describe('斜角與鎖軸（2D 拖拉方頭）', () => {
+  /** 頂角各切 2 格的 fin 截面（像範例）：u∈[4,15]、v∈[0,20]。 */
+  const chamfer = () => ringOf((u, v) => u >= 4 && u <= 15 && v >= 0 && v <= 20 && Math.min(u - 4, 15 - u) + v >= 2);
+  const at = (r: Ring, p: XY) => r.pts.findIndex((q) => q[0] === p[0] && q[1] === p[1]);
+
+  it('chamferAt：斜角兩端都指到同一個外框角；矩形角、弧中間的點不是', () => {
+    const r = chamfer();
+    const a = at(r, [6, 0]);
+    const b = at(r, [4, 2]);
+    expect(a).toBeGreaterThanOrEqual(0);
+    expect(b).toBeGreaterThanOrEqual(0);
+    expect(chamferAt(r, a)?.corner).toEqual([4, 0]);
+    expect(chamferAt(r, a)?.to).toBe(b);
+    expect(chamferAt(r, b)?.corner).toEqual([4, 0]);
+    expect(chamferAt(r, b)?.to).toBe(a);
+    // 右邊鏡像
+    expect(chamferAt(r, at(r, [14, 0]))?.corner).toEqual([16, 0]);
+    expect(chamferAt(r, at(r, [16, 2]))?.corner).toEqual([16, 0]);
+    // 底下的矩形角不是斜角
+    expect(chamferAt(r, at(r, [4, 21]))).toBeNull();
+    // 弧中間（兩側都不是直邊）
+    const f = fin();
+    const onArc = f.pts.findIndex((p) => p[1] < 8 && p[0] > 8 && p[0] < 22);
+    f.nodes.add(onArc);
+    expect(chamferAt(f, onArc)).toBeNull();
+  });
+
+  it('nearSlant：頂邊、斜角兩端有斜角；底邊、底角沒有', () => {
+    const r = chamfer();
+    const edge = (i: number): Handle => ({ kind: 'edge', key: 'k', ring: 0, index: i });
+    const node = (i: number): Handle => ({ kind: 'node', key: 'k', ring: 0, index: i });
+    const topSeg = r.pts.findIndex((p, i) => p[1] === 0 && r.pts[(i + 1) % r.pts.length][1] === 0);
+    const botSeg = r.pts.findIndex((p, i) => p[1] === 21 && r.pts[(i + 1) % r.pts.length][1] === 21);
+    expect(nearSlant(r, edge(topSeg))).toBe(true);
+    expect(nearSlant(r, edge(botSeg))).toBe(false);
+    expect(nearSlant(r, node(at(r, [6, 0])))).toBe(true);
+    expect(nearSlant(r, node(at(r, [4, 21])))).toBe(false);
+    expect(nearSlant(rect(), edge(0))).toBe(false);
   });
 });

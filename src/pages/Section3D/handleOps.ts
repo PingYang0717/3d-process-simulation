@@ -5,9 +5,9 @@ import type { Axis, Labeled, Volume } from '../../volume/volume';
 import type { Op } from '../../volume/ops';
 import { planeAxes, to3D } from '../../volume/scope';
 import type { Ring, XY } from '../../slice/trace';
-import { type DragArg, type GestureCtx, type Handle, dragDisp, gestureToOp, hitTest } from '../../slice/gestures';
+import { type Chamfer, type DragArg, type GestureCtx, type Handle, chamferSpan, dragDisp, gestureToOp, hitTest, squareCornerOp } from '../../slice/gestures';
 import { type Shape, mirroredOp } from '../../slice/mirror';
-import { type ModelStore, type SliceModel, applyDisp, exactOp, locate, ringsOf, translateKeys } from '../../slice/model';
+import { type ModelStore, type SliceModel, applyDisp, exactOp, locate, ringsOf, squareCorner, translateKeys } from '../../slice/model';
 import { type GestureOpts, type PickedHandle, sliceRings } from './SliceEditor';
 
 /**
@@ -118,6 +118,23 @@ export function commitGesture(ed: ModelHost, ctx: SliceCtx, h: Handle, delta: XY
       const r = ctx.rings.get(h.key)?.[h.ring];
       if (r) applyDisp(m, h.key, h.ring, dragDisp(r, h, delta, shift));
     }
+  }
+  ed.commit(op);
+}
+
+/** 按兩下斜角＝方角：節點 h 是斜角的一端時的 profile Op（參考片絕對格子；幾何改過的結構 refExact）。 */
+export function squareGesture(ctx: SliceCtx, h: Handle): { op: Op; chamfer: Chamfer } | null {
+  const r = squareCornerOp(ctx.rings, h, ctx.g);
+  return r ? { op: exactOp(ctx.model, r.op), chamfer: r.chamfer } : null;
+}
+
+/** 方角的放開＝一步：幾何層把斜角換成經過角的兩條直邊（和 commitGesture 同一條路：先改幾何、再送 Op）。 */
+export function commitSquare(ed: ModelHost, ctx: SliceCtx, h: Handle, chamfer: Chamfer, op: Op) {
+  const m = ctx.model;
+  if (m) {
+    ed.models.begin(m, ed.version, ed.stepSeq);
+    const { a, b } = chamferSpan(chamfer);
+    squareCorner(m, h.key, h.ring, a, b, chamfer.corner);
   }
   ed.commit(op);
 }

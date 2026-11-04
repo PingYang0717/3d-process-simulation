@@ -5,11 +5,11 @@ import { type Axis, type BBox, type Backfill, type Labeled, type Material, type 
 import type { Op } from '../../volume/ops';
 import { type Scope, axisIndex, axisLen, planeAxes, to3D } from '../../volume/scope';
 import { type Ring, type XY, boundaryLoops, traceRings } from '../../slice/trace';
-import { editRing } from '../../slice/raster';
-import { type Handle, type HandleKind, dragDisp, gestureKey, groupNormal, hitTest, smoothEdgeGroup, uvWord } from '../../slice/gestures';
-import { type DragArg, type NodeDrag, dragDispFloat, isAxisCorner, isSingle, resolveNodeDrag, selfIntersects, snapAmount } from '../../slice/snap';
+import { editRing, rasterOutline } from '../../slice/raster';
+import { type Handle, type HandleKind, dragDisp, gestureKey, groupNormal, hitTest, lockAxis, smoothEdgeGroup, uvWord } from '../../slice/gestures';
+import { type DragArg, type NodeDrag, chamferAt, dragDispFloat, isAxisCorner, isSingle, nearSlant, resolveNodeDrag, selfIntersects, snapAmount } from '../../slice/snap';
 import { type ModelStore, type VId, insertNode, locate, removeHandle, ringsOf, sliceOfKey, vidOf } from '../../slice/model';
-import { type ModelHost, commitGesture, opOfGesture, sliceContext } from './handleOps';
+import { type ModelHost, commitGesture, commitSquare, opOfGesture, sliceContext, squareGesture } from './handleOps';
 import { type SlicePreview, SlicePreviewLayer } from './SlicePreviewLayer';
 import { type LastStep, type SelectMode, selectModeOf } from './editor';
 import { drawSlice } from './views';
@@ -69,10 +69,14 @@ export function sliceRings(L: Labeled, vol: Volume, axis: Axis, at: number, keys
 }
 
 type DragLive = { h: Handle; delta: XY; shift: DragArg; op: Op | null; missed: string[] };
-/** 拖拉中的修飾鍵 → 拖法：Shift＝單點／單段、Alt＝自由衰減、都沒按＝依形狀自動選（矩形角或單點）。 */
-const dragArgOf = (e: { shiftKey: boolean; altKey: boolean }): DragArg => (e.shiftKey ? true : e.altKey ? 'falloff' : false);
-const DRAG_TIP: Record<NodeDrag, string> = { corner: ' · 矩形角（Shift 單點、Alt 衰減）', single: ' · 只動這一點', falloff: ' · 自由衰減' };
+/** 拖拉中的修飾鍵 → 拖法：Ctrl（⌘）＝單點／單段、Alt＝自由衰減、都沒按＝依形狀自動選（矩形角或單點）。Shift 是鎖軸（見 lockAxis），不改拖法。 */
+const dragArgOf = (e: { ctrlKey: boolean; metaKey: boolean; altKey: boolean }): DragArg => (e.ctrlKey || e.metaKey ? true : e.altKey ? 'falloff' : false);
+const DRAG_TIP: Record<NodeDrag, string> = { corner: ' · 矩形角（Shift 鎖軸、Ctrl 單點、Alt 衰減）', single: ' · 只動這一點', falloff: ' · 自由衰減' };
+const DRAG_TIP_BASIC: Record<NodeDrag, string> = { ...DRAG_TIP, corner: ' · 矩形角（Shift 鎖軸）' };
 const SELF_X = '輪廓自交，放開會出現缺口';
+/** 抓到的把手旁邊是斜角／圓角：拖它不會變成平頂（斜角會被內插成階梯），指去工具列或按兩下方角。 */
+const SLANT_TIP = (h: Handle) => `這是斜角／圓角；要整個平頂請用工具列「方頭／圓頭 → 方頭」或按兩下${h.kind === 'node' ? '這個角' : '旁邊的角'}把它方起來`;
+const SQUARE_TIP = '按兩下這個斜角＝方角（補成矩形角）';
 /** +1.6／−2.3（正負號一律寫出來）。 */
 const signed = (x: number) => `${x > 0 ? '+' : x < 0 ? '−' : ''}${Number.isInteger(x) ? Math.abs(x) : Math.abs(x).toFixed(1)}`;
 
@@ -105,7 +109,8 @@ const sameHandle = (a: Handle | null, b: Handle | null) =>
 
 /**
  * 主切面（2D 編輯狀態）：滾輪朝游標縮放、右鍵／中鍵／空白鍵＋左鍵拖＝平移、雙擊空白＝適合視窗、
- * Ctrl＋滾輪換片。左鍵點一下＝選取（Shift 加選、Ctrl 切換）。左鍵拖把手：預設依形狀（矩形角／單點）、Shift＝單點、Alt＝自由衰減。底圖和下方小切面同一個 drawSlice。
+ * Ctrl＋滾輪換片。左鍵點一下＝選取（Shift 加選、Ctrl 切換）。左鍵拖把手：預設依形狀（矩形角／單點）、Shift＝鎖軸、Ctrl＝單點、Alt＝自由衰減；
+ * 按兩下斜角的一端＝補成方角。底圖和下方小切面同一個 drawSlice。
  */
 export function SliceEditor({
   vol,
@@ -186,7 +191,7 @@ export function SliceEditor({
   onMenu?: (p: Vec3 | null, clientX: number, clientY: number) => void;
   /** 幾何層（plan v8）；沒給就每次從 voxel 重描（v7 行為）。 */
   geo?: GeoOpts;
-  /** 進階：自由形變（plan v11 §4.10）。關閉時節點只有矩形角抓得到、Shift／Alt 不改拖法；省略＝開（v10 行為）。 */
+  /** 進階：自由形變（plan v11 §4.10）。關閉時節點只有矩形角抓得到、Ctrl／Alt 不改拖法（Shift 鎖軸照常）；省略＝開（v10 行為）。 */
   freeform?: boolean;
 }) {
   const [W, H] = planeDims(vol, axis);
@@ -248,8 +253,11 @@ export function SliceEditor({
   );
   // sctx 換了（版本、選取、環變了）：上一幀的 Op 不能再沿用
   const lastKey = useRef('');
+  /** 上一幀所見即所得 ghost 的 path（同一個 gestureKey＝同一組取整位移＝同樣的階梯）。 */
+  const lastGhost = useRef({ key: '', d: '' });
   useEffect(() => {
     lastKey.current = '';
+    lastGhost.current = { key: '', d: '' };
   }, [sctx]);
   /** 放開＝一步：幾何層先更新（不等 Worker），再送 Op。 */
   const commitOp = (h: Handle, delta: XY, shift: DragArg, op: Op) => {
@@ -271,8 +279,8 @@ export function SliceEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [got]);
   /** 手勢 → Op（多選＋對應時一起改長得一樣的結構）。 */
-  /** 修飾鍵 → 拖法；自由形變關閉時一律依形狀（Shift／Alt 不生效）。 */
-  const argOf = (e: { shiftKey: boolean; altKey: boolean }): DragArg => (freeform ? dragArgOf(e) : false);
+  /** 修飾鍵 → 拖法；自由形變關閉時一律依形狀（Ctrl／Alt 不生效；Shift 鎖軸另外處理，兩種都有效）。 */
+  const argOf = (e: { ctrlKey: boolean; metaKey: boolean; altKey: boolean }): DragArg => (freeform ? dragArgOf(e) : false);
   const opFor = (h: Handle, delta: XY, shift: DragArg) => {
     if (!sctx) return { op: null, missed: [] as string[] };
     const res = opOfGesture(sctx, h, delta, shift, mirror);
@@ -312,9 +320,11 @@ export function SliceEditor({
   const [drag, setDrag] = useState<DragLive | null>(null);
   const dragRef = useRef<DragLive | null>(null);
   const ghostRef = useRef<SVGPathElement>(null);
+  /** 所見即所得的 ghost：放開會 commit 的格子邊界（階梯）；浮點的頂點連線退成第二層虛線。 */
+  const rasterGhostRef = useRef<SVGPathElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
-  /** pointermove 只記最新的位置；requestAnimationFrame 每幀最多算一次。 */
-  const latestMove = useRef<{ x: number; y: number; shift: DragArg } | null>(null);
+  /** pointermove 只記最新的位置；requestAnimationFrame 每幀最多算一次。lock＝Shift 鎖軸。 */
+  const latestMove = useRef<{ x: number; y: number; shift: DragArg; lock: boolean } | null>(null);
   const raf = useRef(0);
   /** 按住 V／E／R：只抓節點／邊／區域。按住 V 時也顯示所有頂點（不只節點）。 */
   const only = useRef<HandleKind | undefined>(undefined);
@@ -475,6 +485,15 @@ export function SliceEditor({
     if (!q || !p || !rings.size) return null;
     return hitTest(rings, q, p.zoom, insideKey, only.current, freeform ? undefined : isAxisCorner);
   };
+  /** 游標下是不是斜角的一端（任何節點都看，不管自由形變開不開）：按兩下＝方角。 */
+  const squareableAt = (clientX: number, clientY: number): Handle | null => {
+    const q = planeAt(clientX, clientY);
+    const p = xfRef.current;
+    if (!q || !p || !rings.size) return null;
+    const h = hitTest(rings, q, p.zoom, insideKey, 'node');
+    const r = h && rings.get(h.key)?.[h.ring];
+    return h && r && chamferAt(r, h.index) ? h : null;
+  };
   /** 拖動中的提示文字（§5.2）：浮點 → 放開後取的整數。 */
   const tipText = (h: Handle, delta: XY, shift: DragArg, op: Op | null) => {
     const nm = gesture?.nm ?? 0.5;
@@ -482,7 +501,7 @@ export function SliceEditor({
     const sn = snapAmount(r, h, delta, shift);
     const pair = (p: XY) => `(${signed(p[0])}, ${signed(p[1])})`;
     if (h.kind === 'node')
-      return `${pair(sn.raw)} → 取 ${pair(sn.snapped)}　${(Math.hypot(...sn.snapped) * nm).toFixed(1)} nm${r ? DRAG_TIP[resolveNodeDrag(r, h.index, shift)] : ''}`;
+      return `${pair(sn.raw)} → 取 ${pair(sn.snapped)}　${(Math.hypot(...sn.snapped) * nm).toFixed(1)} nm${r ? (freeform ? DRAG_TIP : DRAG_TIP_BASIC)[resolveNodeDrag(r, h.index, shift)] : ''}`;
     if (h.kind === 'edge' && r && sn.amount) {
       const { raw, snapped } = sn.amount;
       const nrm = groupNormal(r, smoothEdgeGroup(r, h.index, shift));
@@ -516,6 +535,24 @@ export function SliceEditor({
     const cross = !!(selfIntersects(edited) ?? selfIntersects(geom));
     return { d: pathOf(stairs ? edited : geom), cross };
   };
+  /**
+   * 所見即所得的 ghost：用放開時的整數位移（dragDisp，和 Op／幾何層同一個）改環、光柵化、描格子邊界。
+   * 畫出來的階梯就是會 commit 的格子（任何縮放都畫）；取整後的位移沒變（gestureKey 相同）就沿用上一幀的 path。
+   */
+  const rasterGhostD = (h: Handle, delta: XY, shift: DragArg): string => {
+    let polys: XY[][];
+    if (h.kind === 'region') {
+      const d: XY = [Math.round(delta[0]), Math.round(delta[1])];
+      polys = [...rings.values()].flat().map((x) => x.raw.flatMap((seg) => seg.slice(0, -1)).map((p) => [p[0] + d[0], p[1] + d[1]] as XY));
+    } else {
+      const r = rings.get(h.key)?.[h.ring];
+      if (!r) return '';
+      polys = [editRing(r, dragDisp(r, h, delta, shift))];
+    }
+    return rasterOutline(polys)
+      .map((l) => pathOf(l))
+      .join('');
+  };
   /** 上一幀算出來的 Op（plan v15 B3）：gestureKey 相同＝取整後的位移相同＝Op 位元組相同，不再算、也不再送預覽。 */
   const lastRes = useRef<{ op: Op | null; missed: string[] }>({ op: null, missed: [] });
   /** 沒在拖時 pointermove 只記最新位置（plan v15 B7）；同一個 rAF 做 hitTest＋setHover。 */
@@ -528,10 +565,25 @@ export function SliceEditor({
     const pr = press.current;
     if (pr?.pan || pr?.hit) return;
     if (!pr) {
-      const h = hitAt(hv.x, hv.y);
+      let h = hitAt(hv.x, hv.y);
+      // 斜角的一端（自由形變關閉時抓不到、也不會抓成節點）：滑過時亮這個節點、提示按兩下＝方角
+      const sq = squareableAt(hv.x, hv.y);
+      if (sq && h?.kind !== 'node') h = sq;
       // 把手沒變就不 set（同一個節點／邊上移動不重 render）
       setHover((p) => (sameHandle(p, h) ? p : h));
-      if (hostRef.current) hostRef.current.style.cursor = space.current ? 'grab' : cursorFor(h);
+      // 自由形變關閉時這個節點拖不動（只能按兩下）：游標用 pointer
+      if (hostRef.current) hostRef.current.style.cursor = space.current ? 'grab' : sq && !freeform ? 'pointer' : cursorFor(h);
+      const t = tipRef.current;
+      const host = hostRef.current?.getBoundingClientRect();
+      if (t && host) {
+        if (sq) {
+          t.textContent = SQUARE_TIP;
+          t.style.color = '';
+          t.style.left = `${hv.x - host.left + 14}px`;
+          t.style.top = `${hv.y - host.top + 16}px`;
+          t.style.display = '';
+        } else t.style.display = 'none';
+      }
     }
     const uv = uvAt(hv.x, hv.y);
     showHoverUV(uv);
@@ -547,7 +599,9 @@ export function SliceEditor({
       return;
     }
     const z = xfRef.current!.zoom;
-    const delta: XY = [(mv.x - pr.x) / z, (mv.y - pr.y) / z];
+    const raw: XY = [(mv.x - pr.x) / z, (mv.y - pr.y) / z];
+    // Shift 鎖軸：位移只留主要那一軸（不管自由形變開不開；Op、ghost、提示都用鎖過的）
+    const delta: XY = mv.lock ? lockAxis(raw) : raw;
     // 同一個 Op 只算一次（B3）：key 空字串（環不見了）就不去重。ghost 與提示文字照常用浮點 delta
     const key = sctx ? `${mirror ? 1 : 0}${freeform ? 1 : 0}|${gestureKey(sctx.rings, pr.hit, delta, mv.shift)}` : '';
     let res = lastRes.current;
@@ -567,12 +621,21 @@ export function SliceEditor({
     if (gp) {
       gp.setAttribute('d', gd.d);
       gp.setAttribute('stroke', gd.cross ? '#f5222d' : '#fa541c');
-      gp.setAttribute('fill', gd.cross ? 'rgba(245,34,45,0.12)' : 'rgba(250,84,28,0.08)');
+    }
+    // 所見即所得：會 commit 的階梯（取整後的位移沒變就沿用）
+    if (!key || key !== lastGhost.current.key) lastGhost.current = { key, d: rasterGhostD(pr.hit, delta, mv.shift) };
+    const rg = rasterGhostRef.current;
+    if (rg) {
+      rg.setAttribute('d', lastGhost.current.d);
+      rg.setAttribute('stroke', gd.cross ? '#f5222d' : '#fa541c');
+      rg.setAttribute('fill', gd.cross ? 'rgba(245,34,45,0.12)' : 'rgba(250,84,28,0.1)');
     }
     const t = tipRef.current;
     const host = hostRef.current?.getBoundingClientRect();
     if (t && host) {
-      t.textContent = `${tipText(pr.hit, delta, mv.shift, op)}${gd.cross ? `\n${SELF_X}` : ''}`;
+      const r = rings.get(pr.hit.key)?.[pr.hit.ring];
+      const slant = r && pr.hit.kind !== 'region' && nearSlant(r, pr.hit, mv.shift) ? `\n${SLANT_TIP(pr.hit)}` : '';
+      t.textContent = `${tipText(pr.hit, delta, mv.shift, op)}${mv.lock ? ' · 鎖軸' : ''}${gd.cross ? `\n${SELF_X}` : ''}${slant}`;
       t.style.whiteSpace = 'pre-line';
       t.style.color = gd.cross ? '#ff7875' : '';
       t.style.left = `${mv.x - host.left + 14}px`;
@@ -731,6 +794,13 @@ export function SliceEditor({
   };
   const hoverGroup = groupPts(hover);
   const handleGroup = handle && handle.axis === axis && handle.at === at ? groupPts(handle) : null;
+  /** 滑過斜角的一端：按兩下會補成的兩條直邊（節點 → 角 → 另一端）。 */
+  const squareHint = (() => {
+    if (hover?.kind !== 'node') return '';
+    const r = rings.get(hover.key)?.[hover.ring];
+    const c = r && chamferAt(r, hover.index);
+    return c ? pathOf([r.pts[c.node], c.corner, r.pts[c.to]], false) : '';
+  })();
   /** 拖拉中第二層：單片預覽 report 裡會被擋住的格子（這一片）。 */
   const blockedLive = useMemo(() => {
     if (!drag || !preview?.blocked?.length) return [] as XY[];
@@ -823,6 +893,7 @@ export function SliceEditor({
         const pan = e.button === 1 || e.button === 2 || (e.button === 0 && space.current);
         if (e.button !== 0 && !pan) return;
         e.currentTarget.setPointerCapture(e.pointerId);
+        lastGhost.current = { key: '', d: '' };
         press.current = { x: e.clientX, y: e.clientY, pan, tx: p.tx, ty: p.ty, id: e.pointerId, hit: pan ? null : hitAt(e.clientX, e.clientY), dragging: false, button: e.button };
         if (pan) e.currentTarget.style.cursor = 'grabbing';
       }}
@@ -835,7 +906,7 @@ export function SliceEditor({
         if (pr?.hit) {
           // 拖動：過了 4px 才算；pointermove 只記位置，每一幀算一次（rAF 合併，§8.1）
           if (!pr.dragging && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < CLICK_PX) return;
-          latestMove.current = { x: e.clientX, y: e.clientY, shift: argOf(e) };
+          latestMove.current = { x: e.clientX, y: e.clientY, shift: argOf(e), lock: e.shiftKey };
           if (!pr.dragging) {
             pr.dragging = true;
             onDragState?.(true);
@@ -863,7 +934,7 @@ export function SliceEditor({
         if (pr.dragging) {
           // 放開＝一步（立刻套用到範圍）。還沒算的那一幀先同步算掉：commit 的就是最後看到的格子
           press.current = pr;
-          latestMove.current = { x: e.clientX, y: e.clientY, shift: argOf(e) };
+          latestMove.current = { x: e.clientX, y: e.clientY, shift: argOf(e), lock: e.shiftKey };
           if (raf.current) cancelAnimationFrame(raf.current);
           tick();
           press.current = null;
@@ -902,8 +973,23 @@ export function SliceEditor({
         showHoverUV(null);
         setHover(null);
         onHover?.(null);
+        if (!dragRef.current && tipRef.current) tipRef.current.style.display = 'none';
       }}
       onDoubleClick={(e) => {
+        // 雙擊斜角的一端＝方角：斜角換成經過外框角的兩條直邊（profile Op，和拖拉同一條 commit 路）
+        const sq = squareableAt(e.clientX, e.clientY);
+        if (sq && sctx) {
+          const res = squareGesture(sctx, sq);
+          if (res) {
+            if (host) {
+              commitSquare(host, sctx, sq, res.chamfer, res.op);
+              bump();
+            } else onCommit?.(res.op);
+            setHintsSeen(true);
+            if (tipRef.current) tipRef.current.style.display = 'none';
+            return;
+          }
+        }
         // 雙擊邊＝在那裡加一個節點（形狀不變）
         const h = hitAt(e.clientX, e.clientY);
         const q = planeAt(e.clientX, e.clientY);
@@ -994,8 +1080,12 @@ export function SliceEditor({
             {handleGroup && <path d={pathOf(handleGroup, false)} fill="none" stroke="#fa541c" strokeWidth={3} vectorEffect="non-scaling-stroke" />}
             {/* 第二層之一：會被擋住的格子（斜線） */}
             {blockedLivePath && <path d={blockedLivePath} fill="url(#sedit-hatch)" stroke="#cf1322" strokeWidth={0.5} vectorEffect="non-scaling-stroke" />}
-            {/* 第一層：浮點 ghost（tick 直接寫 d，不經 React） */}
-            <path ref={ghostRef} d="" display={drag ? undefined : 'none'} fill="rgba(250,84,28,0.08)" fillRule="evenodd" stroke="#fa541c" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+            {/* 滑過斜角的一端：按兩下會補成的矩形角（虛線） */}
+            {squareHint && !drag && <path d={squareHint} fill="rgba(250,84,28,0.1)" stroke="#fa541c" strokeWidth={1.5} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />}
+            {/* 第一層：所見即所得的 ghost＝放開會 commit 的格子邊界（tick 直接寫 d，不經 React） */}
+            <path ref={rasterGhostRef} d="" display={drag ? undefined : 'none'} fill="rgba(250,84,28,0.1)" fillRule="evenodd" stroke="#fa541c" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+            {/* 第二層：浮點、跟手的頂點連線（虛線；取整前的位置） */}
+            <path ref={ghostRef} d="" display={drag ? undefined : 'none'} fill="none" stroke="#fa541c" strokeOpacity={0.7} strokeWidth={1} strokeDasharray="3 2" vectorEffect="non-scaling-stroke" />
             {nodes}
           </svg>
       </div>
@@ -1051,7 +1141,7 @@ export function SliceEditor({
           <div>在<b>裡面</b>可以搬</div>
         </div>
       )}
-      <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · {freeform ? '拖角：Shift＝單點、Alt＝自由衰減' : '拖矩形角或推邊（設定裡開「自由形變」才能拖任意節點）'} · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>
+      <div className="sedit-hint">滾輪縮放 · 右鍵拖或空白鍵＋拖平移 · {freeform ? '拖角：Shift＝鎖軸、Ctrl＝單點、Alt＝自由衰減' : '拖矩形角或推邊、Shift＝鎖軸（設定裡開「自由形變」才能拖任意節點）'} · 按兩下斜角＝方角 · Ctrl＋滾輪、<kbd>,</kbd> <kbd>.</kbd> 換片 · 雙擊空白＝適合視窗</div>
     </div>
   );
 }

@@ -93,7 +93,7 @@ function EditToolbarImpl({ ed, onTab }: { ed: Editor; onTab: (t: EditTab) => voi
             ? '順箭頭拖＝長、反方向＝縮 · 拖角＝圓頭 · 其他地方拖＝轉視角'
             : tab === 'brush'
               ? '在已選結構的面上拖＝筆刷；其他地方拖＝轉視角'
-              : '拖節點、邊、整塊；E 回瀏覽'}
+              : '拖矩形角、推邊；Shift 鎖軸；按兩下斜角＝方角；E 回瀏覽'}
       </Text>
     </div>
   );

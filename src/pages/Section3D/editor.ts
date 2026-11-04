@@ -78,6 +78,7 @@ export interface Brush {
 export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
 import { applyIn, applyParkedIn, compsIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf } from '../../volume/client';
 import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, copyAxes, newAxes, stepBytes, unionBox } from '../../volume/patch';
+import { demoComplexVolume } from '../../volume/demoComplex';
 import { type SplitPatch, type SplitStats, buffersStats, defaultLiveK, extractPatch, restoreBuffers, stepTouch, toPark } from '../../splits/lifecycle';
 import { type OpReport, blockedPhrase } from '../../volume/report';
 import { boxVoxels } from '../../volume/preview';
@@ -1518,9 +1519,14 @@ export function useEditor() {
     }
   }, []);
 
-  /** 內建範例（只有它自帶名稱表）；scale 放大每一軸。 */
+  /** 內建範例（只有它自帶名稱表）；scale 放大每一軸。kind 'complex'＝比較像真實製程的範例（demoComplex.ts）。 */
   const demo = useCallback(
-    (scale = 1) => loadVolume(demoVolume(scale), { format: 'demo', name: scale > 1 ? `範例 ×${scale}` : undefined }, MATERIALS),
+    (scale = 1, kind: 'basic' | 'complex' = 'basic') =>
+      loadVolume(
+        kind === 'complex' ? demoComplexVolume(scale) : demoVolume(scale),
+        { format: 'demo', name: kind === 'complex' ? `複雜範例${scale > 1 ? ` ×${scale}` : ''}` : scale > 1 ? `範例 ×${scale}` : undefined },
+        MATERIALS,
+      ),
     [loadVolume],
   );
 

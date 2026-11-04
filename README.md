@@ -13,7 +13,7 @@ npm test           # 逐體素測試（vitest）
 npm run build      # 型別檢查 + 打包
 ```
 
-打開後先上傳 `.vti`／`.npy`，或用內建範例（3 根 fin × 3 根 poly，160×96×128，Poly-Si 3 裡有 bamboo defect）；大範例 ×2／×3（1,570 萬／5,300 萬 voxels）用來看速度。範例裡 **Si fin** 是沿 z 延伸的三條細長矽脊（上視圖裡直的那三條，頂角有斜切），**Poly-Si** 是沿 x 橫跨三根 fin 的閘極（橫的那三條），HfO₂／TiN 是閘極裡包著 fin 的薄襯層。上視圖切在 fin 高度以內時 fin 連續、poly 被 fin 隔開；切到 fin 頂以上就是 poly 連續。
+打開後先上傳 `.vti`／`.npy`，或用內建範例：**複雜範例**（`demoComplex.ts`，160×96×128：三根寬高不同的 fin、不平的 STI、三根 CD 不同的 gate＋SiN spacer、保形層薄點、SiGe S/D epi、W 接觸窗、ILD，加上 bamboo void／針孔／殘留橋／stringer 幾種缺陷）或**簡單範例**（3 根一樣的 fin × 3 根 poly，Poly-Si 3 裡有 bamboo defect）；×2／×3（1,570 萬／5,300 萬 voxels）用來看速度。範例裡 **Si fin** 是沿 z 延伸的三條細長矽脊（上視圖裡直的那三條，頂角有斜切），**Poly-Si** 是沿 x 橫跨三根 fin 的閘極（橫的那三條），HfO₂／TiN 是閘極裡包著 fin 的薄襯層。上視圖切在 fin 高度以內時 fin 連續、poly 被 fin 隔開；切到 fin 頂以上就是 poly 連續。
 
 `.vti` 讀取支援 CellData（沒有則 PointData）、八種數值型別、ascii／inline base64／appended raw／appended base64、zlib 壓縮（header UInt32／UInt64）。整數 0～254 直接當編號，其他依值重新編號。檔案沒有材質名稱，所以載入後一律「材質 n」、自動配色；在左欄雙擊改名、點色塊改色，會寫進 manifest.json。
 

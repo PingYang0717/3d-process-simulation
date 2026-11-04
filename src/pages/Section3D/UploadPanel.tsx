@@ -93,10 +93,10 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
       setBusy(null);
     }
   };
-  const demo = async (scale: number) => {
-    setBusy(scale > 1 ? `產生大範例 ×${scale} 並分析結構（要幾秒）…` : '產生範例…', 2);
+  const demo = async (scale: number, kind: 'basic' | 'complex' = 'basic') => {
+    setBusy(scale > 1 || kind === 'complex' ? `產生${kind === 'complex' ? '複雜' : '大'}範例${scale > 1 ? ` ×${scale}` : ''}並分析結構（要幾秒）…` : '產生範例…', 2);
     try {
-      await ed.demo(scale);
+      await ed.demo(scale, kind);
       onDone();
     } finally {
       setBusy(null);
@@ -213,18 +213,26 @@ export function UploadPanel({ ed, onDone }: { ed: Editor; onDone: () => void }) 
       </Flex>
       <Flex gap={8} align="center" wrap="wrap">
         <Text type="secondary">手邊還沒有檔案？</Text>
+        <Button type="primary" ghost disabled={!!busy} onClick={() => demo(1, 'complex')}>
+          複雜範例（比較像真的，197 萬 voxels）
+        </Button>
+        <Button disabled={!!busy} onClick={() => demo(3, 'complex')}>
+          複雜範例 ×3（5,300 萬）
+        </Button>
         <Button disabled={!!busy} onClick={() => demo(1)}>
-          用範例試試看（197 萬 voxels）
+          簡單範例（197 萬）
         </Button>
         <Button disabled={!!busy} onClick={() => demo(2)}>
-          大範例 ×2（1,570 萬）
+          簡單 ×2（1,570 萬）
         </Button>
         <Button disabled={!!busy} onClick={() => demo(3)}>
-          大範例 ×3（5,300 萬）
+          簡單 ×3（5,300 萬）
         </Button>
       </Flex>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        範例：3 根 fin × 3 根 poly，Poly-Si 3 裡有 bamboo defect。大範例用來看 4,000 萬級的速度。
+        複雜範例：三根寬高不同的 fin（圓頂、縮腰、切角；梯形側壁、STI 頂 footing、沿 z 有線邊緣粗糙度）、STI 頂不平有 divot、三根 CD 不同的 gate（偏移、傾斜、SiN cap＋spacer）、
+        HfO₂／TiN 保形層有薄點、gate 之間 SiGe 菱形 S/D epi（兩根 fin 的併在一起、下方封閉空隙）、W 接觸窗（一支裡有 void 縫）、SiO₂ ILD 填到 cap 頂；
+        缺陷：poly 裡 bamboo void、HfO₂ 針孔、兩根 fin 之間的 Si 殘留橋、spacer 腳下 poly stringer。簡單範例：3 根一樣的 fin × 3 根 poly。×3 用來看 5,000 萬級的速度。
       </Text>
     </Flex>
   );

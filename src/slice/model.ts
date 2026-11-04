@@ -261,6 +261,68 @@ export function insertNode(m: SliceModel, key: string, ring: number, seg: number
   return id;
 }
 
+/**
+ * 方角（按兩下斜角）：第 ring 個環裡 a → b（順著環的方向）之間的頂點與折線換成 a → corner → b 兩條直邊，
+ * corner 成為新節點（矩形角）。a、b 變成直邊中間的點時拿掉（自訂節點留著），不留無用的把手。回傳 corner 的頂點 id。
+ */
+export function squareCorner(m: SliceModel, key: string, ring: number, a: number, b: number, corner: XY): VId | null {
+  const sr = ringsOfKey(m, key)[ring];
+  if (!sr || a === b) return null;
+  const n = sr.loop.length;
+  const ida = sr.loop[a];
+  const idb = sr.loop[b];
+  // 拿掉中間的頂點與沿途的段
+  const gone: VId[] = [];
+  for (let i = a; i !== b; i = (i + 1) % n) {
+    m.exact.delete(segKey(sr.loop[i], sr.loop[(i + 1) % n]));
+    if (i !== a) gone.push(sr.loop[i]);
+  }
+  for (const id of gone) {
+    delete m.vertices[id];
+    delete m.origin[id];
+    m.handles.delete(id);
+    m.custom.delete(id);
+    m.removed.delete(id);
+  }
+  const idc = newId(m);
+  m.vertices[idc] = { id: idc, u: corner[0], v: corner[1] };
+  m.origin[idc] = [corner[0], corner[1]];
+  m.handles.add(idc);
+  m.exact.set(segKey(ida, idc), [[m.vertices[ida].u, m.vertices[ida].v], [corner[0], corner[1]]]);
+  m.exact.set(segKey(idc, idb), [[corner[0], corner[1]], [m.vertices[idb].u, m.vertices[idb].v]]);
+  const loop = sr.loop.filter((id) => !gone.includes(id));
+  loop.splice(loop.indexOf(ida) + 1, 0, idc);
+  // a（或 b）兩側都是同一條直線上的直段：合成一段、頂點拿掉
+  const straight = (seg: XY[] | undefined, p: XY, q: XY) => !!seg && seg.length === 2 && (p[0] === q[0] || p[1] === q[1]);
+  const drop = (id: VId) => {
+    if (loop.length <= 4 || m.custom.has(id)) return;
+    const i = loop.indexOf(id);
+    const prev = loop[(i - 1 + loop.length) % loop.length];
+    const next = loop[(i + 1) % loop.length];
+    const P: XY = [m.vertices[prev].u, m.vertices[prev].v];
+    const Q: XY = [m.vertices[next].u, m.vertices[next].v];
+    const s1 = m.exact.get(segKey(prev, id));
+    const s2 = m.exact.get(segKey(id, next));
+    const p: XY = [m.vertices[id].u, m.vertices[id].v];
+    const sameLine = (P[0] === p[0] && p[0] === Q[0]) || (P[1] === p[1] && p[1] === Q[1]);
+    if (!sameLine || !straight(s1, P, p) || !straight(s2, p, Q)) return;
+    m.exact.delete(segKey(prev, id));
+    m.exact.delete(segKey(id, next));
+    m.exact.set(segKey(prev, next), [P, Q]);
+    loop.splice(i, 1);
+    delete m.vertices[id];
+    delete m.origin[id];
+    m.handles.delete(id);
+    m.removed.delete(id);
+  };
+  drop(ida);
+  drop(idb);
+  sr.loop = loop;
+  m.edited.add(key);
+  m.rev++;
+  return idc;
+}
+
 /** Delete：這個頂點不再是節點（形狀不變）。 */
 export function removeHandle(m: SliceModel, id: VId) {
   if (!m.handles.delete(id)) return;

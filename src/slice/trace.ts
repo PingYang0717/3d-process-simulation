@@ -140,6 +140,37 @@ export function simplifyClosed(pts: XY[], eps = 0.6): number[] {
   return [...new Set(keep)].filter((i) => i < pts.length).sort((a, b) => a - b);
 }
 
+/**
+ * 階梯（對稱的把手）：連續的 1 格對角階（每段長 1、左右交替轉）是一段 45° 斜角，中間的轉折點不當簡化的候選，
+ * 只留斜角的兩端（接到較長的邊、或轉向重複的地方，例如 1 格寬的缺口兩側）。判斷只看每個點的局部形狀，
+ * 和走的方向、起點無關，所以左右鏡像的斜角得到鏡像的節點（Douglas-Peucker 從起點切兩段、兩側會留下不對稱的點）。
+ * 回傳留下的索引（遞增）。
+ */
+export function collapseStairs(loop: XY[]): number[] {
+  const n = loop.length;
+  if (n < 4) return loop.map((_, i) => i);
+  const seg = (i: number): XY => {
+    const a = loop[(i + n) % n];
+    const b = loop[(i + 1 + n) % n];
+    return [b[0] - a[0], b[1] - a[1]];
+  };
+  const unit = (i: number) => {
+    const d = seg(i);
+    return Math.abs(d[0]) + Math.abs(d[1]) === 1;
+  };
+  const turn = (i: number) => {
+    const p = seg(i - 1);
+    const q = seg(i);
+    return Math.sign(p[0] * q[1] - p[1] * q[0]);
+  };
+  const keep: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const inStair = unit(i - 1) && unit(i) && turn(i) !== turn(i - 1) && turn(i) !== turn(i + 1);
+    if (!inStair) keep.push(i);
+  }
+  return keep.length >= 3 ? keep : loop.map((_, i) => i);
+}
+
 /** 沿封閉折線從 i 往前（dir = −1）或往後走 len 長度後的位置。 */
 function walk(pts: XY[], i: number, dirn: 1 | -1, len: number): XY {
   let left = len;
@@ -178,7 +209,12 @@ export function isCorner(loop: XY[], i: number, reach = 6, deg = 50) {
 export function traceRings(inside: (u: number, v: number) => boolean, u0: number, v0: number, u1: number, v1: number, eps = 0.6): Ring[] {
   const test = (u: number, v: number) => u >= u0 && v >= v0 && u <= u1 && v <= v1 && inside(u, v);
   return boundaryLoops(test, u0, v0, u1, v1).map((loop) => {
-    const keep = simplifyClosed(loop, eps);
+    // 先把 45° 階梯合成一段（兩端留著），再 Douglas-Peucker；keep 是原始 loop 的索引，raw 仍含階梯上每一點
+    const stair = collapseStairs(loop);
+    const keep = simplifyClosed(
+      stair.map((i) => loop[i]),
+      eps,
+    ).map((k) => stair[k]);
     const pts = keep.map((i) => loop[i]);
     const raw: XY[][] = keep.map((i, k) => {
       const j = keep[(k + 1) % keep.length];

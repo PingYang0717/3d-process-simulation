@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { ringPolygon, traceRings } from './trace';
+import { collapseStairs, ringPolygon, traceRings } from './trace';
+import { isAxisCorner, resolveNodeDrag } from './snap';
+import { demoVolume } from '../volume/volume';
 import { deltaOf, editRing, rasterize } from './raster';
 import { profileDelta } from './gestures';
 import { encodeRle } from '../volume/rle';
@@ -167,5 +169,73 @@ describe('profileDelta 外框只看改的環（plan v15 B3）', () => {
     }
     expect(n).toBeGreaterThan(50);
     expect(nonNull).toBeGreaterThan(20);
+  });
+});
+
+describe('階梯合段（對稱的把手）', () => {
+  /** 頂角各切 2 格的方柱（像範例的 fin）：左右鏡像。 */
+  const chamfered = grid([
+    '..........',
+    '...####...',
+    '..######..',
+    '.########.',
+    '.########.',
+    '.########.',
+    '..........',
+  ]);
+
+  it('collapseStairs：45° 階梯只留兩端；1 格寬的缺口、1×1 方塊、2:1 的斜邊不動', () => {
+    const stair: XY[] = [[0, 0], [0, 1], [-1, 1], [-1, 2], [-2, 2], [-2, 10], [8, 10], [8, 0]];
+    expect(collapseStairs(stair).map((i) => stair[i])).toEqual([[0, 0], [-2, 2], [-2, 10], [8, 10], [8, 0]]);
+    // 1 格寬的缺口（轉向重複）：四個點都留
+    const notch: XY[] = [[0, 0], [3, 0], [3, 1], [4, 1], [4, 0], [8, 0], [8, 5], [0, 5]];
+    expect(collapseStairs(notch).length).toBe(notch.length);
+    const square: XY[] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    expect(collapseStairs(square)).toEqual([0, 1, 2, 3]);
+    // 2:1 斜邊（段長 1、2 交替）不是 1 格對角階
+    const slope: XY[] = [[0, 0], [0, 1], [-2, 1], [-2, 2], [-4, 2], [-4, 10], [8, 10], [8, 0]];
+    expect(collapseStairs(slope).length).toBe(slope.length);
+  });
+
+  it('左右鏡像的斜角：節點只在斜角兩端、左右對稱，拖法相同；重新光柵化逐格相同', () => {
+    const { rings, back } = roundtrip(chamfered);
+    expect([...back]).toEqual([...chamfered.m]);
+    const r = rings[0];
+    const top = r.pts.filter((p) => p[1] <= 3).map((p) => p.join(',')).sort();
+    // 左：(3,1)→(1,3)；右：(7,1)→(9,3)；中間的階梯點不在 pts 裡
+    expect(top).toEqual(['1,3', '3,1', '7,1', '9,3']);
+    const nodeAt = (p: XY) => [...r.nodes].find((i) => r.pts[i][0] === p[0] && r.pts[i][1] === p[1]);
+    for (const p of [[3, 1], [1, 3], [7, 1], [9, 3]] as XY[]) expect(nodeAt(p)).toBeDefined();
+    const mirror = (p: XY): XY => [10 - p[0], p[1]];
+    for (const p of [[3, 1], [1, 3], [1, 6], [3, 1]] as XY[]) {
+      const a = nodeAt(p)!;
+      const b = nodeAt(mirror(p))!;
+      expect(isAxisCorner(r, a)).toBe(isAxisCorner(r, b));
+      expect(resolveNodeDrag(r, a)).toBe(resolveNodeDrag(r, b));
+    }
+  });
+
+  it('範例 fin（demoVolume(1) XY 切面，fin 外框 x 34..45、y 30..69）：左右頂角的節點鏡像、拖法相同', () => {
+    const vol = demoVolume(1);
+    const at = 1;
+    const inside = (u: number, v: number) => u >= 0 && v >= 0 && u < vol.X && v < vol.Y && vol.data[(at * vol.Y + v) * vol.X + u] === 3 && u >= 34 && u <= 45;
+    const [r] = traceRings(inside, 34, 30, 45, 69);
+    expect(r.pts.map((p) => p.join(',')).sort()).toEqual(['34,32', '34,70', '36,30', '44,30', '46,32', '46,70']);
+    const nodeAt = (p: XY) => [...r.nodes].find((i) => r.pts[i][0] === p[0] && r.pts[i][1] === p[1])!;
+    for (const [l, m] of [
+      [[36, 30], [44, 30]],
+      [[34, 32], [46, 32]],
+      [[34, 70], [46, 70]],
+    ] as [XY, XY][]) {
+      expect(nodeAt(l)).toBeDefined();
+      expect(nodeAt(m)).toBeDefined();
+      expect(isAxisCorner(r, nodeAt(l))).toBe(isAxisCorner(r, nodeAt(m)));
+      expect(resolveNodeDrag(r, nodeAt(l))).toBe(resolveNodeDrag(r, nodeAt(m)));
+    }
+    expect(isAxisCorner(r, nodeAt([34, 70]))).toBe(true);
+    expect(isAxisCorner(r, nodeAt([36, 30]))).toBe(false);
+    // raw 仍含階梯上每一點：重新光柵化逐格相同
+    const back = rasterize([ringPolygon(r)], 34, 30, 12, 40);
+    for (let v = 30; v < 70; v++) for (let u = 34; u < 46; u++) expect(!!back[(v - 30) * 12 + (u - 34)]).toBe(inside(u, v));
   });
 });

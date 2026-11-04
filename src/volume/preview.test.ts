@@ -132,11 +132,13 @@ describe('profile 的緊外框（plan v8 §7.7）', () => {
     });
     return { kind: 'node', key, ring: 0, index: best };
   };
+  // 右上的斜角（環的方向是往左上走：外法線朝右上，(+2.2, −2.2) 才是「往外」）。
+  // 階梯合段之後左上的斜角也是一整段 45° 斜邊，這個手勢剛好和它平行（量 0），所以要挑右邊那一段。
   const slanted = (rings: Map<string, Ring[]>, key: string): Handle => {
     const r = rings.get(key)![0];
     const i = r.pts.findIndex((p, k) => {
       const q = r.pts[(k + 1) % r.pts.length];
-      return p[0] !== q[0] && p[1] !== q[1] && Math.hypot(q[0] - p[0], q[1] - p[1]) > 2;
+      return q[0] < p[0] && q[1] < p[1] && Math.hypot(q[0] - p[0], q[1] - p[1]) > 2;
     });
     return { kind: 'edge', key, ring: 0, index: Math.max(0, i) };
   };

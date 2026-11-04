@@ -63,7 +63,10 @@
 |---|---|---|
 | 改前第一次 | 2,106 ms 立刻發生，之後 986 ms | 2,183 ms、1,183 ms |
 | 改前第二次 | 零碎 60～200 ms | 250 ms |
-| 改後第一次 | 見 §5 的 `apply3d-after.log` | |
+| 改後第一次 | 最長 139 ms（零碎 50～140 ms 共 597 ms） | 283 ms |
+| 改後第二次 | 零碎 50～90 ms 共 398 ms | 167 ms |
+
+改後第一次從按下到 3D 更新完 747 ms（改前 5,920 ms）。代價：預先抄好的那份帳簿常駐在主執行緒（×3 多 318 MB，heap 693 → 1,008 MB）；要省記憶體可以只在 ×2 以下預抄、或等第一次 hover 卡片再抄。
 
 CPU profile 把第一次的 2.5 s 全部指到 `own()`（`editor.ts`）：第一次在原始上改動會自動建立 Split 1，在 click handler 裡、任何 await 之前同步做
 `data.slice()`（53 MB）＋`labels.slice()`（Int32，212 MB）＋`new Uint8Array` diff（53 MB）＝318 MB 的配置加複製；接著 `useSelMasks` 因 `vol.data` 身分變了全量重建 `maskOf`。

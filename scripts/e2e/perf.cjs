@@ -15,18 +15,18 @@ const q = (xs, f) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.
     const page = await browser.newPage({ viewport: { width: 1600, height: 960 } });
     await page.goto(url);
     await page.evaluate(() => localStorage.clear());
-    await page.reload();
-    await page.getByRole('button', { name: /簡單範例/ }).waitFor();
-    await page.evaluate(() => {
+    // longtask 要從頁面一開始就記（v18：開啟就自動載入簡單範例）
+    await page.addInitScript(() => {
       window.__longTasks = [];
       new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__longTasks.push(e.duration))).observe({ entryTypes: ['longtask'] });
     });
-    // ×1 從按鈕載入；×2／×3 走開發模式的 __loadDemo（上傳面板只留簡單、複雜範例）
+    // ×1＝重新整理 → 範例的網格畫完；×2／×3 等 ×1 好了再走開發模式的 __loadDemo
     let t0 = Date.now();
-    if (scale === 1) await page.getByRole('button', { name: /簡單範例/ }).click();
-    else {
-      await page.getByRole('button', { name: /簡單範例/ }).click();
+    await page.reload();
+    if (scale !== 1) {
       await page.locator('.pane-3d canvas').first().waitFor({ timeout: 120000 });
+      await page.waitForFunction(() => window.__ed && !window.__ed.busy, null, { timeout: 120000 });
+      await page.evaluate(() => (window.__longTasks.length = 0));
       t0 = Date.now();
       await page.evaluate((s) => window.__loadDemo(s), scale);
     }

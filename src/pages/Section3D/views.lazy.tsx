@@ -1,8 +1,11 @@
 import { Suspense, lazy } from 'react';
 
-/** 3D／切面畫布拖著 three.js；歡迎頁用不到，等載入檔案後再抓。index 從這裡拿。 */
+/** 3D／切面畫布拖著 three.js：不進首包；頁面掛上時 preloadViews() 先抓（和範例的結構分析同時進行）。index 從這裡拿。 */
 type View3DProps = Parameters<typeof import('./views').View3D>[0];
 type SliceViewProps = Parameters<typeof import('./views').SliceView>[0];
+
+/** 提早抓 3D 引擎的分塊（plan v18 §3.1）。 */
+export const preloadViews = () => void import('./views');
 
 const LazyView3D = lazy(() => import('./views').then((m) => ({ default: m.View3D })));
 const LazySliceView = lazy(() => import('./views').then((m) => ({ default: m.SliceView })));

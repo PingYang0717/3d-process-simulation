@@ -1,4 +1,4 @@
-// M0（plan v17 留下的載入檢查）：歡迎頁 → 簡單範例 → 3D 與三張切面出現、清單有結構、沒有頁面錯誤；
+// M0（plan v17 留下的載入檢查；v18 起沒有歡迎頁）：開啟 → 自動載入簡單範例 → 3D 與三張切面出現、清單有結構、沒有頁面錯誤；
 // 點清單選一個結構 → 3D 出現六支箭頭、右欄面板可以按；Esc 取消選取 → 面板反灰。
 // 用法：先 `npm run dev`，再 `node scripts/e2e/m0.cjs [http://localhost:5173] [截圖資料夾]`
 const { chromium } = require('playwright');
@@ -18,7 +18,6 @@ const ok = (cond, msg) => {
   await page.goto(url);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.getByRole('button', { name: /簡單範例/ }).click();
   await page.locator('.pane-3d canvas').first().waitFor({ timeout: 60000 });
   await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 60000 });
   ok((await page.locator('.slice-pane').count()) === 3, '三張切面');

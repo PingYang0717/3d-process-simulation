@@ -1,6 +1,6 @@
 // 簡化版的頁面（plan v17 §5.1）：頂端列、左欄結構、中間 3D＋三張唯讀切面（和原版同位置）、右欄動作面板＋「改了哪些」。
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { App, Button, Divider, InputNumber, Modal, Segmented, Space, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Divider, InputNumber, Modal, Segmented, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import { AimOutlined, DownloadOutlined, LeftOutlined, RedoOutlined, RightOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
 import { type Axis, type MeshData, type Vec3, sameBBox } from '../../volume/volume';
 import { download } from '../../ui/download';
@@ -11,7 +11,7 @@ import { previewIn, sidOf } from '../../volume/client';
 import { hiddenTable, palette } from './tables';
 import { type LiveValue, useLive, useLiveValue } from '../../ui/liveValue';
 import type { ViewMode, ViewPreset, View3DHandle } from './views';
-import { SliceView, View3D } from './views.lazy';
+import { SliceView, View3D, preloadViews } from './views.lazy';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { useEvent } from '../../ui/useEvent';
 import { useStable } from '../../ui/stable';
@@ -99,6 +99,20 @@ export default function Section3DPage() {
   const rightW = useLiveWidth('rightW', 350);
   const hover = useLiveValue<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  // ---- 開啟就是主畫面（plan v18 §3.1）：自動載入簡單範例；3D 引擎同時抓 ----
+  const [bootErr, setBootErr] = useState<string | null>(null);
+  const boot = useEvent(() => {
+    setBootErr(null);
+    ed.demo('basic').catch((e: unknown) => setBootErr((e as Error)?.message ?? String(e)));
+  });
+  const booted = useRef(false);
+  useEffect(() => {
+    // StrictMode 的 effect 會跑兩次：範例只產生一次
+    if (booted.current) return;
+    booted.current = true;
+    preloadViews();
+    boot();
+  }, [boot]);
   /** 改後／改前（plan v17 §5.8：看改動只留這個切換＋「改了哪些」）。 */
   const [mode, setMode] = useState<ViewMode>('now');
   const peek = mode === 'orig';
@@ -449,45 +463,31 @@ export default function Section3DPage() {
     </>
   );
 
-  if (!ed.ready)
-    return (
-      <div className="app">
-        <header className="topbar">
-          <Brand />
-        </header>
-        <div className="welcome">
-          <div className="welcome-inner">
-            <Typography.Title level={3} style={{ margin: 0 }}>
-              開始編輯 3D 模型
-            </Typography.Title>
-            <Typography.Paragraph type="secondary" style={{ margin: '8px 0 24px' }}>
-              上傳 TCAD 輸出的 .vti（或 .npy），系統會自動分出各個結構。原始檔案不會被改動；改完匯出一個和輸入同格式的 .vti。
-            </Typography.Paragraph>
-            <UploadPanel ed={ed} onDone={() => {}} />
-          </div>
-        </div>
-      </div>
-    );
-
   return (
     <div className="app">
       <header className="topbar">
         <Brand />
-        <Divider type="vertical" />
-        <Text type="secondary" ellipsis style={{ maxWidth: 360 }}>
-          {ed.meta.name ?? '內建範例'} · {ed.vol.X}×{ed.vol.Y}×{ed.vol.Z}（{voxelCount(ed.vol.data.length)} 體素）
-          {ed.meta.spacing ? ` · spacing ${ed.meta.spacing.join('×')} ${ed.meta.unit === 'um' ? 'µm' : 'nm'}` : ''}
-        </Text>
+        {ed.ready && (
+          <>
+            <Divider type="vertical" />
+            <Text type="secondary" ellipsis style={{ maxWidth: 360 }}>
+              {ed.meta.name ?? '內建範例'} · {ed.vol.X}×{ed.vol.Y}×{ed.vol.Z}（{voxelCount(ed.vol.data.length)} 體素）
+              {ed.meta.spacing ? ` · spacing ${ed.meta.spacing.join('×')} ${ed.meta.unit === 'um' ? 'µm' : 'nm'}` : ''}
+            </Text>
+          </>
+        )}
         <div className="grow" />
-        <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)} aria-label="上傳 .vti">
+        {/* 範例還在載入時先不給按：同時只能載入一個（loadVolume 會直接略過第二個） */}
+        <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)} disabled={!ed.ready && !bootErr} aria-label="上傳 .vti">
           <span className="btn-text">上傳 .vti</span>
         </Button>
         <Tooltip title={ed.meta.hasRaw && ed.meta.fractions ? '匯出一個 .vti，格式和上傳的檔案相同' : '匯出一個 .vti（材質編號放 CellData）'}>
-          <Button type="primary" icon={<DownloadOutlined />} onClick={exportVti} disabled={working} aria-label="匯出">
+          <Button type="primary" icon={<DownloadOutlined />} onClick={exportVti} disabled={working || !ed.ready} aria-label="匯出">
             <span className="btn-text">匯出</span>
           </Button>
         </Tooltip>
       </header>
+      {ed.ready ? (
       <div className="body">
         <WithLive live={leftW}>{(w) => <StructureList ed={ed} width={w} />}</WithLive>
         <WithLive live={leftW}>{(w) => <Resizer label="左欄寬度" value={w} min={180} max={420} onDrag={(dx) => leftW.set(Math.max(180, Math.min(420, leftW.get() + dx)))} />}</WithLive>
@@ -501,6 +501,26 @@ export default function Section3DPage() {
         <WithLive live={rightW}>{(w) => <Resizer label="右欄寬度" value={w} min={300} max={560} onDrag={(dx) => rightW.set(Math.max(300, Math.min(560, rightW.get() - dx)))} />}</WithLive>
         <WithLive live={rightW}>{(w) => <aside className="inspector simple" style={{ width: w }}>{inspector}</aside>}</WithLive>
       </div>
+      ) : (
+        <div className="boot" role={bootErr ? 'alert' : 'status'}>
+          {bootErr ? (
+            <>
+              <Text type="danger">範例載入失敗：{bootErr}</Text>
+              <Space>
+                <Button onClick={boot}>重試</Button>
+                <Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
+                  上傳 .vti
+                </Button>
+              </Space>
+            </>
+          ) : (
+            <>
+              <Spin size="small" />
+              <span>載入範例中…</span>
+            </>
+          )}
+        </div>
+      )}
       <Modal title="上傳 .vti / .npy" open={uploadOpen} onCancel={() => setUploadOpen(false)} footer={null} width={640} destroyOnHidden>
         <UploadPanel ed={ed} onDone={() => setUploadOpen(false)} />
       </Modal>

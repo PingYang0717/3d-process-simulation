@@ -21,7 +21,6 @@ const ok = (cond, msg) => {
   await page.goto(url);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.getByRole('button', { name: /簡單範例/ }).click();
   await page.locator('.pane-3d canvas').first().waitFor({ timeout: 60000 });
   await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 60000 });
   const steps = () => page.evaluate(() => window.__ed.hist.length);

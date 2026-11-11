@@ -183,10 +183,8 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
 
 /* 掃描產生 */
 
-/* ---- 上傳／歡迎 ---- */
-.welcome { flex: 1; overflow: auto; display: flex; justify-content: center; padding: 48px 24px; }
-.welcome-inner { width: 100%; max-width: 880px; }
-.welcome-inner .ant-upload-drag { border-color: var(--c-border); background: var(--c-surface); }
+/* ---- 上傳、開啟時載入範例 ---- */
+.boot { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; font-size: 13px; color: var(--c-text-2); }
 .load-progress { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); background: var(--c-bg-sub); }
 
 /* ---- 說明 ---- */

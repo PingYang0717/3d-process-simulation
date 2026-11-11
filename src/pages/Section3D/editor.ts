@@ -752,7 +752,12 @@ export function useEditor() {
     origCounts,
     version: sidOf(cur),
   };
-  if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = out;
+  if (import.meta.env.DEV) {
+    const w = window as unknown as { __ed?: unknown; __loadDemo?: (scale: number) => Promise<void> };
+    w.__ed = out;
+    // e2e（scripts/e2e/perf.cjs）：×2／×3 只在量測用（plan v17 §5.8：上傳面板只留簡單、複雜範例）
+    w.__loadDemo = (scale) => loadVolume(demoVolume(scale), { format: 'demo', name: `範例 ×${scale}` }, MATERIALS);
+  }
   return out;
 }
 

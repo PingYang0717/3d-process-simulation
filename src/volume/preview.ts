@@ -176,6 +176,8 @@ function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBo
   const [u, v] = [0, 1, 2].filter((k) => k !== a);
   const p: Vec3 = [0, 0, 0];
   let reach = 0;
+  /** 外推只讀最外側那一格往外：裁切範圍沿法線從「最裡面的那個最外側格」開始就夠（不必包整個結構）。 */
+  let inner = sg > 0 ? Infinity : -Infinity;
   const win = Math.abs(n) + ADJ_WINDOW;
   const row: number[] = [];
   outer: for (const key of new Set(op.keys)) {
@@ -197,6 +199,7 @@ function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBo
           }
         }
         if (c < 0) continue;
+        inner = sg > 0 ? Math.min(inner, c) : Math.max(inner, c);
         p[a] = c;
         const base = (p[2] * Y + p[1]) * X + p[0];
         if (n > 0) {
@@ -234,6 +237,11 @@ function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBo
   }
   if (sg > 0) h[a] = reach === Infinity ? len - 1 : h[a] + reach + 2;
   else l[a] = reach === Infinity ? 0 : l[a] - reach - 2;
+  // 外推：結構在面後面的部分不會被讀（內縮要看整個結構沿這一軸的厚度，不能裁）
+  if (n > 0 && Number.isFinite(inner)) {
+    if (sg > 0) l[a] = Math.max(l[a], inner);
+    else h[a] = Math.min(h[a], inner);
+  }
   return clampBox(fromLoHi(l, h), s.vol);
 }
 

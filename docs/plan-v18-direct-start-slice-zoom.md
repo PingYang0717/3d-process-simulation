@@ -33,7 +33,7 @@
 - 現在三張切面都是 `SliceView`（`views.tsx:1574`）：圖永遠塞滿格子（`ResizeObserver` 算等比尺寸），滾輪＝換片，點＝選取。沒有縮放、沒有放大鈕。
 - 完整版的做法（`git show origin/claude/upbeat-einstein-wod16i:<檔案>`）：
   - **放大成主畫面**：`index.tsx` 的 `slice()`／`mainSlice()`，`.canvas-area` 加 `editing focus-{axis}` class，版面全靠 CSS grid 重排（`styles.css:167-188`），DOM 不搬，所以 WebGL 不重建。
-  - **縮放與平移**：`SliceEditor.tsx` 的 `ViewXf { zoom, tx, ty }`（`:84-94`）、`fit`／`aim`／`zoomAt`（`:365-390`）、每個方向記住上次的縮放（`:393-412`）、滾輪（`:414-432`）、空白鍵平移（`:433-454`）、視窗改大小保持中心（`:455-465`）、平移的 pointer 處理（`:886-935`）、縮放列（`:1092-1115`）；樣式是 `.sedit*`（`styles.css:197-205`）。
+  - **縮放與平移**：`SliceEditor.tsx` 的 `ViewXf { zoom, tx, ty }`（`:84-94`）、`fit`／`aim`／`zoomAt`（`:365-390`）、每個方向記住上次的縮放（`:392-412`）、滾輪（`:414-432`）、空白鍵平移（`:433-453`）、視窗改大小保持中心（`:454-464`）、平移的 pointer 處理（`:886-935`）、縮放列（`:1092-1115`）；樣式是 `.sedit*`（`styles.css:197-205`）。
   - 完整版的放大＝進入 2D 編輯（要先選結構才能按、有節點／把手／浮動工具列）。這些 v17 已經刪掉，**不搬回來**。
 
 ## 3. 設計
@@ -93,7 +93,7 @@
 **程式放哪裡**
 
 - 新檔 `src/pages/Section3D/SliceZoom.tsx`（估 200～250 行）：從完整版 `SliceEditor.tsx` 只搬上面列的「視圖變換」那幾段，節點、把手、ghost、手勢、浮動工具列、右鍵選單一律不搬。props 和 `SliceView` 相同，多一個 `selBox`（給「對準選取」）。
-- `SliceView` 裡畫範圍框與十字線的 `<svg>`（`views.tsx:1681-1695`）抽成 `SliceOverlay`，兩個元件共用，不複製貼上。
+- `SliceView` 裡畫範圍框與十字線的 `<svg>`（`views.tsx:1683-1696`）抽成 `SliceOverlay`，兩個元件共用，不複製貼上。
 - `SliceZoom` 不依賴 three.js，但放進 `views.lazy.tsx` 一起延後載入（它 import 的 `SliceOverlay` 在 `views.tsx`）。
 
 ## 4. 每個檔案要改什麼

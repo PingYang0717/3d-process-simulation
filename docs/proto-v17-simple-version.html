@@ -93,6 +93,8 @@
   .ch small { flex: none; color: var(--c-text-2); }
   .sec-title { padding: 12px 16px 8px; font-weight: 600; font-size: 14px; }
   .sec-title small { font-weight: 400; font-size: 13px; color: var(--c-text-2); }
+  .sec-title a { font-weight: 400; font-size: 12px; color: var(--c-primary); cursor: pointer; margin-left: 6px; white-space: nowrap; }
+  .panel kbd { display: block; font: 10px/1.2 inherit; color: var(--c-text-2); font-weight: 400; }
   .panel.off > :not(.sec-title):not(.empty) { opacity: .3; pointer-events: none; }
   .empty { display: none; margin: 0 16px 8px; padding: 10px 12px; border-radius: var(--radius); background: var(--c-primary-bg); color: var(--c-primary); }
   .panel.off .empty { display: block; }
@@ -102,12 +104,12 @@
   .row { margin: 14px 16px 0; }
   .lbl { color: var(--c-text-2); font-size: 12px; margin-bottom: 4px; }
   .faces { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
-  .faces button, .dpad button { height: 32px; border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-surface); }
+  .faces button, .dpad button { height: 42px; line-height: 1.25; border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-surface); }
   .faces button.on { border-color: var(--c-up); background: #fff3e6; color: var(--c-up); font-weight: 600; }
   .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
   .dpad button:hover:not(:disabled) { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .two button { height: 42px; white-space: nowrap; border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-surface); font-size: 14px; font-weight: 600; }
+  .two button { height: 48px; line-height: 1.25; white-space: nowrap; border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-surface); font-size: 14px; font-weight: 600; }
   .two button:hover:not(:disabled) { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
   .step { display: flex; align-items: center; gap: 6px; color: var(--c-text-2); font-size: 12px; }
   .step input { width: 56px; height: 28px; border: 1px solid var(--c-border); border-radius: var(--radius); text-align: center; font: inherit; }
@@ -153,10 +155,10 @@
         <button class="btn sm" id="undo" title="復原（Ctrl+Z）">↶ 復原</button><button class="btn sm" id="redo" title="重做（Ctrl+Y）">↷ 重做</button>
       </div>
       <div class="view3d" id="view3d">
-        <div class="legend"><b>點一下</b>＝選結構<br><b>拖箭頭</b>＝改（放開就完成）<br><b>拖其他地方</b>＝轉視角</div>
+        <div class="legend"><b>點一下</b>＝選結構<br><b>拖箭頭</b>＝改（放開就完成）<br><b>拖其他地方</b>＝轉視角<br><b>Shift＋點</b>＝多選同材質</div>
         <div class="viewbar" id="viewbar"><button data-v="front">正視</button><button data-v="top">上視</button><button data-v="side">側視</button><button data-v="iso">等角</button><button data-v="home">全貌</button><button data-v="fit">對準選取</button></div>
       </div>
-      <div class="pane-foot"><span>左鍵拖＝轉視角；滾輪＝縮放；右鍵拖＝平移；點結構＝選取；拖橘色箭頭＝外推／內縮</span><span class="grow"></span><span id="cross"></span></div>
+      <div class="pane-foot"><span>左鍵拖＝轉視角；滾輪＝縮放；右鍵拖＝平移；Esc＝取消選取；Ctrl+A＝同材質全選；Ctrl+Z＝復原；F＝對準選取</span><span class="grow"></span><span id="cross"></span></div>
     </div>
     <div class="slices">
       <div class="pane slice-pane"><div class="pane-head"><b>XY 正面</b><span class="stepper" data-ax="2"><button>‹</button><span></span><button>›</button></span></div><div class="slice-body"><canvas id="s-xy"></canvas></div></div>
@@ -167,7 +169,7 @@
 
   <div class="inspector">
     <div class="panel" id="panel">
-      <div class="sec-title">要做什麼<small id="selname"></small></div>
+      <div class="sec-title">要做什麼<small id="selname"></small> <a id="all-same" hidden></a></div>
       <div class="empty">先在 3D、切面或左邊的清單點一個結構</div>
       <div class="tools" id="tools"><button data-tool="push">推拉一面</button><button data-tool="move">整塊平移</button><button data-tool="mat">換材質</button></div>
 
@@ -388,21 +390,27 @@ function move1(st, id, a, s, follow) {
 /** 套用一步，回傳實際做了幾格（帶正負號）。 */
 function applyOp(st, op) {
   if (op.kind === 'mat') {
-    const s = st.structs[op.id];
-    if (s.mat === op.mat) return 0;
-    s.mat = op.mat;
-    for (let i = 0; i < N; i++) if (st.sid[i] === op.id) st.mat[i] = op.mat;
-    let k = 1; // 名字跟著材質換：SiN 1 → SiGe 1
-    while (st.structs.some((t) => t && t !== s && t.name === `${MATS[op.mat].name} ${k}`)) k++;
-    s.name = `${MATS[op.mat].name} ${k}`;
-    return 1;
+    let changed = 0;
+    for (const id of op.ids) {
+      const s = st.structs[id];
+      if (s.mat === op.mat) continue;
+      s.mat = op.mat; changed++;
+      for (let i = 0; i < N; i++) if (st.sid[i] === id) st.mat[i] = op.mat;
+      let k = 1; // 名字跟著材質換：SiN 1 → SiGe 1
+      while (st.structs.some((t) => t && t !== s && t.name === `${MATS[op.mat].name} ${k}`)) k++;
+      s.name = `${MATS[op.mat].name} ${k}`;
+    }
+    return changed;
   }
   const f = FACES[op.face], sign = Math.sign(op.n);
   let k = 0;
   lastBlock = null;
   for (; k < Math.abs(op.n); k++) {
-    const ok = op.kind === 'move' ? move1(st, op.id, f.a, f.s * sign, op.follow) : sign > 0 ? grow1(st, op.id, f.a, f.s, op.follow) : shrink1(st, op.id, f.a, f.s, op.follow);
+    // 多選：這一格要每個結構都做得到才做（在複本上試），不然大家都停在同一格數
+    const t = op.ids.length > 1 ? cloneSt(st) : st;
+    const ok = op.ids.every((id) => (op.kind === 'move' ? move1(t, id, f.a, f.s * sign, op.follow) : sign > 0 ? grow1(t, id, f.a, f.s, op.follow) : shrink1(t, id, f.a, f.s, op.follow)));
     if (!ok) break;
+    if (t !== st) { st.mat.set(t.mat); st.sid.set(t.sid); }
   }
   return k * sign;
 }
@@ -412,8 +420,9 @@ const matNames = (set) => [...set].sort((p, q) => p - q).map((m) => MATS[m].name
  * 這一步會碰到的鄰居。follow＝開著「跟著移動」時：薄層（follow）一起動，薄層外面厚的那一層（stay）不動；
  * 關著時：貼著的全部留在原地（stay）。sids＝會跟著的結構。
  */
-function neighbors(st, id, kind, face, follow) {
+function neighbors(st, ids, kind, face, follow) {
   const fol = new Set(), stay = new Set(), sids = new Set();
+  for (const id of ids) {
   if (kind === 'move') {
     const mask = new Uint8Array(N);
     if (follow) shellMask(st, id, mask); else for (let i = 0; i < N; i++) if (st.sid[i] === id) mask[i] = 1;
@@ -433,6 +442,7 @@ function neighbors(st, id, kind, face, follow) {
       if (b >= 0 && st.mat[b] !== AIR && st.sid[b] !== id) stay.add(st.mat[b]);
     }
   }
+  }
   return { follow: matNames(fol), stay: matNames(stay), sids };
 }
 const limitText = (b) => !b ? '' : b.why === 'edge' ? '到模型邊界為止' : b.why === 'self' ? '到碰到自己為止' : `到 ${b.name} 剩 1 格為止`;
@@ -443,35 +453,40 @@ function roomOf(st, op) {
   return { n, block: lastBlock };
 }
 /** 這一步之後，沒有跟著動的鄰居誰被蓋掉、誰補上空出來的地方。 */
-function effects(before, after, id, folSids) {
+function effects(before, after, ids, folSids) {
+  const own = new Set(ids);
   const lost = new Set(), gained = new Set();
   for (let i = 0; i < N; i++) {
     const b = before.sid[i], a = after.sid[i];
     if (a === b) continue;
-    if (b && b !== id && !folSids.has(b)) lost.add(before.mat[i]);
-    if (a && a !== id && !folSids.has(a)) gained.add(after.mat[i]);
+    if (b && !own.has(b) && !folSids.has(b)) lost.add(before.mat[i]);
+    if (a && !own.has(a) && !folSids.has(a)) gained.add(after.mat[i]);
   }
   const both = new Set([...lost].filter((m) => gained.has(m)));
   return { lost: matNames([...lost].filter((m) => !both.has(m))), gained: matNames([...gained].filter((m) => !both.has(m))), both: matNames(both) };
 }
 
 // ---------------------------------------------------------------- 狀態
+const KEYCAP = { 上: '↑', 下: '↓', 左: '←', 右: '→', 前: 'PgDn', 後: 'PgUp' };
+const KEY_FACE = { ArrowUp: '上', ArrowDown: '下', ArrowLeft: '左', ArrowRight: '右', PageDown: '前', PageUp: '後' };
 const EYE_ON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l18 18M10.6 5.1A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.5 6.6C3.7 8.5 2 12 2 12s3.6 7 10 7c1.6 0 3-.4 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.200 4.200"/></svg>';
 const ORIG = initial();
 let model = cloneSt(ORIG), undoStack = [], redoStack = []; // 每一筆：{ st: 這一步之前的狀態, text, id, cells }
 const hidden = new Set(); // 在 3D 隱藏的材質
 const diffCount = (a, b) => { let n = 0; for (let i = 0; i < N; i++) if (a.mat[i] !== b.mat[i]) n++; return n; };
-const ui = { sel: 0, tool: 'push', face: '上', nb: 'follow', cur: [24, 20, 12], before: false };
+const ui = { sels: [], get sel() { return this.sels[this.sels.length - 1] || 0; }, tool: 'push', face: '上', nb: 'follow', cur: [24, 20, 12], before: false };
 let drag = null;
 const shown = () => (ui.before ? ORIG : drag ? drag.live : model);
 const stepN = () => Math.max(1, Math.min(20, Math.round(+$('#n').value) || 1));
 const nm = (k) => (Math.abs(k) * NM).toFixed(1);
-const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', id: ui.sel, face, n, follow: ui.nb === 'follow' });
+const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', ids: [...ui.sels], face, n, follow: ui.nb === 'follow' });
+/** 選到的結構怎麼稱呼：一個＝名字；兩三個＝全部列出；更多＝「Poly-Si ×4」。 */
+const namesOf = (st, ids) => (ids.length <= 3 ? ids.map((id) => st.structs[id].name).join('、') : `${MATS[st.structs[ids[0]].mat].name} ×${ids.length}`);
 
 /** 一步的說明：第一句是做了什麼，後面每一句是一種鄰居怎麼了（都寫出幾格）；沒做滿再加一句為什麼。 */
 function describe(op, n, name, nb, eff, block) {
-  if (op.kind === 'mat') return [`${name} 換成 ${MATS[op.mat].name}（現在叫 ${model.structs[op.id].name}）`];
+  if (op.kind === 'mat') return [`${name} 換成 ${MATS[op.mat].name}（現在叫 ${namesOf(model, op.ids)}）`];
   const k = Math.abs(n), parts = [];
   parts.push(op.kind === 'push' ? `${name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${k} 格（${nm(n)} nm）` : `${name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${k} 格（${nm(n)} nm）`);
   if (op.follow && nb.follow.length) parts.push(`${nb.follow.join('、')} 跟著移動 ${k} 格`);
@@ -484,13 +499,13 @@ function describe(op, n, name, nb, eff, block) {
 function say(t, canUndo) { $('#msg').textContent = t; $('#undo2').hidden = !canUndo; }
 function commit(op) {
   const before = cloneSt(model);
-  const nb = op.kind === 'mat' ? null : neighbors(model, op.id, op.kind, op.n > 0 || op.kind === 'push' ? op.face : FACES[op.face].opp, op.follow);
-  const name = model.structs[op.id].name;
+  const nb = op.kind === 'mat' ? null : neighbors(model, op.ids, op.kind, op.n > 0 || op.kind === 'push' ? op.face : FACES[op.face].opp, op.follow);
+  const name = namesOf(model, op.ids);
   const n = applyOp(model, op);
   const block = lastBlock;
   if (!n) { model = before; say(op.kind === 'mat' ? '已經是這個材質' : `擋下來了：${blockText(block)}`, false); return render(); }
-  const parts = describe(op, n, name, nb, nb && effects(before, model, op.id, nb.sids), block), text = parts.join(' · ');
-  undoStack.push({ st: before, text, parts, id: op.id, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
+  const parts = describe(op, n, name, nb, nb && effects(before, model, op.ids, nb.sids), block), text = parts.join(' · ');
+  undoStack.push({ st: before, text, parts, ids: op.ids, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
   say(text, true);
   render();
 }
@@ -507,11 +522,24 @@ function redo() {
   if (e.reset) undoStack = [{ ...e, st: model, prev: undoStack }]; else undoStack.push({ ...e, st: model });
   model = e.st; say(`已重做：${e.text}`, true); render();
 }
-function select(id, moveCursor = true) {
-  ui.sel = id || 0;
+/** 選結構。add＝Shift／Ctrl＋點：加進選取（只能同材質）；已經選到的再點一次＝拿掉。 */
+function select(id, moveCursor = true, add = false) {
+  if (!id) { if (add) return; ui.sels = []; }
+  else if (add && ui.sels.length) {
+    if (ui.sels.includes(id)) ui.sels = ui.sels.filter((x) => x !== id);
+    else if (model.structs[id].mat !== model.structs[ui.sel].mat) { say(`只能多選相同材質：已選的是 ${MATS[model.structs[ui.sel].mat].name}`, false); return; }
+    else ui.sels.push(id);
+  } else ui.sels = [id];
   if (ui.sel) hidden.delete(model.structs[ui.sel].mat); // 選到隱藏的材質就把它打開
   const b = ui.sel && bbox(model, ui.sel);
   if (b && moveCursor) ui.cur = b.lo.map((v, k) => Math.floor((v + b.hi[k]) / 2));
+  render();
+}
+/** 同材質全選（Ctrl+A、面板上的「選全部」）。 */
+function selectSame() {
+  if (!ui.sel) return;
+  const m = model.structs[ui.sel].mat, last = ui.sel;
+  ui.sels = [...model.structs.filter((s) => s && s.mat === m && s.id !== last).map((s) => s.id), last];
   render();
 }
 
@@ -579,13 +607,13 @@ function addMesh(g, mat, order, pick) {
 function draw3d(st) {
   for (const o of dyn) { scene.remove(o); o.geometry.dispose(); }
   dyn = []; pickables = [];
-  if (faceQuad) { scene.remove(faceQuad); faceQuad.geometry.dispose(); faceQuad = null; }
+  if (faceQuad) { scene.remove(faceQuad); faceQuad.children.forEach((q) => q.geometry.dispose()); faceQuad = null; }
   const vis = (i) => i >= 0 && st.mat[i] !== AIR && !hidden.has(st.mat[i]);
   const b = ui.sel && !ui.before && bbox(st, ui.sel);
   arrows.visible = !!b && ui.tool !== 'mat';
   if (!b) addMesh(buildGeom(st, vis, (i, nb) => !vis(nb)), mainMat, 0, true);
   else {
-    const isSel = (i) => st.sid[i] === ui.sel;
+    const picked = new Set(ui.sels), isSel = (i) => picked.has(st.sid[i]);
     const sel = buildGeom(st, isSel, (i, nb) => nb < 0 || !isSel(nb));
     addMesh(sel, mainMat, 0, true);
     const rest = buildGeom(st, (i) => vis(i) && !isSel(i), (i, nb) => !vis(nb));
@@ -599,12 +627,19 @@ function draw3d(st) {
       arrowOf[name].position.copy(p);
       arrowOf[name].userData.on = ui.tool === 'push' && ui.face === name;
     }
-    if (ui.tool === 'push') {
-      const f = FACES[ui.face], size = hi.clone().sub(lo), b1 = (f.a + 1) % 3, c1 = (f.a + 2) % 3;
-      faceQuad = new THREE.Mesh(new THREE.PlaneGeometry(size.getComponent(b1), size.getComponent(c1)), new THREE.MeshBasicMaterial({ color: 0xfa8c16, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthTest: false }));
-      faceQuad.position.copy(arrowOf[ui.face].position);
-      if (f.a === 0) faceQuad.rotation.set(0, Math.PI / 2, Math.PI / 2); else if (f.a === 1) faceQuad.rotation.set(Math.PI / 2, 0, Math.PI / 2);
-      faceQuad.renderOrder = 4; scene.add(faceQuad);
+    if (ui.tool === 'push') { // 每個選到的結構都把要動的那一面塗橘色
+      const f = FACES[ui.face], b1 = (f.a + 1) % 3, c1 = (f.a + 2) % 3;
+      faceQuad = new THREE.Group();
+      for (const id of ui.sels) {
+        const bb = bbox(st, id);
+        if (!bb) continue;
+        const l = bb.lo, h = bb.hi.map((v) => v + 1);
+        const q = new THREE.Mesh(new THREE.PlaneGeometry(h[b1] - l[b1], h[c1] - l[c1]), new THREE.MeshBasicMaterial({ color: 0xfa8c16, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthTest: false }));
+        q.position.set((l[0] + h[0]) / 2, (l[1] + h[1]) / 2, (l[2] + h[2]) / 2).setComponent(f.a, f.s > 0 ? h[f.a] : l[f.a]);
+        if (f.a === 0) q.rotation.set(0, Math.PI / 2, Math.PI / 2); else if (f.a === 1) q.rotation.set(Math.PI / 2, 0, Math.PI / 2);
+        q.renderOrder = 4; faceQuad.add(q);
+      }
+      scene.add(faceQuad);
     }
   }
   dirty = true;
@@ -680,7 +715,7 @@ host.addEventListener('pointerup', (e) => {
   if (e.button !== 0 || !downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4 || e.target.closest('.viewbar')) return;
   ray.setFromCamera(ndc(e), camera);
   const hit = ray.intersectObjects(pickables)[0];
-  select(hit ? shown().sid[hit.object.geometry.userData.cells[Math.floor(hit.faceIndex / 2)]] : 0);
+  select(hit ? shown().sid[hit.object.geometry.userData.cells[Math.floor(hit.faceIndex / 2)]] : 0, true, e.shiftKey || e.ctrlKey || e.metaKey);
 });
 host.addEventListener('contextmenu', (e) => e.preventDefault());
 $('#viewbar').onclick = (e) => { const v = e.target.dataset.v; if (v) setView(v); };
@@ -702,7 +737,7 @@ function draw2d(st) {
     for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) { const m = st.mat[at(u, v)]; if (m) { g.fillStyle = MATS[m].color; g.fillRect(u * K, py(v), K, K); } }
     if (ui.sel && !ui.before) {
       g.fillStyle = '#0b57d0';
-      const isSel = (u, v) => { const i = at(u, v); return i >= 0 && st.sid[i] === ui.sel; };
+      const isSel = (u, v) => { const i = at(u, v); return i >= 0 && ui.sels.includes(st.sid[i]); };
       for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) {
         if (!isSel(u, v)) continue;
         const x = u * K, y = py(v), up = flip ? v + 1 : v - 1, dn = flip ? v - 1 : v + 1;
@@ -719,7 +754,7 @@ function draw2d(st) {
       if (u < 0 || v < 0 || u >= W || v >= H) return;
       ui.cur[ua] = u; ui.cur[va] = v;
       const id = shown().sid[at(u, v)];
-      if (id) select(id, false); else render();
+      if (id) select(id, false, e.shiftKey || e.ctrlKey || e.metaKey); else render();
     };
   }
   document.querySelectorAll('.stepper').forEach((el) => { const a = +el.dataset.ax; el.children[1].textContent = `${'xyz'[a]} = ${ui.cur[a]}`; });
@@ -738,19 +773,22 @@ function drawPanel(st) {
   $('#list').innerHTML = [...groups].map(([m, ss]) => {
     const hid = hidden.has(m);
     return `<button class="grp ${hid ? 'hid' : ''}" data-mat="${m}" title="${hid ? '點一下顯示' : '點一下隱藏'}"><span class="sw" style="background:${MATS[m].color}"></span>${MATS[m].name}<small>×${ss.length}</small><span class="eye">${hid ? EYE_OFF : EYE_ON}</span></button>`
-      + ss.map((s) => `<button class="item ${s.id === ui.sel ? 'on' : ''} ${hid ? 'hid' : ''}" data-id="${s.id}">${s.name}</button>`).join('');
+      + ss.map((s) => `<button class="item ${ui.sels.includes(s.id) ? 'on' : ''} ${hid ? 'hid' : ''}" data-id="${s.id}">${s.name}</button>`).join('');
   }).join('');
   const steps = undoStack.filter((e) => !e.reset);
   $('#ch-list').innerHTML = steps.length
-    ? steps.map((e, k) => `<button class="ch" data-id="${e.id}" title="點一下選這個結構"><span class="no">${k + 1}</span><span class="tx">${e.parts[0]}${e.parts.slice(1).map((t) => `<div class="sub">${t}</div>`).join('')}</span><small>${e.cells.toLocaleString()} 體素</small></button>`).join('')
+    ? steps.map((e, k) => `<button class="ch" data-ids="${e.ids.join(',')}" title="點一下選這個結構"><span class="no">${k + 1}</span><span class="tx">${e.parts[0]}${e.parts.slice(1).map((t) => `<div class="sub">${t}</div>`).join('')}</span><small>${e.cells.toLocaleString()} 體素</small></button>`).join('')
     : '<div class="ch-empty">還沒有改動。每做一步，這裡會多一行。</div>';
   if ($('#ch-list').dataset.n !== String(steps.length)) { $('#ch-list').dataset.n = steps.length; $('#ch-list').scrollTop = 1e6; } // 新的一步捲到看得到
   $('#ch-sum').textContent = steps.length ? `${steps.length} 步 · 和原始差 ${diffCount(model, ORIG).toLocaleString()} 體素` : '';
   $('#reset').hidden = !steps.length; $('#foot').classList.toggle('changed', steps.length > 0);
   const sel = ui.sel ? st.structs[ui.sel] : null, b = sel && bbox(st, sel.id);
-  $('#sel-foot').textContent = sel ? `已選 ${sel.name}` : '還沒選取結構';
+  const same = sel ? st.structs.filter((t) => t && t.mat === sel.mat).length : 0;
+  $('#sel-foot').textContent = sel ? `已選 ${namesOf(st, ui.sels)}` : '還沒選取結構';
   $('#panel').classList.toggle('off', !sel || ui.before);
-  $('#selname').textContent = sel ? `：${sel.name}` : '';
+  $('#selname').textContent = sel ? `：${namesOf(st, ui.sels)}` : '';
+  $('#all-same').hidden = !sel || ui.sels.length >= same;
+  if (sel) $('#all-same').textContent = `選全部 ${MATS[sel.mat].name}（${same}）`;
   for (const x of $('#tools').children) x.classList.toggle('on', x.dataset.tool === ui.tool);
   for (const x of $('#mode').children) x.classList.toggle('on', (x.dataset.m === 'before') === ui.before);
   $('#t-push').hidden = ui.tool !== 'push'; $('#t-move').hidden = ui.tool !== 'move'; $('#t-mat').hidden = ui.tool !== 'mat';
@@ -758,14 +796,14 @@ function drawPanel(st) {
   $('#nm').textContent = nm(stepN());
   $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length;
   if (!sel || !b) return;
-  $('#faces').innerHTML = Object.keys(FACES).map((k) => `<button class="${k === ui.face ? 'on' : ''}">${k}</button>`).join('');
-  $('#grow').textContent = `${ui.face}面外推 ${stepN()} 格`; $('#shrink').textContent = `${ui.face}面內縮 ${stepN()} 格`;
+  $('#faces').innerHTML = Object.keys(FACES).map((k) => `<button data-face="${k}" class="${k === ui.face ? 'on' : ''}">${k}<kbd>${KEYCAP[k]}</kbd></button>`).join('');
+  $('#grow').innerHTML = `${ui.face}面外推 ${stepN()} 格<kbd>＋</kbd>`; $('#shrink').innerHTML = `${ui.face}面內縮 ${stepN()} 格<kbd>－</kbd>`;
   if (ui.tool !== 'mat') {
-    const can = neighbors(st, sel.id, ui.tool, ui.face, true).follow.length > 0; // 有沒有薄層可以跟
-    const on = can && ui.nb === 'follow', nb = neighbors(st, sel.id, ui.tool, ui.face, on);
+    const can = neighbors(st, ui.sels, ui.tool, ui.face, true).follow.length > 0; // 有沒有薄層可以跟
+    const on = can && ui.nb === 'follow', nb = neighbors(st, ui.sels, ui.tool, ui.face, on);
     for (const x of $('#nb').children) { x.classList.toggle('on', can && x.dataset.nb === ui.nb); x.disabled = !can; }
     // 事先算好每個方向還能做幾格、被什麼擋住：做不到的按鈕反灰，滑過去看原因
-    const room = (kind, face, sign) => roomOf(st, { kind, id: sel.id, face, n: sign, follow: on });
+    const room = (kind, face, sign) => roomOf(st, { kind, ids: [...ui.sels], face, n: sign, follow: on });
     const lines = [];
     if (nb.follow.length) lines.push(`跟著移動：${nb.follow.join('、')}`);
     if (nb.stay.length) lines.push(`厚度會變：${nb.stay.join('、')}`);
@@ -775,7 +813,7 @@ function drawPanel(st) {
       $('#shrink').disabled = !inn.n; $('#shrink').title = inn.n ? '' : blockText(inn.block);
       lines.push(out.n ? `最多可外推 ${out.n} 格（${limitText(out.block)}）` : `不能外推：${blockText(out.block)}${out.block?.why === 'last' ? `（先把 ${out.block.name} 往外推）` : ''}`);
     } else {
-      $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((k) => { const r = room('move', k, 1); return `<button ${r.n ? `title="最多 ${r.n} 格"` : `disabled title="${blockText(r.block)}"`}>${k}</button>`; }).join('');
+      $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((k) => { const r = room('move', k, 1); return `<button data-face="${k}" ${r.n ? `title="最多 ${r.n} 格"` : `disabled title="${blockText(r.block)}"`}>${k}<kbd>${KEYCAP[k]}</kbd></button>`; }).join('');
     }
     $('#who').innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
   }
@@ -785,21 +823,22 @@ function render() { const st = shown(); draw3d(st); draw2d(st); drawPanel(st); }
 
 $('#list').onclick = (e) => {
   const b = e.target.closest('.item'), g = e.target.closest('.grp');
-  if (b) return select(+b.dataset.id);
+  if (b) return select(+b.dataset.id, true, e.shiftKey || e.ctrlKey || e.metaKey);
   if (!g) return;
   const m = +g.dataset.mat;
-  if (hidden.has(m)) hidden.delete(m); else { hidden.add(m); if (ui.sel && model.structs[ui.sel].mat === m) ui.sel = 0; }
+  if (hidden.has(m)) hidden.delete(m); else { hidden.add(m); if (ui.sel && model.structs[ui.sel].mat === m) ui.sels = []; }
   render();
 };
-$('#ch-list').onclick = (e) => { const b = e.target.closest('.ch'); if (b) select(+b.dataset.id); };
+$('#ch-list').onclick = (e) => { const b = e.target.closest('.ch'); if (!b) return; const ids = b.dataset.ids.split(',').map(Number); select(ids[ids.length - 1]); ui.sels = ids; render(); };
+$('#all-same').onclick = selectSame;
 $('#tools').onclick = (e) => { const b = e.target.closest('button'); if (b) { ui.tool = b.dataset.tool; render(); } };
-$('#faces').onclick = (e) => { if (e.target.tagName === 'BUTTON') { ui.face = e.target.textContent; render(); } };
+$('#faces').onclick = (e) => { const b = e.target.closest('button'); if (b) { ui.face = b.dataset.face; render(); } };
 $('#nb').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) { ui.nb = b.dataset.nb; render(); } };
 $('#n').oninput = () => drawPanel(shown());
 $('#grow').onclick = () => commit(curOp(ui.face, stepN()));
 $('#shrink').onclick = () => commit(curOp(ui.face, -stepN()));
-$('#dpad').onclick = (e) => { if (e.target.tagName === 'BUTTON' && !e.target.disabled) commit(curOp(e.target.textContent, stepN())); };
-$('#mats').onclick = (e) => { const b = e.target.closest('button'); if (b) commit({ kind: 'mat', id: ui.sel, mat: +b.dataset.m }); };
+$('#dpad').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) commit(curOp(b.dataset.face, stepN())); };
+$('#mats').onclick = (e) => { const b = e.target.closest('button'); if (b) commit({ kind: 'mat', ids: [...ui.sels], mat: +b.dataset.m }); };
 $('#undo').onclick = $('#undo2').onclick = undo;
 $('#redo').onclick = redo;
 $('#reset').onclick = () => { undoStack = [{ st: model, text: '全部還原', reset: true, prev: undoStack }]; redoStack = []; model = cloneSt(ORIG); say('已全部還原成原始的樣子', true); render(); };
@@ -811,7 +850,17 @@ addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
   if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if (mod && k === 'y') { e.preventDefault(); redo(); }
+  else if (mod && k === 'a') { e.preventDefault(); selectSame(); }
   else if (k === 'escape') { if (drag) { drag = null; $('#tip').hidden = true; render(); } else select(0); }
+  else if (k === 'f') setView('fit');
+  else if (k === 'h') setView('home');
+  else if (!ui.sel || ui.before || mod) return;
+  // 方向鍵、PgUp／PgDn：推拉＝選那一面，平移＝往那邊搬一次；＋／－：外推／內縮
+  else if (KEY_FACE[e.key]) {
+    e.preventDefault();
+    if (ui.tool === 'push') { ui.face = KEY_FACE[e.key]; render(); } else if (ui.tool === 'move') commit(curOp(KEY_FACE[e.key], stepN()));
+  } else if (ui.tool === 'push' && (e.key === '+' || e.key === '=')) { e.preventDefault(); commit(curOp(ui.face, stepN())); }
+  else if (ui.tool === 'push' && (e.key === '-' || e.key === '_')) { e.preventDefault(); commit(curOp(ui.face, -stepN())); }
 });
 
 setView('home');

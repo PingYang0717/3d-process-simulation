@@ -246,23 +246,45 @@ function initial() {
     });
     fill(4, 43, 29, 31, z0, z1, add(7, g + 1));
   });
+  markThin(st);
   return st;
+}
+/**
+ * 哪些結構是「薄層」：載入時決定一次，之後怎麼改都不變（Poly 被蓋薄了也還是固定的）。
+ * 每一格的厚度＝穿過它的三個方向裡最短的那一段；結構裡一半以上的格子厚度 ≤ LINER_MAX 格就是薄層
+ * （用中位數，轉角那幾格比較厚不影響判斷）。
+ */
+function markThin(st) {
+  const local = new Uint8Array(N).fill(255);
+  for (let a = 0; a < 3; a++) {
+    const b = (a + 1) % 3, c = (a + 2) % 3, p = [0, 0, 0];
+    for (p[b] = 0; p[b] < DIM[b]; p[b]++) for (p[c] = 0; p[c] < DIM[c]; p[c]++) {
+      let k = 0;
+      while (k < DIM[a]) {
+        p[a] = k; const i0 = idx(p[0], p[1], p[2]), id = st.sid[i0];
+        let e = k + 1;
+        while (e < DIM[a] && st.sid[i0 + (e - k) * STEP[a]] === id) e++;
+        const len = Math.min(255, e - k);
+        if (id) for (let t = k; t < e; t++) { const i = i0 + (t - k) * STEP[a]; if (len < local[i]) local[i] = len; }
+        k = e;
+      }
+    }
+  }
+  const total = new Array(st.structs.length).fill(0), thinCells = new Array(st.structs.length).fill(0);
+  for (let i = 0; i < N; i++) { const id = st.sid[i]; if (!id) continue; total[id]++; if (local[i] <= LINER_MAX) thinCells[id]++; }
+  st.structs.forEach((s, id) => { if (s) s.thin = thinCells[id] * 2 >= total[id]; });
 }
 const cloneSt = (st) => ({ mat: st.mat.slice(), sid: st.sid.slice(), structs: st.structs.map((s) => s && { ...s }) });
 const put = (st, to, from) => { st.mat[to] = st.mat[from]; st.sid[to] = st.sid[from]; };
 
-/** 從 i 起沿 (a, s) 收集貼著的薄層（每一層 ≤ LINER_MAX 格；遇空氣、自己的材質或厚的就停）。 */
-function liners(st, i, a, s, stopMat) {
+/** 從 i 起沿 (a, s) 收集貼著的薄層（可以一層疊一層）；遇到空氣、結構 id 自己、或不是薄層的結構就停。 */
+function liners(st, i, a, s, id) {
   const out = [];
   while (i >= 0) {
-    const m = st.mat[i];
-    if (m === AIR || m === stopMat) break;
-    const run = [];
-    let j = i;
-    while (j >= 0 && st.mat[j] === m) { run.push(j); j = next(j, a, s); }
-    if (run.length > LINER_MAX) break;
-    out.push(...run);
-    i = j;
+    const k = st.sid[i];
+    if (!k || k === id || !st.structs[k].thin) break;
+    out.push(i);
+    i = next(i, a, s);
   }
   return out;
 }
@@ -289,7 +311,7 @@ function grow1(st, id, a, s, follow) {
     const t = next(c, a, s);
     if (t < 0) continue;
     if (st.mat[t] !== AIR && follow) {
-      const L = liners(st, t, a, s, M);
+      const L = liners(st, t, a, s, id);
       for (let j = L.length - 1; j >= 0; j--) { const to = next(L[j], a, s); if (to >= 0) put(st, to, L[j]); }
     }
     st.mat[t] = M; st.sid[t] = id; done++;
@@ -298,12 +320,12 @@ function grow1(st, id, a, s, follow) {
 }
 /** 內縮一格：跟著移動＝薄層整列跟著退；空出來的由外面的材質補滿。 */
 function shrink1(st, id, a, s, follow) {
-  const M = st.structs[id].mat, b = bbox(st, id);
+  const b = bbox(st, id);
   if (!b || b.hi[a] - b.lo[a] < 1) return 0;
   let done = 0;
   for (const c of outer(st, id, a, s)) {
     const o = next(c, a, s);
-    const L = follow && o >= 0 ? liners(st, o, a, s, M) : [];
+    const L = follow && o >= 0 ? liners(st, o, a, s, id) : [];
     let to = c;
     for (const j of L) { put(st, to, j); to = j; }
     const beyond = next(to, a, s);
@@ -314,11 +336,10 @@ function shrink1(st, id, a, s, follow) {
 }
 /** 包在結構外面的薄層（六個方向）。 */
 function shellMask(st, id, mask) {
-  const M = st.structs[id].mat;
   for (let i = 0; i < N; i++) {
     if (st.sid[i] !== id) continue;
     mask[i] = 1;
-    for (let a = 0; a < 3; a++) for (const s of [1, -1]) { const nb = next(i, a, s); if (nb >= 0 && st.sid[nb] !== id && st.mat[nb] !== AIR) for (const c of liners(st, nb, a, s, M)) if (st.sid[c] !== id) mask[c] = 2; }
+    for (let a = 0; a < 3; a++) for (const s of [1, -1]) { const nb = next(i, a, s); if (nb >= 0 && st.sid[nb] !== id && st.mat[nb] !== AIR) for (const c of liners(st, nb, a, s, id)) mask[c] = 2; }
   }
 }
 /** 整塊搬一格：前面的被蓋掉，後面空出來的由後面的材質補滿；跟著移動＝外面的薄層一起搬。 */
@@ -362,7 +383,7 @@ const matNames = (set) => [...set].sort((p, q) => p - q).map((m) => MATS[m].name
  * 關著時：貼著的全部留在原地（stay）。sids＝會跟著的結構。
  */
 function neighbors(st, id, kind, face, follow) {
-  const M = st.structs[id].mat, fol = new Set(), stay = new Set(), sids = new Set();
+  const fol = new Set(), stay = new Set(), sids = new Set();
   if (kind === 'move') {
     const mask = new Uint8Array(N);
     if (follow) shellMask(st, id, mask); else for (let i = 0; i < N; i++) if (st.sid[i] === id) mask[i] = 1;
@@ -376,7 +397,7 @@ function neighbors(st, id, kind, face, follow) {
     for (const c of outer(st, id, f.a, f.s)) {
       const t = next(c, f.a, f.s);
       if (t < 0 || st.mat[t] === AIR) continue;
-      const L = follow ? liners(st, t, f.a, f.s, M) : [];
+      const L = follow ? liners(st, t, f.a, f.s, id) : [];
       for (const l of L) { fol.add(st.mat[l]); sids.add(st.sid[l]); }
       const b = L.length ? next(L[L.length - 1], f.a, f.s) : t;
       if (b >= 0 && st.mat[b] !== AIR && st.sid[b] !== id) stay.add(st.mat[b]);
@@ -711,7 +732,7 @@ function drawPanel(st) {
     for (const x of $('#nb').children) { x.classList.toggle('on', can && x.dataset.nb === ui.nb); x.disabled = !can; }
     const lines = [];
     if (nb.follow.length) lines.push(`跟著移動：${nb.follow.join('、')}`);
-    if (nb.stay.length) lines.push(`留在原地：${nb.stay.join('、')}${on ? `（比 ${LINER_MAX} 格厚，不會跟）` : ''}`);
+    if (nb.stay.length) lines.push(`${on ? '固定不動' : '留在原地'}：${nb.stay.join('、')}`);
     if (!lines.length) lines.push(ui.tool === 'move' ? '外面沒有相鄰的材質' : `${ui.face}面外面沒有相鄰的材質`);
     $('#who').innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
   }

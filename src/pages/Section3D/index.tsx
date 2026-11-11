@@ -420,7 +420,8 @@ export default function Section3DPage() {
   );
 
   const exportVti = async () => {
-    const stem = (ed.meta.name ?? 'tcad').replace(/\.(npy|vti)$/i, '');
+    // 內建範例的名字是中文：有些瀏覽器的下載不收非 ASCII 的檔名（存成 download），範例一律叫 example
+    const stem = ed.meta.format === 'demo' ? 'example' : (ed.meta.name ?? 'tcad').replace(/\.(npy|vti)$/i, '');
     try {
       const data = await ed.exportVti();
       const saved = await download(data, `${stem}${ed.diffCount ? '_edited' : ''}.vti`);

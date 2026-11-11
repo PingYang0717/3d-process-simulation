@@ -1,4 +1,5 @@
 // 右欄上半（plan v17 §5.1、§5.3、§5.5）：三個動作、哪一面、兩顆動作鈕、每次 n 格、相鄰材質開關與小圖、試算的三行、材質清單。
+import { useEffect, useState } from 'react';
 import { Button, InputNumber, Tooltip, Typography } from 'antd';
 import { isVoid } from '../../volume/volume';
 import type { Block } from '../../volume/kernel';
@@ -56,6 +57,15 @@ export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
   const working = !!ed.busy;
   const canFollow = p ? p.canFollow : true;
   const names = (ms: number[]) => ms.map(ed.matName).join('、');
+  // 試算超過 300 ms 還沒回來：寫「計算中…」（plan v17 §9；結果回來之前按鈕照常可按，真正套用時 Worker 仍會擋）
+  const waiting = sel && !peek && ed.tool !== 'mat' && !p;
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (!waiting) return;
+    const t = setTimeout(() => setSlow(true), 300);
+    return () => clearTimeout(t);
+  }, [waiting, ed.version, ed.face, ed.follow, ed.tool]);
 
   const lines: string[] = [];
   if (p && sel && ed.tool !== 'mat') {
@@ -153,9 +163,7 @@ export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
               ))}
             </div>
             <div className="who" aria-live="polite">
-              {lines.map((l) => (
-                <div key={l}>{l}</div>
-              ))}
+              {waiting && slow ? <div>計算中…</div> : lines.map((l) => <div key={l}>{l}</div>)}
             </div>
           </div>
         </>

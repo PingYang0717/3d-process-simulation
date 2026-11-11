@@ -6,7 +6,14 @@ import { dirname, resolve } from 'node:path';
 
 const out = resolve(process.argv[2] ?? 'dist/prototype.html');
 const title = process.argv[3] ?? 'Section Editor 3D';
-const common = { bundle: true, minify: true, target: 'es2020', logLevel: 'warning', define: { 'process.env.NODE_ENV': '"production"' } };
+// iife 沒有 import.meta：開發模式的開關定成 false（不然 import.meta.env.DEV 會在 render 時丟錯）；Worker 走 __WORKER_SRC__，用不到 import.meta.url
+const common = {
+  bundle: true,
+  minify: true,
+  target: 'es2020',
+  logLevel: 'error',
+  define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env.DEV': 'false', 'import.meta.env': '{}', 'import.meta.url': '""' },
+};
 
 const worker = await build({ ...common, entryPoints: ['src/volume/worker.ts'], format: 'iife', write: false });
 const app = await build({

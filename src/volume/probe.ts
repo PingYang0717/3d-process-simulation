@@ -166,52 +166,67 @@ function probeMove(s: EditState, req: ProbeReq): Probe {
       const T = S.slice();
       canFollow = shellFlood(vol, T, mat, liner) > 0;
     }
+    // 鄰居：集合裡的薄層＝跟著；集合外六鄰接、不是空的也不是同材質＝厚度會變
     for (let i = 0; i < S.length; i++) {
       if (!S[i]) continue;
       if (S[i] === 2) fol.add(data[i]);
       const x = i % X;
       const y = ((i - x) / X) % Y;
       const z = (i - x - y * X) / (X * Y);
-      const c = [x, y, z];
       const nb = [x > 0 ? i - 1 : -1, x < X - 1 ? i + 1 : -1, y > 0 ? i - X : -1, y < Y - 1 ? i + X : -1, z > 0 ? i - X * Y : -1, z < Z - 1 ? i + X * Y : -1];
       for (const j of nb) if (j >= 0 && !S[j] && !empty(data[j]) && data[j] !== mat) thin.add(data[j]);
-      PROBE_DIRS.forEach((d, di) => {
-        const room = rooms[di];
-        if (room.n === 0) return;
-        const a = d[0] ? 0 : d[1] ? 1 : 2;
-        const sg = d[a];
-        const st = a === 0 ? 1 : a === 1 ? X : X * Y;
-        const at = (t: number) => i + (t - c[a]) * st;
-        const t0 = c[a] + sg;
-        if (t0 >= 0 && t0 < dims[a] && S[at(t0)]) return; // 不是前緣
-        // 同一排前面還有集合的格子：夾在中間的那一段跟著移，只看第一格
-        let ahead = false;
-        for (let t = t0 + sg; t >= 0 && t < dims[a]; t += sg)
-          if (S[at(t)]) {
-            ahead = true;
-            break;
-          }
-        const lim = ahead ? 1 : room.n;
-        for (let q = 0; q < lim; q++) {
-          const t = t0 + q * sg;
-          let stop: Block | null = null;
-          if (t < 0 || t >= dims[a]) stop = { why: 'edge' };
-          else {
-            const mt = data[at(t)];
-            if (empty(mt)) continue;
-            if (mt === mat) stop = { why: 'self', mat: mt, at: at(t) };
-            else {
-              const t2 = t + sg;
-              if (t2 < 0 || t2 >= dims[a] || data[at(t2)] !== mt) stop = { why: 'last', mat: mt, at: at(t) };
+    }
+    // 六個方向：每個軸每一排走一次，收集合的連續段；每段的兩端各是一個前緣（O(裁切範圍)，不必對每個前緣再掃整排）
+    PROBE_DIRS.forEach((d, di) => {
+      const a = d[0] ? 0 : d[1] ? 1 : 2;
+      const sg = d[a];
+      const st = a === 0 ? 1 : a === 1 ? X : X * Y;
+      const len = dims[a];
+      const [u, v] = [0, 1, 2].filter((k) => k !== a);
+      const p = [0, 0, 0];
+      const runs: number[] = [];
+      for (p[u] = 0; p[u] < dims[u]; p[u]++)
+        for (p[v] = 0; p[v] < dims[v]; p[v]++) {
+          if (rooms[di].n === 0) return;
+          p[a] = 0;
+          const base = (p[2] * Y + p[1]) * X + p[0];
+          runs.length = 0;
+          for (let t = 0; t < len; t++)
+            if (S[base + t * st] && (t === 0 || !S[base + (t - 1) * st])) {
+              let e = t;
+              while (e + 1 < len && S[base + (e + 1) * st]) e++;
+              runs.push(t, e);
+              t = e;
+            }
+          if (!runs.length) continue;
+          const nr = runs.length / 2;
+          for (let r = 0; r < nr; r++) {
+            // 前緣：往 sg 走出這一段的第一格；同一排前面還有別段（中間夾著別的材質）＝那一段跟著移，只看第一格
+            const t0 = sg > 0 ? runs[2 * r + 1] + 1 : runs[2 * r] - 1;
+            const ahead = sg > 0 ? r < nr - 1 : r > 0;
+            const room = rooms[di];
+            const lim = ahead ? 1 : room.n;
+            for (let q = 0; q < lim; q++) {
+              const t = t0 + q * sg;
+              let stop: Block | null = null;
+              if (t < 0 || t >= len) stop = { why: 'edge' };
+              else {
+                const mt = data[base + t * st];
+                if (empty(mt)) continue;
+                if (mt === mat) stop = { why: 'self', mat: mt, at: base + t * st };
+                else {
+                  const t2 = t + sg;
+                  if (t2 < 0 || t2 >= len || data[base + t2 * st] !== mt) stop = { why: 'last', mat: mt, at: base + t * st };
+                }
+              }
+              if (stop) {
+                if (q < room.n) rooms[di] = { n: q, stop: stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : stop };
+                break;
+              }
             }
           }
-          if (stop) {
-            if (q < room.n) rooms[di] = { n: q, stop: stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : stop };
-            return;
-          }
         }
-      });
-    }
+    });
   }
   return { follow: sorted(fol), thin: sorted(thin), canFollow: canFollow || fol.size > 0, dirs: rooms };
 }

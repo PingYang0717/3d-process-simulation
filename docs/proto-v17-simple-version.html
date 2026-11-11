@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>簡化版畫面示意（v17，尚未開工）</title>
+<style>
+  :root {
+    --c-primary: #0b57d0; --c-primary-bg: #e8f1ff; --c-text: #1f2329; --c-text-2: #646a73;
+    --c-border: #e4e6eb; --c-bg: #f5f6f8; --c-surface: #fff; --c-up: #d46b08; --c-warn-bg: #fff8ec; --c-warn-border: #ffd591;
+    --poly: #e8604c; --hfo: #7fc8a9; --tin: #8e9aaf; --ild: #dcebd5; --fin: #f3b9a1; --sti: #9fd3e8; --sin: #c9b6e8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font: 13px/1.5 -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif; color: var(--c-text); background: var(--c-bg); display: flex; flex-direction: column; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .mock-note { flex: none; padding: 4px 12px; background: var(--c-warn-bg); border-bottom: 1px solid var(--c-warn-border); color: #ad4e00; font-size: 12px; }
+  .topbar { flex: none; height: 52px; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--c-surface); border-bottom: 1px solid var(--c-border); }
+  .brand { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .brand i { width: 26px; height: 26px; border-radius: 6px; background: var(--c-primary); display: inline-block; }
+  .file { color: var(--c-text-2); margin-left: 8px; }
+  .grow { flex: 1; }
+  .btn { height: 32px; padding: 0 12px; border: 1px solid var(--c-border); border-radius: 6px; background: var(--c-surface); white-space: nowrap; }
+  .btn:hover { border-color: var(--c-primary); color: var(--c-primary); }
+  .btn.primary { background: var(--c-primary); border-color: var(--c-primary); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .body { flex: 1; min-height: 0; display: flex; }
+  .left { flex: none; width: 300px; display: flex; flex-direction: column; background: var(--c-surface); border-right: 1px solid var(--c-border); }
+  .sec-title { padding: 10px 12px 6px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .num { width: 20px; height: 20px; border-radius: 50%; background: var(--c-primary); color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+  .list { flex: 1; min-height: 80px; overflow: auto; padding: 0 6px 6px; }
+  .grp { padding: 4px 6px; color: var(--c-text-2); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex: none; }
+  .item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 5px 8px 5px 26px; border-radius: 6px; }
+  .item:hover { background: rgba(0,0,0,.04); }
+  .item.on { background: var(--c-primary-bg); color: var(--c-primary); font-weight: 600; }
+  .panel { flex: none; border-top: 1px solid var(--c-border); padding-bottom: 12px; position: relative; }
+  .panel.off > :not(.sec-title):not(.empty) { opacity: .3; pointer-events: none; }
+  .empty { display: none; margin: 0 12px 8px; padding: 8px 10px; border-radius: 6px; background: var(--c-primary-bg); color: var(--c-primary); }
+  .panel.off .empty { display: block; }
+  .seg { display: flex; margin: 0 12px; padding: 2px; background: #f0f1f3; border-radius: 8px; }
+  .seg button { flex: 1; height: 32px; border: 0; background: none; border-radius: 6px; }
+  .seg button.on { background: var(--c-surface); box-shadow: 0 1px 2px rgba(0,0,0,.12); font-weight: 600; color: var(--c-primary); }
+  .row { margin: 12px 12px 0; }
+  .lbl { color: var(--c-text-2); font-size: 12px; margin-bottom: 4px; }
+  .faces { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+  .faces button, .dpad button { height: 30px; border: 1px solid var(--c-border); border-radius: 6px; background: var(--c-surface); }
+  .faces button.on { border-color: var(--c-up); background: #fff3e6; color: var(--c-up); font-weight: 600; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  .dpad button:hover { border-color: var(--c-up); color: var(--c-up); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .two button { height: 40px; border: 1px solid var(--c-border); border-radius: 8px; background: var(--c-surface); font-size: 14px; font-weight: 600; }
+  .two button:hover { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
+  .step { display: flex; align-items: center; gap: 6px; color: var(--c-text-2); font-size: 12px; margin-top: 6px; }
+  .step input { width: 52px; height: 26px; border: 1px solid var(--c-border); border-radius: 6px; text-align: center; font: inherit; }
+  .nb { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .nb button { border: 1px solid var(--c-border); border-radius: 8px; background: var(--c-surface); padding: 6px 4px 4px; text-align: center; }
+  .nb button.on { border-color: var(--c-primary); background: var(--c-primary-bg); color: var(--c-primary); font-weight: 600; }
+  .nb svg { display: block; margin: 2px auto 0; }
+  .who { margin-top: 6px; font-size: 12px; color: var(--c-text-2); }
+  .mats button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 5px 8px; border-radius: 6px; text-align: left; }
+  .mats button:hover { background: rgba(0,0,0,.04); }
+  .mats button.on::after { content: "✓ 目前"; margin-left: auto; color: var(--c-primary); font-size: 12px; }
+  .stage { flex: 1; min-width: 0; position: relative; background: #fbfbfc; }
+  .stage svg.scene { width: 100%; height: 100%; display: block; }
+  .hint { position: absolute; left: 12px; top: 12px; background: rgba(255,255,255,.92); border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.8; }
+  .hint b { color: var(--c-up); }
+  .views { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 4px; }
+  .tip { position: absolute; padding: 3px 8px; border-radius: 6px; background: var(--c-up); color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; }
+  .right { flex: none; width: 250px; display: flex; flex-direction: column; background: var(--c-surface); border-left: 1px solid var(--c-border); }
+  .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--c-border); }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--c-text-2); }
+  .pane-head input { flex: 1; min-width: 0; }
+  .pane svg { flex: 1; min-height: 0; width: 100%; }
+  .status { flex: none; height: 36px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--c-surface); border-top: 1px solid var(--c-border); }
+  .status a { color: var(--c-primary); cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="mock-note">畫面示意（v17 簡化版，尚未開工）：左欄可以點，用來確認排版與用字；3D 與切面是畫出來的示意圖，不是真的模型。規格見 docs/plan-v17-simple-version.md</div>
+
+<div class="topbar">
+  <span class="brand"><i></i>Section Editor 3D</span><span class="file">tcad.vti</span>
+  <span class="grow"></span>
+  <button class="btn">↶ 復原</button><button class="btn" disabled>↷ 重做</button>
+  <button class="btn">看原始</button><button class="btn">全部還原</button>
+  <button class="btn primary">⤓ 匯出 .vti</button>
+</div>
+
+<div class="body">
+  <div class="left">
+    <div class="sec-title"><span class="num">1</span>選一個結構</div>
+    <div class="list" id="list">
+      <div class="grp"><span class="sw" style="background:var(--fin)"></span>Si fin</div>
+      <button class="item" data-name="Si fin 1" data-mat="Si fin">Si fin 1</button>
+      <button class="item" data-name="Si fin 2" data-mat="Si fin">Si fin 2</button>
+      <div class="grp"><span class="sw" style="background:var(--poly)"></span>Poly-Si</div>
+      <button class="item" data-name="Poly-Si 1" data-mat="Poly-Si">Poly-Si 1</button>
+      <button class="item on" data-name="Poly-Si 2" data-mat="Poly-Si">Poly-Si 2</button>
+      <div class="grp"><span class="sw" style="background:var(--hfo)"></span>HfO₂</div>
+      <button class="item" data-name="HfO₂ 1" data-mat="HfO₂">HfO₂ 1</button>
+      <div class="grp"><span class="sw" style="background:var(--tin)"></span>TiN</div>
+      <button class="item" data-name="TiN 1" data-mat="TiN">TiN 1</button>
+      <div class="grp"><span class="sw" style="background:var(--ild)"></span>SiO₂ ILD</div>
+      <button class="item" data-name="SiO₂ ILD 1" data-mat="SiO₂ ILD">SiO₂ ILD 1</button>
+      <div class="grp" style="padding:8px 6px"><a id="clear" style="color:var(--c-primary);cursor:pointer">取消選取（看沒選時的樣子）</a></div>
+    </div>
+
+    <div class="panel" id="panel">
+      <div class="sec-title"><span class="num">2</span>要做什麼<span id="selname" style="font-weight:400;color:var(--c-text-2)"></span></div>
+      <div class="empty">先在 3D 或上面的清單點一個結構</div>
+      <div class="seg" id="tools">
+        <button class="on" data-tool="push">推拉一面</button>
+        <button data-tool="move">整塊平移</button>
+        <button data-tool="mat">換材質</button>
+      </div>
+
+      <div id="t-push">
+        <div class="row"><div class="lbl">哪一面（或直接點 3D 上的箭頭）</div>
+          <div class="faces" id="faces"><button class="on">上</button><button>下</button><button>左</button><button>右</button><button>前</button><button>後</button></div>
+        </div>
+        <div class="row two"><button data-act="內縮">← 內縮</button><button data-act="外推">外推 →</button></div>
+      </div>
+
+      <div id="t-move" hidden>
+        <div class="row"><div class="lbl">往哪邊搬（按一下搬一次，或在 3D 上拖箭頭）</div>
+          <div class="dpad" id="dpad"><button>上</button><button>左</button><button>前</button><button>下</button><button>右</button><button>後</button></div>
+        </div>
+      </div>
+
+      <div id="t-step" class="row step">每次 <input id="n" type="number" min="1" value="1"> 格 ＝ <span id="nm">0.5</span> nm</div>
+
+      <div id="t-nb" class="row">
+        <div class="lbl">相鄰材質</div>
+        <div class="nb" id="nb">
+          <button class="on" data-nb="follow">跟著移動
+            <svg width="92" height="46" viewBox="0 0 92 46"><rect x="6" y="2" width="80" height="6" fill="var(--ild)"/><rect x="6" y="8" width="80" height="12" fill="var(--hfo)"/><rect x="6" y="20" width="80" height="24" fill="var(--poly)"/><path d="M46 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg>
+            <span style="font-weight:400;font-size:11px">鄰居厚度不變</span>
+          </button>
+          <button data-nb="stay">留在原地
+            <svg width="92" height="46" viewBox="0 0 92 46"><rect x="6" y="2" width="80" height="14" fill="var(--ild)"/><rect x="6" y="16" width="80" height="4" fill="var(--hfo)"/><rect x="6" y="20" width="80" height="24" fill="var(--poly)"/><path d="M46 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg>
+            <span style="font-weight:400;font-size:11px">鄰居被蓋掉／補滿</span>
+          </button>
+        </div>
+        <div class="who" id="who"></div>
+      </div>
+
+      <div id="t-mat" hidden>
+        <div class="row"><div class="lbl">換成哪一種（點一下就換）</div>
+          <div class="mats" id="mats"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <svg class="scene" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet">
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#d46b08"/></marker></defs>
+      <!-- 基板 -->
+      <polygon points="120,420 520,420 680,330 280,330" fill="#e9e5da"/><polygon points="120,420 520,420 520,470 120,470" fill="#ddd8cb"/><polygon points="520,420 680,330 680,380 520,470" fill="#cfc9ba"/>
+      <!-- 兩根 fin -->
+      <g fill="var(--fin)"><polygon points="190,400 230,400 390,310 350,310" fill="#f7cdb9"/><polygon points="190,400 230,400 230,420 190,420"/>
+      <polygon points="370,400 410,400 570,310 530,310" fill="#f7cdb9"/><polygon points="370,400 410,400 410,420 370,420"/></g>
+      <!-- 後面的 poly -->
+      <g opacity=".55"><polygon points="250,300 610,300 640,283 280,283" fill="#f08a79"/><polygon points="250,300 610,300 610,372 250,372" fill="var(--poly)"/><polygon points="610,300 640,283 640,355 610,372" fill="#c94f3d"/></g>
+      <!-- 選到的 poly：薄層（HfO₂／TiN）包在外面 -->
+      <g id="sel3d">
+        <polygon points="150,318 530,318 566,298 186,298" fill="var(--hfo)"/><polygon points="150,318 530,318 530,410 150,410" fill="var(--tin)"/><polygon points="530,318 566,298 566,390 530,410" fill="#77839a"/>
+        <polygon points="156,324 524,324 556,306 188,306" fill="#f08a79"/><polygon points="156,324 524,324 524,410 156,410" fill="var(--poly)"/><polygon points="524,324 556,306 556,392 524,410" fill="#c94f3d"/>
+        <polygon points="156,324 524,324 556,306 188,306 156,324 156,410 524,410 556,392 556,306" fill="none" stroke="#0b57d0" stroke-width="2" stroke-dasharray="6 4"/>
+        <polygon id="faceTop" points="156,324 524,324 556,306 188,306" fill="#fa8c16" opacity=".55"/>
+        <g stroke="#d46b08" stroke-width="5" marker-end="url(#ah)" fill="none" stroke-linecap="round">
+          <path id="arrTop" d="M356 312V250"/><path d="M542 356h56" opacity=".45"/><path d="M340 372l-22 34" opacity=".45"/>
+        </g>
+        <text x="368" y="262" fill="#d46b08" font-size="14" font-weight="600">上</text>
+        <text x="606" y="361" fill="#d46b08" font-size="13" opacity=".7">右</text>
+        <text x="300" y="424" fill="#d46b08" font-size="13" opacity=".7">前</text>
+        <text x="160" y="290" fill="#0b57d0" font-size="13" font-weight="600" id="lbl3d">Poly-Si 2</text>
+      </g>
+    </svg>
+    <div class="hint"><b>點一下</b>＝選結構<br><b>拖箭頭</b>＝改（放開就完成）<br><b>拖別的地方</b>＝轉視角　滾輪＝縮放</div>
+    <div class="tip" id="tip" style="left:52%;top:36%">外推 2 格（1.0 nm）</div>
+    <div class="views"><button class="btn">正面</button><button class="btn">上面</button><button class="btn">側面</button><button class="btn">全貌</button></div>
+  </div>
+
+  <div class="right">
+    <div class="sec-title" style="font-weight:600">2D 切面<span style="font-weight:400;color:var(--c-text-2)">（只看，不能改）</span></div>
+    <div class="pane"><div class="pane-head">正面<input type="range" value="50"><span>48／96</span></div>
+      <svg viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet"><rect width="220" height="120" fill="var(--ild)"/><rect y="92" width="220" height="28" fill="#ddd8cb"/><rect y="78" width="220" height="14" fill="var(--sti)"/><rect x="60" y="50" width="14" height="42" fill="var(--fin)"/><rect x="146" y="50" width="14" height="42" fill="var(--fin)"/><path d="M20 78V34h180v44h-36V46h-22v32h-64V46h-22v32z" fill="var(--poly)" stroke="#0b57d0" stroke-width="1.5"/><rect x="20" y="24" width="180" height="10" fill="var(--sin)"/></svg></div>
+    <div class="pane"><div class="pane-head">上面<input type="range" value="40"><span>38／96</span></div>
+      <svg viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet"><rect width="220" height="120" fill="var(--ild)"/><rect x="60" width="14" height="120" fill="var(--fin)"/><rect x="146" width="14" height="120" fill="var(--fin)"/><rect x="20" y="20" width="180" height="22" fill="var(--poly)" opacity=".6"/><rect x="20" y="66" width="180" height="22" fill="var(--poly)" stroke="#0b57d0" stroke-width="1.5"/></svg></div>
+    <div class="pane"><div class="pane-head">側面<input type="range" value="60"><span>96／160</span></div>
+      <svg viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet"><rect width="220" height="120" fill="var(--ild)"/><rect y="92" width="220" height="28" fill="#ddd8cb"/><rect y="78" width="220" height="14" fill="var(--sti)"/><rect x="40" y="34" width="26" height="44" fill="var(--poly)" opacity=".6"/><rect x="126" y="34" width="26" height="44" fill="var(--poly)" stroke="#0b57d0" stroke-width="1.5"/><rect x="126" y="24" width="26" height="10" fill="var(--sin)"/></svg></div>
+  </div>
+</div>
+
+<div class="status"><span id="msg">Poly-Si 2 上面外推 1 格（0.5 nm）· HfO₂、TiN 跟著移動</span><a>復原</a></div>
+
+<script>
+const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)];
+const MATS = [['Si fin','--fin'],['Poly-Si','--poly'],['HfO₂','--hfo'],['TiN','--tin'],['SiN','--sin'],['SiO₂ ILD','--ild'],['STI SiO₂','--sti']];
+const st = { name: 'Poly-Si 2', mat: 'Poly-Si', tool: 'push', face: '上', nb: 'follow' };
+const n = () => Math.max(1, +$('#n').value || 1);
+const nm = (k) => (k * 0.5).toFixed(1);
+const nbText = () => (st.mat === 'Poly-Si' ? (st.nb === 'follow' ? 'HfO₂、TiN 跟著移動' : '鄰居留在原地') : st.nb === 'follow' ? '沒有會跟著的鄰居' : '鄰居留在原地');
+function render() {
+  const sel = !!st.name;
+  $('#panel').classList.toggle('off', !sel);
+  $('#selname').textContent = sel ? '：' + st.name : '';
+  $('#sel3d').style.display = sel ? '' : 'none';
+  $('#tip').style.display = sel && st.tool !== 'mat' ? '' : 'none';
+  $('#lbl3d').textContent = st.name || '';
+  $$('#list .item').forEach((b) => b.classList.toggle('on', b.dataset.name === st.name));
+  $$('#tools button').forEach((b) => b.classList.toggle('on', b.dataset.tool === st.tool));
+  $('#t-push').hidden = st.tool !== 'push';
+  $('#t-move').hidden = st.tool !== 'move';
+  $('#t-mat').hidden = st.tool !== 'mat';
+  $('#t-step').hidden = $('#t-nb').hidden = st.tool === 'mat';
+  $$('#faces button').forEach((b) => b.classList.toggle('on', b.textContent === st.face));
+  $$('#nb button').forEach((b) => b.classList.toggle('on', b.dataset.nb === st.nb));
+  $('#faceTop').style.display = st.tool === 'push' && st.face === '上' ? '' : 'none';
+  $('#nm').textContent = nm(n());
+  $('#who').textContent = st.mat === 'Poly-Si' ? (st.nb === 'follow' ? '會跟著的：HfO₂、TiN（滑過去 3D 會亮起來）' : 'HfO₂、TiN 不動，會被蓋掉或補滿') : '這一面沒有會跟著的薄層';
+  $('#tip').textContent = st.tool === 'move' ? `往${st.face}搬 ${n()} 格（${nm(n())} nm）` : `外推 ${n()} 格（${nm(n())} nm）`;
+  $('#mats').innerHTML = MATS.map(([m, c]) => `<button class="${m === st.mat ? 'on' : ''}" data-m="${m}"><span class="sw" style="background:var(${c})"></span>${m}</button>`).join('')
+    + '<button data-m="空氣"><span class="sw" style="background:#fff"></span>空氣</button><button data-m="空洞（VOID）"><span class="sw" style="background:#1f1f1f"></span>空洞（VOID）</button>';
+}
+const say = (t) => ($('#msg').textContent = t);
+$('#list').addEventListener('click', (e) => { const b = e.target.closest('.item'); if (b) { st.name = b.dataset.name; st.mat = b.dataset.mat; render(); } });
+$('#clear').onclick = () => { st.name = ''; render(); };
+$('#tools').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { st.tool = b.dataset.tool; render(); } });
+$('#faces').addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') { st.face = e.target.textContent; render(); } });
+$('#nb').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { st.nb = b.dataset.nb; render(); } });
+$('#n').addEventListener('input', render);
+$('#t-push').addEventListener('click', (e) => { const a = e.target.dataset.act; if (a) say(`${st.name} ${st.face}面${a} ${n()} 格（${nm(n())} nm）· ${nbText()}`); });
+$('#dpad').addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') { st.face = e.target.textContent; render(); say(`${st.name} 往${st.face}搬 ${n()} 格（${nm(n())} nm）· ${nbText()}`); } });
+$('#mats').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { say(`${st.name} 換成 ${b.dataset.m}`); st.mat = b.dataset.m; render(); } });
+render();
+</script>
+</body>
+</html>

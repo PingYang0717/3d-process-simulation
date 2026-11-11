@@ -303,25 +303,43 @@ function bbox(st, id) {
   for (let i = 0; i < N; i++) if (st.sid[i] === id) { const c = coord(i); for (let k = 0; k < 3; k++) { if (c[k] < lo[k]) lo[k] = c[k]; if (c[k] > hi[k]) hi[k] = c[k]; } }
   return hi[0] < 0 ? null : { lo, hi };
 }
-/** 外推一格：空氣就填；跟著移動＝薄層整列往外讓一格；否則蓋過去。 */
+/** 最近一次被擋下來的原因：{ why: 'edge' | 'last' | 'self', name }。 */
+let lastBlock = null;
+/**
+ * 往外一格會吃到 b 這一格：只有緊貼的那一層可以變薄，而且至少要留 1 格
+ * （不會把一層吃光、也不會動到更外面那一層）。空氣可以吃；出界、碰到自己不行。
+ */
+function canTake(st, b, a, s, id) {
+  if (b < 0) return { why: 'edge' };
+  if (st.mat[b] === AIR) return null;
+  const k = st.sid[b];
+  if (k === id) return { why: 'self' };
+  const b2 = next(b, a, s);
+  return b2 >= 0 && st.sid[b2] === k ? null : { why: 'last', name: st.structs[k].name };
+}
+/**
+ * 外推一格（整面一起，有一排推不動就整面不動）：
+ * 跟著移動＝貼著的薄層整列往外移一格，薄層外面那一層變薄一格；留在原地＝緊貼的那一層變薄一格。
+ */
 function grow1(st, id, a, s, follow) {
-  const M = st.structs[id].mat;
-  let done = 0;
+  const M = st.structs[id].mat, plan = [];
   for (const c of outer(st, id, a, s)) {
     const t = next(c, a, s);
-    if (t < 0) continue;
-    if (st.mat[t] !== AIR && follow) {
-      const L = liners(st, t, a, s, id);
-      for (let j = L.length - 1; j >= 0; j--) { const to = next(L[j], a, s); if (to >= 0) put(st, to, L[j]); }
-    }
-    st.mat[t] = M; st.sid[t] = id; done++;
+    const L = follow && t >= 0 ? liners(st, t, a, s, id) : [];
+    const block = canTake(st, L.length ? next(L[L.length - 1], a, s) : t, a, s, id);
+    if (block) { lastBlock = block; return 0; }
+    plan.push([t, L]);
   }
-  return done;
+  for (const [t, L] of plan) {
+    for (let j = L.length - 1; j >= 0; j--) put(st, next(L[j], a, s), L[j]);
+    st.mat[t] = M; st.sid[t] = id;
+  }
+  return plan.length;
 }
 /** 內縮一格：跟著移動＝薄層整列跟著退；空出來的由外面的材質補滿。 */
 function shrink1(st, id, a, s, follow) {
   const b = bbox(st, id);
-  if (!b || b.hi[a] - b.lo[a] < 1) return 0;
+  if (!b || b.hi[a] - b.lo[a] < 1) { lastBlock = { why: 'min' }; return 0; }
   let done = 0;
   for (const c of outer(st, id, a, s)) {
     const o = next(c, a, s);
@@ -334,26 +352,37 @@ function shrink1(st, id, a, s, follow) {
   }
   return done;
 }
-/** 包在結構外面的薄層（六個方向）。 */
+/** 包在結構外面的薄層：從結構出發，一路沿著相連的薄層收（轉角也收得到），碰到不是薄層的就停。 */
 function shellMask(st, id, mask) {
-  for (let i = 0; i < N; i++) {
-    if (st.sid[i] !== id) continue;
-    mask[i] = 1;
-    for (let a = 0; a < 3; a++) for (const s of [1, -1]) { const nb = next(i, a, s); if (nb >= 0 && st.sid[nb] !== id && st.mat[nb] !== AIR) for (const c of liners(st, nb, a, s, id)) mask[c] = 2; }
+  const queue = [];
+  for (let i = 0; i < N; i++) if (st.sid[i] === id) { mask[i] = 1; queue.push(i); }
+  while (queue.length) {
+    const i = queue.pop();
+    for (let a = 0; a < 3; a++) for (const s of [1, -1]) {
+      const nb = next(i, a, s);
+      if (nb < 0 || mask[nb]) continue;
+      const k = st.sid[nb];
+      if (k && k !== id && st.structs[k].thin) { mask[nb] = 2; queue.push(nb); }
+    }
   }
 }
-/** 整塊搬一格：前面的被蓋掉，後面空出來的由後面的材質補滿；跟著移動＝外面的薄層一起搬。 */
+/** 整塊搬一格：前面緊貼的那一層變薄、後面空出來的由後面的材質補滿；跟著移動＝外面的薄層一起搬。 */
 function move1(st, id, a, s, follow) {
   const mask = new Uint8Array(N);
   if (follow) shellMask(st, id, mask); else for (let i = 0; i < N; i++) if (st.sid[i] === id) mask[i] = 1;
   const cells = [];
-  for (let i = 0; i < N; i++) if (mask[i]) { if (mask[i] === 1 && next(i, a, s) < 0) return 0; cells.push(i); }
+  for (let i = 0; i < N; i++) {
+    if (!mask[i]) continue;
+    const t = next(i, a, s);
+    if (t < 0 || !mask[t]) { const block = canTake(st, t, a, s, id); if (block) { lastBlock = block; return 0; } }
+    cells.push(i);
+  }
   if (!cells.length) return 0;
   const mats = cells.map((i) => st.mat[i]), sids = cells.map((i) => st.sid[i]);
   const fills = cells.map((i) => { let j = i; do j = next(j, a, -s); while (j >= 0 && mask[j]); return j; });
   const fm = fills.map((j) => (j >= 0 ? st.mat[j] : AIR)), fs = fills.map((j) => (j >= 0 ? st.sid[j] : 0));
   cells.forEach((i, k) => { st.mat[i] = fm[k]; st.sid[i] = fs[k]; });
-  for (const pass of [2, 1]) cells.forEach((i, k) => { if (mask[i] !== pass) return; const t = next(i, a, s); if (t >= 0) { st.mat[t] = mats[k]; st.sid[t] = sids[k]; } });
+  for (const pass of [2, 1]) cells.forEach((i, k) => { if (mask[i] === pass) { const t = next(i, a, s); st.mat[t] = mats[k]; st.sid[t] = sids[k]; } });
   return cells.length;
 }
 /** 套用一步，回傳實際做了幾格（帶正負號）。 */
@@ -370,6 +399,7 @@ function applyOp(st, op) {
   }
   const f = FACES[op.face], sign = Math.sign(op.n);
   let k = 0;
+  lastBlock = null;
   for (; k < Math.abs(op.n); k++) {
     const ok = op.kind === 'move' ? move1(st, op.id, f.a, f.s * sign, op.follow) : sign > 0 ? grow1(st, op.id, f.a, f.s, op.follow) : shrink1(st, op.id, f.a, f.s, op.follow);
     if (!ok) break;
@@ -405,6 +435,13 @@ function neighbors(st, id, kind, face, follow) {
   }
   return { follow: matNames(fol), stay: matNames(stay), sids };
 }
+const limitText = (b) => !b ? '' : b.why === 'edge' ? '到模型邊界為止' : b.why === 'self' ? '到碰到自己為止' : `到 ${b.name} 剩 1 格為止`;
+const blockText = (b) => !b ? '' : b.why === 'edge' ? '已經到模型邊界' : b.why === 'self' ? '會碰到自己' : b.why === 'min' ? '已經縮到最小' : `${b.name} 只剩 1 格`;
+/** 這個方向最多還能做幾格、被什麼擋住（在複本上試，不動到模型）。 */
+function roomOf(st, op) {
+  const t = cloneSt(st), n = Math.abs(applyOp(t, { ...op, n: Math.sign(op.n) * 60 }));
+  return { n, block: lastBlock };
+}
 /** 這一步之後，沒有跟著動的鄰居誰被蓋掉、誰補上空出來的地方。 */
 function effects(before, after, id, folSids) {
   const lost = new Set(), gained = new Set();
@@ -432,15 +469,16 @@ const stepN = () => Math.max(1, Math.min(20, Math.round(+$('#n').value) || 1));
 const nm = (k) => (Math.abs(k) * NM).toFixed(1);
 const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', id: ui.sel, face, n, follow: ui.nb === 'follow' });
 
-/** 一步的說明：第一句是做了什麼，後面每一句是一種鄰居怎麼了（都寫出幾格）。 */
-function describe(op, n, name, nb, eff) {
+/** 一步的說明：第一句是做了什麼，後面每一句是一種鄰居怎麼了（都寫出幾格）；沒做滿再加一句為什麼。 */
+function describe(op, n, name, nb, eff, block) {
   if (op.kind === 'mat') return [`${name} 換成 ${MATS[op.mat].name}（現在叫 ${model.structs[op.id].name}）`];
   const k = Math.abs(n), parts = [];
   parts.push(op.kind === 'push' ? `${name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${k} 格（${nm(n)} nm）` : `${name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${k} 格（${nm(n)} nm）`);
   if (op.follow && nb.follow.length) parts.push(`${nb.follow.join('、')} 跟著移動 ${k} 格`);
-  if (eff.lost.length) parts.push(`${eff.lost.join('、')} 被蓋掉 ${k} 格`);
-  if (eff.gained.length) parts.push(`${eff.gained.join('、')} 補上 ${k} 格`);
-  if (eff.both.length) parts.push(`${eff.both.join('、')} 一側被蓋掉、另一側補上 ${k} 格`);
+  if (eff.lost.length) parts.push(`${eff.lost.join('、')} 變薄 ${k} 格`);
+  if (eff.gained.length) parts.push(`${eff.gained.join('、')} 變厚 ${k} 格`);
+  if (eff.both.length) parts.push(`${eff.both.join('、')} 一側變薄、另一側變厚 ${k} 格`);
+  if (k < Math.abs(op.n) && block) parts.push(`只做了 ${k} 格：${blockText(block)}`);
   return parts;
 }
 function say(t, canUndo) { $('#msg').textContent = t; $('#undo2').hidden = !canUndo; }
@@ -449,8 +487,9 @@ function commit(op) {
   const nb = op.kind === 'mat' ? null : neighbors(model, op.id, op.kind, op.n > 0 || op.kind === 'push' ? op.face : FACES[op.face].opp, op.follow);
   const name = model.structs[op.id].name;
   const n = applyOp(model, op);
-  if (!n) { model = before; say(op.kind === 'mat' ? '已經是這個材質' : op.kind === 'push' && op.n < 0 ? '已經縮到最小' : '已經到模型邊界', false); return render(); }
-  const parts = describe(op, n, name, nb, nb && effects(before, model, op.id, nb.sids)), text = parts.join(' · ');
+  const block = lastBlock;
+  if (!n) { model = before; say(op.kind === 'mat' ? '已經是這個材質' : `擋下來了：${blockText(block)}`, false); return render(); }
+  const parts = describe(op, n, name, nb, nb && effects(before, model, op.id, nb.sids), block), text = parts.join(' · ');
   undoStack.push({ st: before, text, parts, id: op.id, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
   say(text, true);
   render();
@@ -634,7 +673,7 @@ host.addEventListener('pointermove', (e) => {
   if (want !== drag.want) { drag.want = want; drag.live = cloneSt(model); drag.n = want ? applyOp(drag.live, curOp(drag.face, want)) : 0; draw3d(drag.live); draw2d(drag.live); }
   const tip = $('#tip'), f = FACES[drag.face];
   tip.hidden = false; tip.style.left = e.clientX + 16 + 'px'; tip.style.top = e.clientY - 28 + 'px';
-  tip.textContent = !drag.n ? (want ? '到底了' : '順著箭頭拖＝外推，反方向＝內縮') : ui.tool === 'move' ? `往${drag.n > 0 ? drag.face : f.opp}搬 ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）` : `${drag.n > 0 ? '外推' : '內縮'} ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）`;
+  tip.textContent = !drag.n ? (want ? `擋下來了：${blockText(lastBlock)}` : '順著箭頭拖＝外推，反方向＝內縮') : ui.tool === 'move' ? `往${drag.n > 0 ? drag.face : f.opp}搬 ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）` : `${drag.n > 0 ? '外推' : '內縮'} ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）`;
 });
 host.addEventListener('pointerup', (e) => {
   if (drag) { const d = drag; drag = null; $('#tip').hidden = true; if (d.n) commit(curOp(d.face, d.n)); else render(); return; }
@@ -719,21 +758,25 @@ function drawPanel(st) {
   $('#nm').textContent = nm(stepN());
   $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length;
   if (!sel || !b) return;
-  const atEdge = (face) => { const f = FACES[face]; return f.s > 0 ? b.hi[f.a] >= DIM[f.a] - 1 : b.lo[f.a] <= 0; };
-  const f = FACES[ui.face];
   $('#faces').innerHTML = Object.keys(FACES).map((k) => `<button class="${k === ui.face ? 'on' : ''}">${k}</button>`).join('');
   $('#grow').textContent = `${ui.face}面外推 ${stepN()} 格`; $('#shrink').textContent = `${ui.face}面內縮 ${stepN()} 格`;
-  $('#grow').disabled = atEdge(ui.face); $('#grow').title = atEdge(ui.face) ? '已經到模型邊界' : '';
-  $('#shrink').disabled = b.hi[f.a] - b.lo[f.a] < 1; $('#shrink').title = $('#shrink').disabled ? '已經縮到最小' : '';
-  $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((k) => `<button ${atEdge(k) ? 'disabled title="已經到模型邊界"' : ''}>${k}</button>`).join('');
   if (ui.tool !== 'mat') {
     const can = neighbors(st, sel.id, ui.tool, ui.face, true).follow.length > 0; // 有沒有薄層可以跟
     const on = can && ui.nb === 'follow', nb = neighbors(st, sel.id, ui.tool, ui.face, on);
     for (const x of $('#nb').children) { x.classList.toggle('on', can && x.dataset.nb === ui.nb); x.disabled = !can; }
+    // 事先算好每個方向還能做幾格、被什麼擋住：做不到的按鈕反灰，滑過去看原因
+    const room = (kind, face, sign) => roomOf(st, { kind, id: sel.id, face, n: sign, follow: on });
     const lines = [];
     if (nb.follow.length) lines.push(`跟著移動：${nb.follow.join('、')}`);
-    if (nb.stay.length) lines.push(`${on ? '固定不動' : '留在原地'}：${nb.stay.join('、')}`);
-    if (!lines.length) lines.push(ui.tool === 'move' ? '外面沒有相鄰的材質' : `${ui.face}面外面沒有相鄰的材質`);
+    if (nb.stay.length) lines.push(`厚度會變：${nb.stay.join('、')}`);
+    if (ui.tool === 'push') {
+      const out = room('push', ui.face, 1), inn = room('push', ui.face, -1);
+      $('#grow').disabled = !out.n; $('#grow').title = out.n ? '' : blockText(out.block);
+      $('#shrink').disabled = !inn.n; $('#shrink').title = inn.n ? '' : blockText(inn.block);
+      lines.push(out.n ? `最多可外推 ${out.n} 格（${limitText(out.block)}）` : `不能外推：${blockText(out.block)}${out.block?.why === 'last' ? `（先把 ${out.block.name} 往外推）` : ''}`);
+    } else {
+      $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((k) => { const r = room('move', k, 1); return `<button ${r.n ? `title="最多 ${r.n} 格"` : `disabled title="${blockText(r.block)}"`}>${k}</button>`; }).join('');
+    }
     $('#who').innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
   }
   $('#mats').innerHTML = MATS.map((m, k) => `<button class="${k === sel.mat ? 'on' : ''}" data-m="${k}"><span class="sw" style="background:${m.color}"></span>${m.name}</button>`).join('');

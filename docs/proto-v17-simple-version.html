@@ -89,6 +89,7 @@
   .ch:hover { background: rgba(0,0,0,.04); }
   .ch .no { flex: none; width: 18px; height: 18px; border-radius: 50%; background: #f0f1f3; color: var(--c-text-2); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
   .ch .tx { flex: 1; min-width: 0; }
+  .ch .sub { color: var(--c-text-2); }
   .ch small { flex: none; color: var(--c-text-2); }
   .sec-title { padding: 12px 16px 8px; font-weight: 600; font-size: 14px; }
   .sec-title small { font-weight: 400; font-size: 13px; color: var(--c-text-2); }
@@ -355,11 +356,45 @@ function applyOp(st, op) {
   return k * sign;
 }
 /** 會跟著的鄰居（材質名稱，依碰到的順序）。 */
-function followers(st, id, tool, face) {
-  const M = st.structs[id].mat, seen = new Set();
-  if (tool === 'move') { const mask = new Uint8Array(N); shellMask(st, id, mask); for (let i = 0; i < N; i++) if (mask[i] === 2) seen.add(st.mat[i]); }
-  else { const f = FACES[face]; for (const c of outer(st, id, f.a, f.s)) { const t = next(c, f.a, f.s); if (t >= 0 && st.mat[t] !== AIR) for (const l of liners(st, t, f.a, f.s, M)) seen.add(st.mat[l]); } }
-  return [...seen].sort((p, q) => p - q).map((m) => MATS[m].name);
+const matNames = (set) => [...set].sort((p, q) => p - q).map((m) => MATS[m].name);
+/**
+ * 這一步會碰到的鄰居。follow＝開著「跟著移動」時：薄層（follow）一起動，薄層外面厚的那一層（stay）不動；
+ * 關著時：貼著的全部留在原地（stay）。sids＝會跟著的結構。
+ */
+function neighbors(st, id, kind, face, follow) {
+  const M = st.structs[id].mat, fol = new Set(), stay = new Set(), sids = new Set();
+  if (kind === 'move') {
+    const mask = new Uint8Array(N);
+    if (follow) shellMask(st, id, mask); else for (let i = 0; i < N; i++) if (st.sid[i] === id) mask[i] = 1;
+    for (let i = 0; i < N; i++) {
+      if (!mask[i]) continue;
+      if (mask[i] === 2) { fol.add(st.mat[i]); sids.add(st.sid[i]); }
+      for (let a = 0; a < 3; a++) for (const s of [1, -1]) { const nb = next(i, a, s); if (nb >= 0 && !mask[nb] && st.mat[nb] !== AIR) stay.add(st.mat[nb]); }
+    }
+  } else {
+    const f = FACES[face];
+    for (const c of outer(st, id, f.a, f.s)) {
+      const t = next(c, f.a, f.s);
+      if (t < 0 || st.mat[t] === AIR) continue;
+      const L = follow ? liners(st, t, f.a, f.s, M) : [];
+      for (const l of L) { fol.add(st.mat[l]); sids.add(st.sid[l]); }
+      const b = L.length ? next(L[L.length - 1], f.a, f.s) : t;
+      if (b >= 0 && st.mat[b] !== AIR && st.sid[b] !== id) stay.add(st.mat[b]);
+    }
+  }
+  return { follow: matNames(fol), stay: matNames(stay), sids };
+}
+/** 這一步之後，沒有跟著動的鄰居誰被蓋掉、誰補上空出來的地方。 */
+function effects(before, after, id, folSids) {
+  const lost = new Set(), gained = new Set();
+  for (let i = 0; i < N; i++) {
+    const b = before.sid[i], a = after.sid[i];
+    if (a === b) continue;
+    if (b && b !== id && !folSids.has(b)) lost.add(before.mat[i]);
+    if (a && a !== id && !folSids.has(a)) gained.add(after.mat[i]);
+  }
+  const both = new Set([...lost].filter((m) => gained.has(m)));
+  return { lost: matNames([...lost].filter((m) => !both.has(m))), gained: matNames([...gained].filter((m) => !both.has(m))), both: matNames(both) };
 }
 
 // ---------------------------------------------------------------- 狀態
@@ -376,22 +411,26 @@ const stepN = () => Math.max(1, Math.min(20, Math.round(+$('#n').value) || 1));
 const nm = (k) => (Math.abs(k) * NM).toFixed(1);
 const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', id: ui.sel, face, n, follow: ui.nb === 'follow' });
 
-function describe(op, n, fol, name) {
-  const s = { name };
-  if (op.kind === 'mat') return `${name} 換成 ${MATS[op.mat].name}（現在叫 ${model.structs[op.id].name}）`;
-  const nb = !fol.length ? '' : op.follow ? `· ${fol.join('、')} 跟著移動` : `· ${fol.join('、')} 留在原地`;
-  if (op.kind === 'push') return `${s.name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${Math.abs(n)} 格（${nm(n)} nm）${nb}`;
-  return `${s.name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${Math.abs(n)} 格（${nm(n)} nm）${nb}`;
+/** 一步的說明：第一句是做了什麼，後面每一句是一種鄰居怎麼了（都寫出幾格）。 */
+function describe(op, n, name, nb, eff) {
+  if (op.kind === 'mat') return [`${name} 換成 ${MATS[op.mat].name}（現在叫 ${model.structs[op.id].name}）`];
+  const k = Math.abs(n), parts = [];
+  parts.push(op.kind === 'push' ? `${name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${k} 格（${nm(n)} nm）` : `${name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${k} 格（${nm(n)} nm）`);
+  if (op.follow && nb.follow.length) parts.push(`${nb.follow.join('、')} 跟著移動 ${k} 格`);
+  if (eff.lost.length) parts.push(`${eff.lost.join('、')} 被蓋掉 ${k} 格`);
+  if (eff.gained.length) parts.push(`${eff.gained.join('、')} 補上 ${k} 格`);
+  if (eff.both.length) parts.push(`${eff.both.join('、')} 一側被蓋掉、另一側補上 ${k} 格`);
+  return parts;
 }
 function say(t, canUndo) { $('#msg').textContent = t; $('#undo2').hidden = !canUndo; }
 function commit(op) {
   const before = cloneSt(model);
-  const fol = op.kind === 'mat' ? [] : followers(model, op.id, op.kind, op.n > 0 ? op.face : op.kind === 'move' ? FACES[op.face].opp : op.face);
+  const nb = op.kind === 'mat' ? null : neighbors(model, op.id, op.kind, op.n > 0 || op.kind === 'push' ? op.face : FACES[op.face].opp, op.follow);
   const name = model.structs[op.id].name;
   const n = applyOp(model, op);
   if (!n) { model = before; say(op.kind === 'mat' ? '已經是這個材質' : op.kind === 'push' && op.n < 0 ? '已經縮到最小' : '已經到模型邊界', false); return render(); }
-  const text = describe(op, n, fol, name);
-  undoStack.push({ st: before, text, id: op.id, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
+  const parts = describe(op, n, name, nb, nb && effects(before, model, op.id, nb.sids)), text = parts.join(' · ');
+  undoStack.push({ st: before, text, parts, id: op.id, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
   say(text, true);
   render();
 }
@@ -643,9 +682,10 @@ function drawPanel(st) {
   }).join('');
   const steps = undoStack.filter((e) => !e.reset);
   $('#ch-list').innerHTML = steps.length
-    ? steps.map((e, k) => `<button class="ch" data-id="${e.id}" title="點一下選這個結構"><span class="no">${k + 1}</span><span class="tx">${e.text}</span><small>${e.cells.toLocaleString()} 格</small></button>`).join('')
+    ? steps.map((e, k) => `<button class="ch" data-id="${e.id}" title="點一下選這個結構"><span class="no">${k + 1}</span><span class="tx">${e.parts[0]}${e.parts.slice(1).map((t) => `<div class="sub">${t}</div>`).join('')}</span><small>${e.cells.toLocaleString()} 體素</small></button>`).join('')
     : '<div class="ch-empty">還沒有改動。每做一步，這裡會多一行。</div>';
-  $('#ch-sum').textContent = steps.length ? `${steps.length} 步 · 和原始差 ${diffCount(model, ORIG).toLocaleString()} 格` : '';
+  if ($('#ch-list').dataset.n !== String(steps.length)) { $('#ch-list').dataset.n = steps.length; $('#ch-list').scrollTop = 1e6; } // 新的一步捲到看得到
+  $('#ch-sum').textContent = steps.length ? `${steps.length} 步 · 和原始差 ${diffCount(model, ORIG).toLocaleString()} 體素` : '';
   $('#reset').hidden = !steps.length; $('#foot').classList.toggle('changed', steps.length > 0);
   const sel = ui.sel ? st.structs[ui.sel] : null, b = sel && bbox(st, sel.id);
   $('#sel-foot').textContent = sel ? `已選 ${sel.name}` : '還沒選取結構';
@@ -665,9 +705,16 @@ function drawPanel(st) {
   $('#grow').disabled = atEdge(ui.face); $('#grow').title = atEdge(ui.face) ? '已經到模型邊界' : '';
   $('#shrink').disabled = b.hi[f.a] - b.lo[f.a] < 1; $('#shrink').title = $('#shrink').disabled ? '已經縮到最小' : '';
   $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((k) => `<button ${atEdge(k) ? 'disabled title="已經到模型邊界"' : ''}>${k}</button>`).join('');
-  const fol = ui.tool === 'mat' ? [] : followers(st, sel.id, ui.tool, ui.face);
-  for (const x of $('#nb').children) { x.classList.toggle('on', x.dataset.nb === ui.nb && fol.length > 0); x.disabled = !fol.length; }
-  $('#who').textContent = !fol.length ? (ui.tool === 'move' ? '沒有相鄰的薄層' : `${ui.face}面沒有相鄰的薄層`) : `${ui.nb === 'follow' ? '跟著移動' : '留在原地'}：${fol.join('、')}`;
+  if (ui.tool !== 'mat') {
+    const can = neighbors(st, sel.id, ui.tool, ui.face, true).follow.length > 0; // 有沒有薄層可以跟
+    const on = can && ui.nb === 'follow', nb = neighbors(st, sel.id, ui.tool, ui.face, on);
+    for (const x of $('#nb').children) { x.classList.toggle('on', can && x.dataset.nb === ui.nb); x.disabled = !can; }
+    const lines = [];
+    if (nb.follow.length) lines.push(`跟著移動：${nb.follow.join('、')}`);
+    if (nb.stay.length) lines.push(`留在原地：${nb.stay.join('、')}${on ? `（比 ${LINER_MAX} 格厚，不會跟）` : ''}`);
+    if (!lines.length) lines.push(ui.tool === 'move' ? '外面沒有相鄰的材質' : `${ui.face}面外面沒有相鄰的材質`);
+    $('#who').innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
+  }
   $('#mats').innerHTML = MATS.map((m, k) => `<button class="${k === sel.mat ? 'on' : ''}" data-m="${k}"><span class="sw" style="background:${m.color}"></span>${m.name}</button>`).join('');
 }
 function render() { const st = shown(); draw3d(st); draw2d(st); drawPanel(st); }

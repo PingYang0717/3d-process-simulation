@@ -11,6 +11,7 @@
     --c-warn-bg: #fff8ec; --c-warn-border: #ffd591; --shadow-sm: 0 1px 2px rgba(0,0,0,.06); --radius: 6px; --radius-lg: 8px;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; overflow: hidden; }
   body { font: 13px/1.5 -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif; color: var(--c-text); background: var(--c-bg); display: flex; flex-direction: column; font-feature-settings: "tnum"; }
   button { font: inherit; color: inherit; cursor: pointer; }
@@ -33,7 +34,13 @@
   .sider-head { display: flex; align-items: baseline; justify-content: space-between; padding: 12px 16px 8px; font-weight: 600; }
   .sider-head small { font-weight: 400; font-size: 12px; color: var(--c-text-2); }
   .list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 8px; }
-  .grp { padding: 6px 8px 2px; display: flex; align-items: center; gap: 8px; font-weight: 500; }
+  .grp { width: 100%; border: 0; background: none; text-align: left; padding: 5px 8px 3px; border-radius: var(--radius); display: flex; align-items: center; gap: 8px; font-weight: 500; }
+  .grp:hover { background: rgba(0,0,0,.04); }
+  .grp .eye { display: inline-flex; color: var(--c-text-2); }
+  .grp.hid { color: #a0a4ab; }
+  .grp.hid .sw { background: transparent !important; border-style: dashed; }
+  .grp.hid ~ .item { }
+  .item.hid { color: #a0a4ab; }
   .grp small { margin-left: auto; color: var(--c-text-2); font-size: 12px; font-weight: 400; }
   .sw { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex: none; }
   .item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 3px 8px 3px 30px; border-radius: var(--radius); font-size: 12px; color: var(--c-text-soft); }
@@ -70,7 +77,19 @@
 
   /* 右欄：原版的 Inspector 換成簡化的動作面板 */
   .inspector { flex: none; width: 330px; display: flex; flex-direction: column; background: var(--c-surface); border-left: 1px solid var(--c-border-2); }
-  .panel { flex: 1; min-height: 0; overflow: auto; padding-bottom: 12px; }
+  .panel { flex: none; max-height: 64%; overflow: auto; padding-bottom: 14px; }
+  .changes { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--c-border-2); }
+  .ch-head { flex: none; display: flex; align-items: baseline; gap: 8px; padding: 10px 16px 6px; }
+  .ch-head b { font-size: 14px; font-weight: 600; }
+  .ch-head small { color: var(--c-text-2); font-size: 12px; }
+  .ch-head a { color: var(--c-primary); cursor: pointer; font-size: 12px; white-space: nowrap; }
+  .ch-list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 8px; }
+  .ch-empty { padding: 4px 8px; color: var(--c-text-2); font-size: 12px; }
+  .ch { display: flex; gap: 8px; align-items: baseline; width: 100%; border: 0; background: none; text-align: left; padding: 5px 8px; border-radius: var(--radius); font-size: 12px; }
+  .ch:hover { background: rgba(0,0,0,.04); }
+  .ch .no { flex: none; width: 18px; height: 18px; border-radius: 50%; background: #f0f1f3; color: var(--c-text-2); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
+  .ch .tx { flex: 1; min-width: 0; }
+  .ch small { flex: none; color: var(--c-text-2); }
   .sec-title { padding: 12px 16px 8px; font-weight: 600; font-size: 14px; }
   .sec-title small { font-weight: 400; font-size: 13px; color: var(--c-text-2); }
   .panel.off > :not(.sec-title):not(.empty) { opacity: .3; pointer-events: none; }
@@ -121,7 +140,7 @@
 
 <div class="body">
   <div class="sider">
-    <div class="sider-head">結構<small>點一下選取</small></div>
+    <div class="sider-head">結構<small>點材質＝顯示／隱藏</small></div>
     <div class="list" id="list"></div>
     <div class="sider-foot" id="sel-foot"></div>
   </div>
@@ -173,7 +192,11 @@
         <div class="row"><div class="lbl">換成哪一種（點一下就換）</div><div class="mats" id="mats"></div></div>
       </div>
     </div>
-    <div class="insp-foot" id="foot"><span class="dot"></span><span id="msg" class="grow">尚未改動，輸出與原始相同</span><a id="undo2" hidden>復原</a><a id="reset" hidden>全部還原</a></div>
+    <div class="changes">
+      <div class="ch-head"><b>改了哪些</b><small id="ch-sum"></small><span class="grow"></span><a id="reset" hidden>全部還原</a></div>
+      <div class="ch-list" id="ch-list"></div>
+    </div>
+    <div class="insp-foot" id="foot"><span class="dot"></span><span id="msg" class="grow">尚未改動，輸出與原始相同</span><a id="undo2" hidden>復原</a></div>
   </div>
 </div>
 <div class="tip" id="tip" hidden></div>
@@ -313,7 +336,16 @@ function move1(st, id, a, s, follow) {
 }
 /** 套用一步，回傳實際做了幾格（帶正負號）。 */
 function applyOp(st, op) {
-  if (op.kind === 'mat') { st.structs[op.id].mat = op.mat; for (let i = 0; i < N; i++) if (st.sid[i] === op.id) st.mat[i] = op.mat; return 1; }
+  if (op.kind === 'mat') {
+    const s = st.structs[op.id];
+    if (s.mat === op.mat) return 0;
+    s.mat = op.mat;
+    for (let i = 0; i < N; i++) if (st.sid[i] === op.id) st.mat[i] = op.mat;
+    let k = 1; // 名字跟著材質換：SiN 1 → SiGe 1
+    while (st.structs.some((t) => t && t !== s && t.name === `${MATS[op.mat].name} ${k}`)) k++;
+    s.name = `${MATS[op.mat].name} ${k}`;
+    return 1;
+  }
   const f = FACES[op.face], sign = Math.sign(op.n);
   let k = 0;
   for (; k < Math.abs(op.n); k++) {
@@ -331,8 +363,12 @@ function followers(st, id, tool, face) {
 }
 
 // ---------------------------------------------------------------- 狀態
+const EYE_ON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l18 18M10.6 5.1A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.5 6.6C3.7 8.5 2 12 2 12s3.6 7 10 7c1.6 0 3-.4 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.200 4.200"/></svg>';
 const ORIG = initial();
-let model = cloneSt(ORIG), undoStack = [], redoStack = [];
+let model = cloneSt(ORIG), undoStack = [], redoStack = []; // 每一筆：{ st: 這一步之前的狀態, text, id, cells }
+const hidden = new Set(); // 在 3D 隱藏的材質
+const diffCount = (a, b) => { let n = 0; for (let i = 0; i < N; i++) if (a.mat[i] !== b.mat[i]) n++; return n; };
 const ui = { sel: 0, tool: 'push', face: '上', nb: 'follow', cur: [24, 20, 12], before: false };
 let drag = null;
 const shown = () => (ui.before ? ORIG : drag ? drag.live : model);
@@ -340,9 +376,9 @@ const stepN = () => Math.max(1, Math.min(20, Math.round(+$('#n').value) || 1));
 const nm = (k) => (Math.abs(k) * NM).toFixed(1);
 const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', id: ui.sel, face, n, follow: ui.nb === 'follow' });
 
-function describe(op, n, fol) {
-  const s = model.structs[op.id];
-  if (op.kind === 'mat') return `${s.name} 換成 ${MATS[op.mat].name}`;
+function describe(op, n, fol, name) {
+  const s = { name };
+  if (op.kind === 'mat') return `${name} 換成 ${MATS[op.mat].name}（現在叫 ${model.structs[op.id].name}）`;
   const nb = !fol.length ? '' : op.follow ? `· ${fol.join('、')} 跟著移動` : `· ${fol.join('、')} 留在原地`;
   if (op.kind === 'push') return `${s.name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${Math.abs(n)} 格（${nm(n)} nm）${nb}`;
   return `${s.name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${Math.abs(n)} 格（${nm(n)} nm）${nb}`;
@@ -351,16 +387,30 @@ function say(t, canUndo) { $('#msg').textContent = t; $('#undo2').hidden = !canU
 function commit(op) {
   const before = cloneSt(model);
   const fol = op.kind === 'mat' ? [] : followers(model, op.id, op.kind, op.n > 0 ? op.face : op.kind === 'move' ? FACES[op.face].opp : op.face);
+  const name = model.structs[op.id].name;
   const n = applyOp(model, op);
-  if (!n) { model = before; say(op.kind === 'push' && op.n < 0 ? '已經縮到最小' : '已經到模型邊界', false); return render(); }
-  undoStack.push(before); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
-  say(describe(op, n, fol), true);
+  if (!n) { model = before; say(op.kind === 'mat' ? '已經是這個材質' : op.kind === 'push' && op.n < 0 ? '已經縮到最小' : '已經到模型邊界', false); return render(); }
+  const text = describe(op, n, fol, name);
+  undoStack.push({ st: before, text, id: op.id, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
+  say(text, true);
   render();
 }
-function undo() { if (!undoStack.length) return; redoStack.push(model); model = undoStack.pop(); say('已復原上一步', false); render(); }
-function redo() { if (!redoStack.length) return; undoStack.push(model); model = redoStack.pop(); say('已重做', true); render(); }
+function undo() {
+  if (!undoStack.length) return;
+  const e = undoStack.pop();
+  redoStack.push({ ...e, st: model }); model = e.st;
+  if (e.reset) undoStack = e.prev;
+  say(e.reset ? '已取消全部還原' : `已復原：${e.text}`, false); render();
+}
+function redo() {
+  if (!redoStack.length) return;
+  const e = redoStack.pop();
+  if (e.reset) undoStack = [{ ...e, st: model, prev: undoStack }]; else undoStack.push({ ...e, st: model });
+  model = e.st; say(`已重做：${e.text}`, true); render();
+}
 function select(id, moveCursor = true) {
   ui.sel = id || 0;
+  if (ui.sel) hidden.delete(model.structs[ui.sel].mat); // 選到隱藏的材質就把它打開
   const b = ui.sel && bbox(model, ui.sel);
   if (b && moveCursor) ui.cur = b.lo.map((v, k) => Math.floor((v + b.hi[k]) / 2));
   render();
@@ -393,44 +443,57 @@ function setView(v) {
 }
 
 const mainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-const selMat = new THREE.MeshBasicMaterial({ color: 0x0b57d0, transparent: true, opacity: 0.14, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-let mainMesh = null, selMesh = null, selBox = null, faceQuad = null, quadCell = [];
+// 聚焦：選到的結構照原色畫，其他結構半透明（先只寫深度、再上色，才不會前後疊色不均）
+const ghostDepthMat = new THREE.MeshBasicMaterial({ colorWrite: false });
+const ghostMat = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.4, depthWrite: false });
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x0b57d0, depthTest: false, transparent: true, opacity: 0.7 });
+let dyn = [], pickables = [], faceQuad = null;
 const COL = MATS.map((m) => new THREE.Color(m.color));
-/** 體素表面 → 網格。emit(i, nb)：這一面要不要畫。 */
-function buildGeom(st, emit, withColor) {
+/** 體素表面 → 網格。cellOk(i)：這一格要不要畫；faceOk(i, nb)：朝 nb（-1＝出界）的那一面要不要畫。 */
+function buildGeom(st, cellOk, faceOk) {
   const pos = [], nor = [], col = [], cells = [];
   for (let i = 0; i < N; i++) {
-    if (!emit(i, i)) continue;
-    const p = coord(i);
+    if (!cellOk(i)) continue;
+    const p = coord(i), cc = COL[st.mat[i]];
     for (let a = 0; a < 3; a++) for (const s of [1, -1]) {
-      const nb = next(i, a, s);
-      if (!emit(i, nb, true)) continue;
+      if (!faceOk(i, next(i, a, s))) continue;
       const b = (a + 1) % 3, c = (a + 2) % 3, o = [...p];
       if (s > 0) o[a] += 1;
       const q = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => { const w = [...o]; w[b] += u; w[c] += v; return w; });
-      const order = s > 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2];
-      for (const k of order) { pos.push(...q[k]); nor.push(a === 0 ? s : 0, a === 1 ? s : 0, a === 2 ? s : 0); if (withColor) { const cc = COL[st.mat[i]]; col.push(cc.r, cc.g, cc.b); } }
+      for (const k of s > 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2]) { pos.push(...q[k]); nor.push(a === 0 ? s : 0, a === 1 ? s : 0, a === 2 ? s : 0); col.push(cc.r, cc.g, cc.b); }
       cells.push(i);
     }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-  if (withColor) g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  return { g, cells };
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.userData.cells = cells;
+  return g;
 }
-const drop = (o) => { if (o) { scene.remove(o); o.geometry?.dispose(); } };
+function addMesh(g, mat, order, pick) {
+  const m = mat.isLineBasicMaterial ? new THREE.LineSegments(g, mat) : new THREE.Mesh(g, mat);
+  m.renderOrder = order; scene.add(m); dyn.push(m);
+  if (pick) pickables.push(m);
+  return m;
+}
 function draw3d(st) {
-  drop(mainMesh); drop(selMesh); drop(selBox); drop(faceQuad); selMesh = selBox = faceQuad = null;
-  const main = buildGeom(st, (i, nb, face) => (face ? nb < 0 || st.mat[nb] === AIR : st.mat[i] !== AIR), true);
-  mainMesh = new THREE.Mesh(main.g, mainMat); quadCell = main.cells; scene.add(mainMesh);
+  for (const o of dyn) { scene.remove(o); o.geometry.dispose(); }
+  dyn = []; pickables = [];
+  if (faceQuad) { scene.remove(faceQuad); faceQuad.geometry.dispose(); faceQuad = null; }
+  const vis = (i) => i >= 0 && st.mat[i] !== AIR && !hidden.has(st.mat[i]);
   const b = ui.sel && !ui.before && bbox(st, ui.sel);
   arrows.visible = !!b && ui.tool !== 'mat';
-  if (b) {
-    const sel = buildGeom(st, (i, nb, face) => (face ? nb < 0 || st.sid[nb] !== ui.sel : st.sid[i] === ui.sel), false);
-    selMesh = new THREE.Mesh(sel.g, selMat); selMesh.renderOrder = 2; scene.add(selMesh);
+  if (!b) addMesh(buildGeom(st, vis, (i, nb) => !vis(nb)), mainMat, 0, true);
+  else {
+    const isSel = (i) => st.sid[i] === ui.sel;
+    const sel = buildGeom(st, isSel, (i, nb) => nb < 0 || !isSel(nb));
+    addMesh(sel, mainMat, 0, true);
+    const rest = buildGeom(st, (i) => vis(i) && !isSel(i), (i, nb) => !vis(nb));
+    addMesh(rest, ghostDepthMat, 1, false);
+    addMesh(rest.clone(), ghostMat, 2, true).geometry.userData.cells = rest.userData.cells;
+    addMesh(new THREE.EdgesGeometry(sel), edgeMat, 3, false);
     const lo = new THREE.Vector3(...b.lo), hi = new THREE.Vector3(b.hi[0] + 1, b.hi[1] + 1, b.hi[2] + 1);
-    selBox = new THREE.LineSegments(new THREE.EdgesGeometry(sel.g), new THREE.LineBasicMaterial({ color: 0x0b57d0, depthTest: false, transparent: true, opacity: 0.85 })); selBox.renderOrder = 3; scene.add(selBox);
     const mid = lo.clone().add(hi).multiplyScalar(0.5);
     for (const [name, f] of Object.entries(FACES)) {
       const p = mid.clone(); p.setComponent(f.a, f.s > 0 ? hi.getComponent(f.a) : lo.getComponent(f.a));
@@ -439,7 +502,7 @@ function draw3d(st) {
     }
     if (ui.tool === 'push') {
       const f = FACES[ui.face], size = hi.clone().sub(lo), b1 = (f.a + 1) % 3, c1 = (f.a + 2) % 3;
-      faceQuad = new THREE.Mesh(new THREE.PlaneGeometry(size.getComponent(b1), size.getComponent(c1)), new THREE.MeshBasicMaterial({ color: 0xfa8c16, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthTest: false }));
+      faceQuad = new THREE.Mesh(new THREE.PlaneGeometry(size.getComponent(b1), size.getComponent(c1)), new THREE.MeshBasicMaterial({ color: 0xfa8c16, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthTest: false }));
       faceQuad.position.copy(arrowOf[ui.face].position);
       if (f.a === 0) faceQuad.rotation.set(0, Math.PI / 2, Math.PI / 2); else if (f.a === 1) faceQuad.rotation.set(Math.PI / 2, 0, Math.PI / 2);
       faceQuad.renderOrder = 4; scene.add(faceQuad);
@@ -517,8 +580,8 @@ host.addEventListener('pointerup', (e) => {
   if (drag) { const d = drag; drag = null; $('#tip').hidden = true; if (d.n) commit(curOp(d.face, d.n)); else render(); return; }
   if (e.button !== 0 || !downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4 || e.target.closest('.viewbar')) return;
   ray.setFromCamera(ndc(e), camera);
-  const hit = mainMesh && ray.intersectObject(mainMesh)[0];
-  select(hit ? shown().sid[quadCell[Math.floor(hit.faceIndex / 2)]] : 0);
+  const hit = ray.intersectObjects(pickables)[0];
+  select(hit ? shown().sid[hit.object.geometry.userData.cells[Math.floor(hit.faceIndex / 2)]] : 0);
 });
 host.addEventListener('contextmenu', (e) => e.preventDefault());
 $('#viewbar').onclick = (e) => { const v = e.target.dataset.v; if (v) setView(v); };
@@ -573,8 +636,17 @@ document.querySelectorAll('.stepper').forEach((el) => {
 function drawPanel(st) {
   const groups = new Map();
   for (const s of st.structs) if (s) (groups.get(s.mat) ?? groups.set(s.mat, []).get(s.mat)).push(s);
-  $('#list').innerHTML = [...groups].map(([m, ss]) =>
-    `<div class="grp"><span class="sw" style="background:${MATS[m].color}"></span>${MATS[m].name}<small>×${ss.length}</small></div>` + ss.map((s) => `<button class="item ${s.id === ui.sel ? 'on' : ''}" data-id="${s.id}">${s.name}</button>`).join('')).join('');
+  $('#list').innerHTML = [...groups].map(([m, ss]) => {
+    const hid = hidden.has(m);
+    return `<button class="grp ${hid ? 'hid' : ''}" data-mat="${m}" title="${hid ? '點一下顯示' : '點一下隱藏'}"><span class="sw" style="background:${MATS[m].color}"></span>${MATS[m].name}<small>×${ss.length}</small><span class="eye">${hid ? EYE_OFF : EYE_ON}</span></button>`
+      + ss.map((s) => `<button class="item ${s.id === ui.sel ? 'on' : ''} ${hid ? 'hid' : ''}" data-id="${s.id}">${s.name}</button>`).join('');
+  }).join('');
+  const steps = undoStack.filter((e) => !e.reset);
+  $('#ch-list').innerHTML = steps.length
+    ? steps.map((e, k) => `<button class="ch" data-id="${e.id}" title="點一下選這個結構"><span class="no">${k + 1}</span><span class="tx">${e.text}</span><small>${e.cells.toLocaleString()} 格</small></button>`).join('')
+    : '<div class="ch-empty">還沒有改動。每做一步，這裡會多一行。</div>';
+  $('#ch-sum').textContent = steps.length ? `${steps.length} 步 · 和原始差 ${diffCount(model, ORIG).toLocaleString()} 格` : '';
+  $('#reset').hidden = !steps.length; $('#foot').classList.toggle('changed', steps.length > 0);
   const sel = ui.sel ? st.structs[ui.sel] : null, b = sel && bbox(st, sel.id);
   $('#sel-foot').textContent = sel ? `已選 ${sel.name}` : '還沒選取結構';
   $('#panel').classList.toggle('off', !sel || ui.before);
@@ -585,7 +657,6 @@ function drawPanel(st) {
   $('#t-step').hidden = $('#t-nb').hidden = ui.tool === 'mat';
   $('#nm').textContent = nm(stepN());
   $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length;
-  $('#reset').hidden = !undoStack.length; $('#foot').classList.toggle('changed', undoStack.length > 0);
   if (!sel || !b) return;
   const atEdge = (face) => { const f = FACES[face]; return f.s > 0 ? b.hi[f.a] >= DIM[f.a] - 1 : b.lo[f.a] <= 0; };
   const f = FACES[ui.face];
@@ -601,7 +672,15 @@ function drawPanel(st) {
 }
 function render() { const st = shown(); draw3d(st); draw2d(st); drawPanel(st); }
 
-$('#list').onclick = (e) => { const b = e.target.closest('.item'); if (b) select(+b.dataset.id); };
+$('#list').onclick = (e) => {
+  const b = e.target.closest('.item'), g = e.target.closest('.grp');
+  if (b) return select(+b.dataset.id);
+  if (!g) return;
+  const m = +g.dataset.mat;
+  if (hidden.has(m)) hidden.delete(m); else { hidden.add(m); if (ui.sel && model.structs[ui.sel].mat === m) ui.sel = 0; }
+  render();
+};
+$('#ch-list').onclick = (e) => { const b = e.target.closest('.ch'); if (b) select(+b.dataset.id); };
 $('#tools').onclick = (e) => { const b = e.target.closest('button'); if (b) { ui.tool = b.dataset.tool; render(); } };
 $('#faces').onclick = (e) => { if (e.target.tagName === 'BUTTON') { ui.face = e.target.textContent; render(); } };
 $('#nb').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) { ui.nb = b.dataset.nb; render(); } };
@@ -612,7 +691,7 @@ $('#dpad').onclick = (e) => { if (e.target.tagName === 'BUTTON' && !e.target.dis
 $('#mats').onclick = (e) => { const b = e.target.closest('button'); if (b) commit({ kind: 'mat', id: ui.sel, mat: +b.dataset.m }); };
 $('#undo').onclick = $('#undo2').onclick = undo;
 $('#redo').onclick = redo;
-$('#reset').onclick = () => { undoStack.push(model); redoStack = []; model = cloneSt(ORIG); say('已全部還原成原始的樣子', true); render(); };
+$('#reset').onclick = () => { undoStack = [{ st: model, text: '全部還原', reset: true, prev: undoStack }]; redoStack = []; model = cloneSt(ORIG); say('已全部還原成原始的樣子', true); render(); };
 $('#mode').onclick = (e) => { const m = e.target.dataset.m; if (m) { ui.before = m === 'before'; render(); } };
 $('#export').onclick = () => say('（prototype 沒有真的匯出）正式版會存成一個和輸入同格式的 .vti', false);
 $('#upload').onclick = () => say('（prototype 只有內建範例）正式版和原版一樣可以上傳 .vti／.npy', false);
@@ -627,7 +706,7 @@ addEventListener('keydown', (e) => {
 setView('home');
 select(model.structs.find((s) => s && s.name === 'Poly-Si 2').id);
 frameLoop();
-window.__proto = { ui, get model() { return model; }, bbox, arrowOf, toScreen, camera, controls };
+window.__proto = { ui, hidden, get model() { return model; }, bbox, arrowOf, toScreen, camera, controls };
 </script>
 </body>
 </html>

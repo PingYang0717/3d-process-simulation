@@ -2,7 +2,7 @@
 // index = (z·Y + y)·X + x，對應 numpy C order 的 shape (Z, Y, X)。
 
 import { type Scope, axisIndex, scopeBox } from './scope';
-import { type Report, LINER_MAX, addCell, fillAt, moveCells, removeCell, shellOf } from './kernel';
+import { type Block, type Report, LINER_MAX, addCell, fillAt, linerLUT, moveCells, removeCell, shellFlood, shellOf } from './kernel';
 
 export { LINER_MAX, fillAt };
 import { BOTH, MeshBuilder, emitFaces } from './meshBuilder';
@@ -20,6 +20,8 @@ export interface Material {
   id: number;
   name: string;
   color: string;
+  /** 薄層（plan v17 §5.4.2）：載入時判定一次（linerTable），之後不變；清單上可以手動切換。 */
+  liner?: boolean;
   /** 材質類別（plan v11 §4.10）：換材質清單只先列同類；省略＝依名稱猜（guessKind）。 */
   kind?: MaterialKind;
 }
@@ -551,6 +553,284 @@ export function growMask(
     cur = { X, Y, Z, data: out };
   }
   return done(cur);
+}
+
+// ---------------------------------------------------------------- 相鄰材質規則（plan v17 §5.4）
+
+/** 沿軸 a 的步長與長度；rowBases 列出垂直於 a 的平面上每一排的起點（座標 a = 0 那一格）。 */
+const axisStride = (v: Volume, a: number) => (a === 0 ? 1 : a === 1 ? v.X : v.X * v.Y);
+const axisLength = (v: Volume, a: number) => (a === 0 ? v.X : a === 1 ? v.Y : v.Z);
+function forEachRow(v: Volume, a: number, fn: (base: number) => Block | null | void): Block | null {
+  const { X, Y, Z } = v;
+  if (a === 0) {
+    for (let z = 0; z < Z; z++) for (let y = 0; y < Y; y++) { const r = fn((z * Y + y) * X); if (r) return r; }
+  } else if (a === 1) {
+    for (let z = 0; z < Z; z++) for (let x = 0; x < X; x++) { const r = fn(z * X * Y + x); if (r) return r; }
+  } else {
+    for (let y = 0; y < Y; y++) for (let x = 0; x < X; x++) { const r = fn(y * X + x); if (r) return r; }
+  }
+  return null;
+}
+
+/** 一排上 mask 在 s 方向最外側那一格的座標（沿 a）；沒有回傳 -1。 */
+function outerAt(m: Uint8Array, base: number, st: number, len: number, s: number) {
+  if (s > 0) {
+    for (let t = len - 1; t >= 0; t--) if (m[base + t * st]) return t;
+  } else for (let t = 0; t < len; t++) if (m[base + t * st]) return t;
+  return -1;
+}
+
+const emptyMat = (m: number) => m === AIR || m === VOID;
+
+/**
+ * 外推一格（整面一起）：先掃過每一排做 canTake，有一排被擋就整面不動、回傳原因；全部可以才寫入：
+ * 跟著移動時貼著的薄層整串往外移一格（蓋掉 b），最外側往外那一格變成結構。v.data 與 m 原地改。
+ */
+function grow1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, plan: number[], report?: Report): Block | null {
+  const { data } = v;
+  const st = axisStride(v, a);
+  const len = axisLength(v, a);
+  plan.length = 0;
+  const blk = forEachRow(v, a, (base) => {
+    const c = outerAt(m, base, st, len, s);
+    if (c < 0) return;
+    const tc = c + s;
+    if (tc < 0 || tc >= len) return { why: 'edge' };
+    let k = 0;
+    if (follow)
+      for (;;) {
+        const q = tc + k * s;
+        if (q < 0 || q >= len) break;
+        const mm = data[base + q * st];
+        if (emptyMat(mm) || mm === selfMat || !liner[mm]) break;
+        k++;
+      }
+    const bc = tc + k * s;
+    if (bc < 0 || bc >= len) return { why: 'edge' };
+    const b = base + bc * st;
+    const mb = data[b];
+    if (!emptyMat(mb)) {
+      if (mb === selfMat) return { why: 'self', mat: mb, at: b };
+      const b2c = bc + s;
+      if (b2c < 0 || b2c >= len || data[base + b2c * st] !== mb) return { why: 'last', mat: mb, at: b };
+    }
+    plan.push(base + tc * st, k);
+  });
+  if (blk) return blk;
+  const d = s * st;
+  for (let p = 0; p < plan.length; p += 2) {
+    const t = plan[p];
+    const k = plan[p + 1];
+    for (let j = k; j > 0; j--) data[t + j * d] = data[t + (j - 1) * d];
+    data[t] = selfMat;
+    m[t] = 1;
+    if (report) {
+      if (k) report.pushed++;
+      else report.filled++;
+    }
+  }
+  return null;
+}
+
+/**
+ * 內縮一格：每一排最外側那一格拿掉；跟著移動時外面那串薄層整串往內移一格，最外面空出來的那一格填它外面緊鄰的材質
+ * （出界就維持原樣；沒有薄層又出界＝空氣）。結構在這個方向只剩 1 格厚時擋下（min）。
+ */
+function shrink1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, report?: Report): Block | null {
+  const { data } = v;
+  const st = axisStride(v, a);
+  const len = axisLength(v, a);
+  let lo = len;
+  let hi = -1;
+  forEachRow(v, a, (base) => {
+    const c0 = outerAt(m, base, st, len, -1);
+    if (c0 < 0) return;
+    const c1 = outerAt(m, base, st, len, 1);
+    if (c0 < lo) lo = c0;
+    if (c1 > hi) hi = c1;
+  });
+  if (hi < 0 || hi - lo < 1) return { why: 'min' };
+  forEachRow(v, a, (base) => {
+    const c = outerAt(m, base, st, len, s);
+    if (c < 0) return;
+    const ci = base + c * st;
+    let to = ci;
+    let toc = c;
+    let k = 0;
+    if (follow)
+      for (let q = c + s; q >= 0 && q < len; q += s) {
+        const j = base + q * st;
+        const mm = data[j];
+        if (emptyMat(mm) || mm === selfMat || !liner[mm]) break;
+        data[to] = mm;
+        to = j;
+        toc = q;
+        k++;
+      }
+    const bc = toc + s;
+    if (bc >= 0 && bc < len) data[to] = data[base + bc * st];
+    else if (!k) data[to] = AIR;
+    m[ci] = 0;
+    if (report) report.removed++;
+  });
+  return null;
+}
+
+/**
+ * 整塊搬一格（方向 s，沿軸 a）：要搬的集合＝結構（跟著移動時加上 shellFlood 收到的整圈薄層）。
+ * 集合裡每一格往前一格不在集合裡就做 canTake，任何一格被擋整步不做；可以的話整個集合往前搬一格，
+ * 空出來的每一格填「往後走到集合外的第一格」的材質（出界填空氣）。m（只有結構）跟著搬。
+ */
+function move1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, S: Uint8Array, row: Uint8Array, report?: Report): Block | null {
+  const { data } = v;
+  const st = axisStride(v, a);
+  const len = axisLength(v, a);
+  S.set(m);
+  if (follow) shellFlood(v, S, selfMat, liner);
+  const blk = forEachRow(v, a, (base) => {
+    for (let t = 0; t < len; t++) {
+      const i = base + t * st;
+      if (!S[i]) continue;
+      const tc = t + s;
+      if (tc < 0 || tc >= len) return { why: 'edge' };
+      const ti = base + tc * st;
+      if (S[ti]) continue;
+      // canTake 沿 a 往前：出界已處理；空的可以；同材質擋；否則再往前一格要同材質
+      const mt = data[ti];
+      if (emptyMat(mt)) continue;
+      if (mt === selfMat) return { why: 'self', mat: mt, at: ti };
+      const t2 = tc + s;
+      if (t2 < 0 || t2 >= len || data[base + t2 * st] !== mt) return { why: 'last', mat: mt, at: ti };
+    }
+  });
+  if (blk) return blk;
+  forEachRow(v, a, (base) => {
+    let any = false;
+    for (let t = 0; t < len; t++) if (S[base + t * st]) { any = true; break; }
+    if (!any) return;
+    for (let t = 0; t < len; t++) row[t] = data[base + t * st];
+    // 由後往前走：prev＝目前為止最近的集合外那一格（後面出界＝空氣）
+    let prev = AIR;
+    for (let t = s > 0 ? 0 : len - 1; t >= 0 && t < len; t += s) {
+      const i = base + t * st;
+      if (S[i]) data[i] = prev;
+      else prev = row[t];
+    }
+    for (let t = 0; t < len; t++) {
+      const i = base + t * st;
+      if (!S[i]) continue;
+      data[i + s * st] = row[t];
+      if (report) report.pushed++;
+    }
+    // 結構的 mask 跟著搬（由前往後寫，不會蓋到還沒讀的）
+    for (let t = s > 0 ? len - 1 : 0; t >= 0 && t < len; t -= s) {
+      const i = base + t * st;
+      if (m[i]) {
+        m[i] = 0;
+        m[i + s * st] = 1;
+      }
+    }
+  });
+  return null;
+}
+
+/**
+ * 相鄰材質規則的推拉一面／整塊平移（plan v17 §5.4.4）：一格一格做，每一格對每個 mask（每個選到的結構）依序做；
+ * 全部做得到這一格才算完成，否則丟掉這一格、停在已經做完的格數（report.done、report.stop）。
+ * kind 'push'：dir＝哪一面（法線），n > 0 外推、n < 0 內縮。kind 'translate'：dir＝搬的方向（單位向量），n＝格數。
+ * masks 原地改成做完之後每個結構的格子。回傳新的陣列（vol 不動）。
+ */
+export function adjacentMasks(
+  vol: Volume,
+  masks: Uint8Array[],
+  kind: 'push' | 'translate',
+  dir: Vec3,
+  n: number,
+  follow: boolean,
+  liners: number[],
+  report?: Report,
+): Volume {
+  const { X, Y, Z } = vol;
+  const liner = linerLUT(liners);
+  const a = dir[0] ? 0 : dir[1] ? 1 : 2;
+  const s = Math.sign(dir[0] + dir[1] + dir[2]) || 1;
+  const steps = Math.abs(n);
+  const cur: Volume = { X, Y, Z, data: new Uint8Array(vol.data) };
+  const live = masks.filter((m) => m.some((x) => x));
+  const mats = live.map((m) => {
+    const i = m.indexOf(1);
+    return cur.data[i];
+  });
+  const multi = live.length > 1;
+  const tryV: Volume = multi ? { X, Y, Z, data: new Uint8Array(cur.data.length) } : cur;
+  const tryM = multi ? live.map((m) => new Uint8Array(m.length)) : live;
+  const S = kind === 'translate' ? new Uint8Array(cur.data.length) : new Uint8Array(0);
+  const row = new Uint8Array(Math.max(X, Y, Z));
+  const plan: number[] = [];
+  let done = 0;
+  let stop: Block | null = null;
+  for (; done < steps && live.length; done++) {
+    if (multi) {
+      tryV.data.set(cur.data);
+      live.forEach((m, k) => tryM[k].set(m));
+    }
+    let blk: Block | null = null;
+    for (let k = 0; k < live.length && !blk; k++) {
+      if (kind === 'translate') blk = move1(tryV, tryM[k], a, s, mats[k], follow, liner, S, row, report);
+      else if (n > 0) blk = grow1(tryV, tryM[k], a, s, mats[k], follow, liner, plan, report);
+      else blk = shrink1(tryV, tryM[k], a, s, mats[k], follow, liner, report);
+    }
+    if (blk) {
+      stop = blk;
+      break;
+    }
+    if (multi) {
+      cur.data.set(tryV.data);
+      live.forEach((m, k) => m.set(tryM[k]));
+    }
+  }
+  if (report) {
+    report.done = (report.done ?? 0) + done;
+    report.stop = stop;
+    if (stop && stop.at !== undefined) {
+      report.blocked++;
+      if (stop.mat !== undefined) report.blockedBy[stop.mat] = (report.blockedBy[stop.mat] ?? 0) + 1;
+      report.blockedAt.push(stop.at);
+    }
+  }
+  return cur;
+}
+
+/**
+ * 哪些材質是「薄層」（plan v17 §5.4.2）：每一格的厚度＝穿過它的三個軸向上、同材質連續段裡最短的那一段；
+ * 那個材質一半以上的格子厚度 ≤ LINER_MAX → 薄層。空氣與空洞不算。三個軸各掃一次，O(3N)。
+ */
+export function linerTable(vol: Volume): number[] {
+  const { data } = vol;
+  const thin = new Uint8Array(data.length);
+  for (let a = 0; a < 3; a++) {
+    const st = axisStride(vol, a);
+    const len = axisLength(vol, a);
+    forEachRow(vol, a, (base) => {
+      let k = 0;
+      while (k < len) {
+        const m = data[base + k * st];
+        let e = k + 1;
+        while (e < len && data[base + e * st] === m) e++;
+        if (e - k <= LINER_MAX) for (let t = k; t < e; t++) thin[base + t * st] = 1;
+        k = e;
+      }
+    });
+  }
+  const total = new Float64Array(256);
+  const thinN = new Float64Array(256);
+  for (let i = 0; i < data.length; i++) {
+    total[data[i]]++;
+    if (thin[i]) thinN[data[i]]++;
+  }
+  const out: number[] = [];
+  for (let m = 1; m < 256; m++) if (m !== VOID && total[m] && thinN[m] * 2 >= total[m]) out.push(m);
+  return out;
 }
 
 /** 一個推面（cd／taper 展開後的每一步）。 */

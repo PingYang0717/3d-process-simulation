@@ -17,7 +17,9 @@ import {
   translateMask,
   unionBBox,
 } from './volume';
-import { type EditState, type LegacyOp, type Op, bboxOfKeys, cdSteps, radiusOf, taperSteps, upgradeOp } from './ops';
+import { type AdjPushOp, type AdjTranslateOp, type EditState, type LegacyOp, type Op, adjacentDir, bboxOfKeys, cdSteps, isAdjacent, radiusOf, taperSteps, upgradeOp } from './ops';
+import { adjacentMasks } from './volume';
+import { isEmpty, linerLUT, shellFlood, simGrowRow } from './kernel';
 import { type Scope, axisIndex, planeAxes } from './scope';
 import { type ProfileOp, type RingsFor, applyProfileMask, decodeRle, dirVec, keyBoxes, rleBox } from './profile';
 import type { Report } from './kernel';
@@ -262,6 +264,7 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
   const keys = new Set(op.keys);
   const b = unionBBox(s.L.comps.filter((c) => keys.has(c.key)));
   if (!b) return null;
+  if (isAdjacent(op)) return adjacentBox(s, op, b);
   const l = lo(b);
   const h = hi(b);
   // scope 比結構短：沿 scope 的軸只算 scope 那一段（推面／補平的方向和 scope 同軸時不行：
@@ -333,6 +336,131 @@ export function previewBox(s: EditState, input: Op | LegacyOp): BBox | null {
   return clampBox(b, s.vol);
 }
 
+/** 'adjacent' 讀窗：沿推的方向最多模擬這麼多格（|n| 之外）；超過就把外框一路開到模型邊界。 */
+export const ADJ_WINDOW = 64;
+
+/**
+ * 'adjacent'（plan v17 §5.4.4）的裁切範圍：裁切邊界必須不會被誤當成模型邊界，所以讀到哪裡都要包進來。
+ * 推拉：沿法線對每一排做一維模擬（simGrowRow），外推多留「模擬讀到最遠的格數＋2」、內縮多留「薄層串長＋2」；
+ * 讀出窗外就開到模型邊界。其他兩軸＝選取外框（只有那些排會變）。
+ * 平移：結構＋整圈薄層（shellFlood）的外框，往前多留 |n|＋2、其他方向 2；薄層碰到試算範圍的邊就放大重試。
+ */
+function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBox | null {
+  const { dir, n } = adjacentDir(op);
+  const a = dir[0] ? 0 : dir[1] ? 1 : 2;
+  const sg = dir[a] > 0 ? 1 : -1;
+  const l = lo(b);
+  const h = hi(b);
+  const dims = [s.vol.X, s.vol.Y, s.vol.Z];
+  const liner = linerLUT(op.liners);
+  if (op.kind === 'translate') {
+    for (let m = 8; ; m *= 2) {
+      const ml = l.map((v, k) => v - m - (k === a && sg < 0 ? n : 0)) as Vec3;
+      const mh = h.map((v, k) => v + m + (k === a && sg > 0 ? n : 0)) as Vec3;
+      const box = clampBox(fromLoHi(ml, mh), s.vol)!;
+      const vol = cropVolume(s.vol, box);
+      const S = new Uint8Array(vol.data.length);
+      const ks = [...new Set(op.keys)];
+      let touch = false;
+      const sl: Vec3 = [Infinity, Infinity, Infinity];
+      const sh: Vec3 = [-Infinity, -Infinity, -Infinity];
+      for (const k of ks) {
+        const km = cropMask(s.L, new Set([k]), s.vol, box);
+        const first = km.indexOf(1);
+        if (first < 0) continue;
+        if (op.follow) shellFlood(vol, km, vol.data[first], liner);
+        for (let i = 0; i < km.length; i++) if (km[i]) S[i] = 1;
+      }
+      const bl = lo(box);
+      const bh = hi(box);
+      for (let i = 0; i < S.length; i++) {
+        if (!S[i]) continue;
+        const x = i % vol.X;
+        const y = ((i - x) / vol.X) % vol.Y;
+        const z = (i - x - y * vol.X) / (vol.X * vol.Y);
+        const c = [x + bl[0], y + bl[1], z + bl[2]];
+        for (let k = 0; k < 3; k++) {
+          if (c[k] < sl[k]) sl[k] = c[k];
+          if (c[k] > sh[k]) sh[k] = c[k];
+          if ((c[k] === bl[k] && bl[k] > 0) || (c[k] === bh[k] && bh[k] < dims[k] - 1)) touch = true;
+        }
+      }
+      if (sl[0] === Infinity) return null;
+      if (touch && m < 4 * ADJ_WINDOW) continue;
+      if (touch) return clampBox({ x0: 0, y0: 0, z0: 0, x1: dims[0] - 1, y1: dims[1] - 1, z1: dims[2] - 1 }, s.vol);
+      const ol = sl.map((v, k) => v - 2 - (k === a && sg < 0 ? n : 0)) as Vec3;
+      const oh = sh.map((v, k) => v + 2 + (k === a && sg > 0 ? n : 0)) as Vec3;
+      return clampBox(fromLoHi(ol, oh), s.vol);
+    }
+  }
+  // 推拉：每個結構、每一排從最外側那一格往外模擬
+  const { X, Y } = s.vol;
+  const st = a === 0 ? 1 : a === 1 ? X : X * Y;
+  const len = dims[a];
+  const [u, v] = [0, 1, 2].filter((k) => k !== a);
+  const p: Vec3 = [0, 0, 0];
+  let reach = 0;
+  const win = Math.abs(n) + ADJ_WINDOW;
+  const row: number[] = [];
+  outer: for (const key of new Set(op.keys)) {
+    const ci = s.L.comps.findIndex((c) => c.key === key);
+    if (ci < 0) continue;
+    const cb = s.L.comps[ci].bbox;
+    const cl = lo(cb);
+    const ch = hi(cb);
+    const mat = s.L.comps[ci].mat;
+    for (p[u] = cl[u]; p[u] <= ch[u]; p[u]++)
+      for (p[v] = cl[v]; p[v] <= ch[v]; p[v]++) {
+        // 最外側那一格
+        let c = -1;
+        for (let t = sg > 0 ? ch[a] : cl[a]; sg > 0 ? t >= cl[a] : t <= ch[a]; t -= sg) {
+          p[a] = t;
+          if (s.L.labels[(p[2] * Y + p[1]) * X + p[0]] === ci) {
+            c = t;
+            break;
+          }
+        }
+        if (c < 0) continue;
+        p[a] = c;
+        const base = (p[2] * Y + p[1]) * X + p[0];
+        if (n > 0) {
+          row.length = 0;
+          for (let k = 1; k <= win; k++) {
+            const t = c + k * sg;
+            if (t < 0 || t >= len) {
+              row.push(-1);
+              break;
+            }
+            row.push(s.vol.data[base + k * sg * st]);
+          }
+          const r = simGrowRow(row, n, mat, op.follow, liner);
+          if (r.reach >= row.length && row[row.length - 1] !== -1) {
+            reach = Infinity;
+            break outer;
+          }
+          reach = Math.max(reach, r.reach + 1);
+        } else {
+          let k = 1;
+          if (op.follow)
+            for (; k <= win; k++) {
+              const t = c + k * sg;
+              if (t < 0 || t >= len) break;
+              const m = s.vol.data[base + k * sg * st];
+              if (isEmpty(m) || m === mat || !liner[m]) break;
+            }
+          if (k > win) {
+            reach = Infinity;
+            break outer;
+          }
+          reach = Math.max(reach, k);
+        }
+      }
+  }
+  if (sg > 0) h[a] = reach === Infinity ? len - 1 : h[a] + reach + 2;
+  else l[a] = reach === Infinity ? 0 : l[a] - reach - 2;
+  return clampBox(fromLoHi(l, h), s.vol);
+}
+
 /**
  * 在裁切範圍內算這一步的結果；範圍超過 cap 個體素就回傳 null（留給 Worker）。
  * 範圍內逐體素和 applyOp 的結果相同；範圍外這一步本來就不會改到。
@@ -348,6 +476,11 @@ export function previewOp(s: EditState, orig: Volume, input: Op | LegacyOp, cap 
     // profile 只用每個 key 自己的 mask（不必另外做一份聯集）
     const masks = new Map(op.keys.map((k) => [k, cropMask(s.L, new Set([k]), s.vol, box)] as const));
     return { box, data: applyProfileMask(vol, o, masks, op, [box.x0, box.y0, box.z0], report, ringsFor, keyBoxes(s.L, op.keys)).data };
+  }
+  if (isAdjacent(op)) {
+    const { dir, n } = adjacentDir(op);
+    const masks = [...new Set(op.keys)].map((k) => cropMask(s.L, new Set([k]), s.vol, box));
+    return { box, data: adjacentMasks(vol, masks, op.kind, dir, n, op.follow, op.liners, report).data };
   }
   const mask = cropMask(s.L, new Set(op.keys), s.vol, box);
   // scope 換成裁切範圍裡的座標（超出的部分本來就不會被改）

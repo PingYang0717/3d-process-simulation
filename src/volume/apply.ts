@@ -3,7 +3,7 @@
 // plan v9 §4.3：applyOpInPlace 直接改 data／labels（不影印整個陣列）；applyOpLocal 是複製後呼叫它的純函式包裝。
 // 結果和 applyOp 逐體素相同（apply.test.ts）。
 import { type BBox, type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
-import { type EditState, type LegacyOp, type Op, type OpContext, upgradeOp } from './ops';
+import { type EditState, type LegacyOp, type Op, type OpContext, adjacentDir, isAdjacent, upgradeOp } from './ops';
 import { previewBox, previewOp } from './preview';
 import { type Step, cropArr, diffInBox, globalIndex, pasteArr } from './patch';
 import { type Report, newReport } from './kernel';
@@ -81,7 +81,8 @@ export function applyOpCommit(s: EditState, prep: AppliedPrep, ctx: OpContext): 
     s.L.comps.forEach((c, k) => {
       if (keys.has(c.key)) on[k] = 1;
     });
-    const [dx, dy, dz] = op.d;
+    // 'adjacent' 一格一格做、可能沒做滿：照實際做了幾格對應（plan v17）
+    const [dx, dy, dz] = isAdjacent(op) ? adjacentDir(op).dir.map((v) => v * (report.done ?? 0)) : op.d;
     moved = (i, l) => {
       if (l < 0 || !on[l]) return i;
       const x = i % X;

@@ -1,7 +1,9 @@
 // 操作（Op）與重播：純函式，主執行緒與 Worker 共用，可單獨測試。
+import { newReport } from './kernel';
 import {
   type BBox,
   type Backfill,
+  adjacentMasks,
   type BrushShape,
   type PushStep,
   type Labeled,
@@ -37,6 +39,11 @@ export const radiusOf = (l: Local) => (l.radius === null ? Infinity : l.radius);
 /** scope：只有這個範圍裡的體素可以被改（推面時新格子落在 scope 外就不寫）。 */
 /** 推面碰到厚的別的材質：block＝擋住（plan v11 §4.10 新預設）、overwrite＝蓋過去（v10 以前；省略＝overwrite，舊 Op 重播不變）。 */
 export type Policy = 'block' | 'overwrite';
+/**
+ * plan v17 §5.4：相鄰材質規則（一步只改緊貼那一層的厚度、至少留 1 格、整面一起擋）。
+ * liners＝這一步當時的薄層材質編號（留作紀錄，重算時不依賴外部狀態）。
+ */
+export type Adjacent = { policy: 'adjacent'; liners: number[] };
 
 /** level 的相對參照（plan v11 §4.9）：to = 參照結構外框在 dir 軸的 lo|hi + offset；apply 只看 to。 */
 export interface LevelRef {
@@ -79,10 +86,19 @@ export type TaperOp = {
   policy?: Policy;
 };
 
+export type PushOp = { kind: 'push'; keys: string[]; scope: Scope; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local; policy?: Policy };
+/** follow：外面的薄襯層（殼）一起搬；省略＝不帶（舊 Op）。 */
+export type TranslateOp = { kind: 'translate'; keys: string[]; scope: Scope; d: Vec3; backfill: Backfill; follow?: boolean };
+/** 相鄰材質規則的推拉一面（plan v17）：每個選到的結構各推自己的那一面。 */
+export type AdjPushOp = Omit<PushOp, 'policy'> & Adjacent;
+/** 相鄰材質規則的整塊平移：d 只能沿單一軸，內部一格一格做。 */
+export type AdjTranslateOp = Omit<TranslateOp, 'follow'> & { follow: boolean } & Adjacent;
+
 export type Op =
-  | { kind: 'push'; keys: string[]; scope: Scope; dir: Vec3; n: number; follow: boolean; backfill: Backfill; local?: Local; policy?: Policy }
-  /** follow：外面的薄襯層（殼）一起搬；省略＝不帶（舊 Op）。 */
-  | { kind: 'translate'; keys: string[]; scope: Scope; d: Vec3; backfill: Backfill; follow?: boolean }
+  | PushOp
+  | TranslateOp
+  | AdjPushOp
+  | AdjTranslateOp
   | { kind: 'material'; keys: string[]; scope: Scope; m: number }
   /** 補平：筆刷範圍內每一列的最外側面補到／削到座標 to（沿 dir 軸）；follow = 襯層跟推（同 push）。 */
   | { kind: 'level'; keys: string[]; scope: Scope; dir: Vec3; to: number; local: Local; backfill: Backfill; follow?: boolean; ref?: LevelRef }
@@ -94,9 +110,21 @@ export type Op =
   | ProfileOp;
 
 /** 舊格式（v6／v11 的 manifest、重播紀錄）：用 zRange: [a, b] 而不是 scope。 */
-export type LegacyOp = Exclude<Op, ProfileOp> extends infer O ? (O extends { scope: Scope } ? Omit<O, 'scope'> & { zRange: [number, number] } : never) : never;
+export type LegacyOp = Exclude<Op, ProfileOp | AdjPushOp | AdjTranslateOp> extends infer O ? (O extends { scope: Scope } ? Omit<O, 'scope'> & { zRange: [number, number] } : never) : never;
 
 /** 讀進來的 Op 一律先過這裡：zRange → scope（axis z）；已是新格式原樣回傳。 */
+export const isAdjacent = (op: Op): op is AdjPushOp | AdjTranslateOp => (op.kind === 'push' || op.kind === 'translate') && 'policy' in op && op.policy === 'adjacent';
+
+/** 'adjacent' 的方向與格數：push＝面的法線與 n（帶正負號）；translate＝單位方向與格數。 */
+export function adjacentDir(op: AdjPushOp | AdjTranslateOp): { dir: Vec3; n: number } {
+  if (op.kind === 'push') return { dir: op.dir, n: op.n };
+  const a = op.d[0] ? 0 : op.d[1] ? 1 : 2;
+  const v = op.d[a];
+  const dir: Vec3 = [0, 0, 0];
+  dir[a] = Math.sign(v) || 1;
+  return { dir, n: Math.abs(v) };
+}
+
 export function upgradeOp(op: Op | LegacyOp): Op {
   if ('scope' in op) return op;
   const { zRange, ...rest } = op;
@@ -210,6 +238,14 @@ export function applyOp(s: EditState, input: Op | LegacyOp, ctx: OpContext): Edi
   }
   let vol: Volume;
   let shift: Vec3 = [0, 0, 0];
+  if (isAdjacent(op)) {
+    const { dir, n } = adjacentDir(op);
+    const masks = [...new Set(op.keys)].map((k) => maskOf(s.L, new Set([k]))).filter((m): m is Uint8Array => !!m);
+    const r = newReport();
+    vol = adjacentMasks(s.vol, masks, op.kind, dir, n, op.follow, op.liners, r);
+    if (op.kind === 'translate') shift = dir.map((v) => v * (r.done ?? 0)) as Vec3;
+    return { vol, L: relabel(s.vol, s.L, mask, shift, vol, ctx.matName, ctx.newKey) };
+  }
   if (op.kind === 'push') {
     if (op.local) mask = localMask(s.vol, mask, op.dir, op.local.center, radiusOf(op.local), op.local.shape ?? 'round');
     vol = growMask(s.vol, ctx.orig, mask, op.scope, op.dir, op.n, op.backfill, op.follow, undefined, op.policy ?? 'overwrite');
@@ -253,7 +289,7 @@ export function opText(input: Op | LegacyOp, L: Labeled, dims: { X: number; Y: n
   }
   const brush = (l: Local) => (l.radius === null ? '整面' : `筆刷 ${l.shape === 'square' ? '方' : '圓'} r${l.radius}`);
   const nm = (n: number) => `${(Math.abs(n) * nmPerVoxel).toFixed(1)} nm`;
-  const pol = (p?: Policy) => (p === 'overwrite' ? ' · 允許穿層' : '');
+  const pol = (p?: Policy | 'adjacent') => (p === 'overwrite' ? ' · 允許穿層' : '');
   if (op.kind === 'push') {
     const n = Math.abs(op.n);
     return `${who}${part}${op.local ? `（${brush(op.local)}）` : ''} ${directionName(op.dir)}${op.n > 0 ? '長' : '縮'} ${n} vx（${nm(n)}）${op.policy ? pol(op.policy) : ''}`;

@@ -8,6 +8,17 @@ const AIR = 0;
 /** 薄層判定：沿方向連續 ≤ 這麼多格才算襯層。 */
 export const LINER_MAX = 4;
 
+/**
+ * 相鄰材質規則（plan v17 §5.4）被擋下來的原因：
+ * edge＝已經到模型邊界；self＝會碰到同材質（自己）；last＝緊貼那一層（mat）只剩 1 格；min＝內縮到只剩 1 格厚。
+ * at＝擋住的那一格（index，座標是當時算的那個陣列）。
+ */
+export interface Block {
+  why: 'edge' | 'self' | 'last' | 'min';
+  mat?: number;
+  at?: number;
+}
+
 /** 這一步做了什麼：填了幾格（空氣）、推了幾格（襯層被推開再填）、被擋幾格（厚的別的材質），被誰擋。 */
 export interface Report {
   filled: number;
@@ -21,12 +32,16 @@ export interface Report {
   skipped: number[];
   /** 相對式套用對不到把手、退回絕對座標的片（profile 用）。 */
   fallback: number[];
+  /** 'adjacent'（plan v17）：實際做了幾格（其他 policy 不設）。 */
+  done?: number;
+  /** 'adjacent'：沒做滿時被誰擋（做滿＝null）。 */
+  stop?: Block | null;
 }
 export const newReport = (): Report => ({ filled: 0, pushed: 0, removed: 0, blocked: 0, blockedBy: {}, blockedAt: [], skipped: [], fallback: [] });
 export function mergeReport(a: Report, b: Report): Report {
   const blockedBy = { ...a.blockedBy };
   for (const [k, v] of Object.entries(b.blockedBy)) blockedBy[+k] = (blockedBy[+k] ?? 0) + v;
-  return {
+  const out: Report = {
     filled: a.filled + b.filled,
     pushed: a.pushed + b.pushed,
     removed: a.removed + b.removed,
@@ -36,6 +51,119 @@ export function mergeReport(a: Report, b: Report): Report {
     skipped: [...a.skipped, ...b.skipped],
     fallback: [...a.fallback, ...b.fallback],
   };
+  if (a.done !== undefined || b.done !== undefined) out.done = (a.done ?? 0) + (b.done ?? 0);
+  if (a.stop !== undefined || b.stop !== undefined) out.stop = b.stop ?? a.stop ?? null;
+  return out;
+}
+
+/** VOID（空洞）：相鄰材質規則把它當成空的（可以長進去、不是薄層）。和 volume.ts 的 VOID 相同。 */
+const VOID_ID = 254;
+
+/** 薄層材質編號 → 查表（256 格，1＝薄層）。空氣與空洞永遠不是薄層。 */
+export function linerLUT(liners: Iterable<number>): Uint8Array {
+  const t = new Uint8Array(256);
+  for (const m of liners) if (m !== AIR && m !== VOID_ID && m >= 0 && m < 256) t[m] = 1;
+  return t;
+}
+
+/** 空的（空氣或空洞）：可以直接長進去。 */
+export const isEmpty = (m: number) => m === AIR || m === VOID_ID;
+
+/**
+ * 能不能吃掉 (x, y, z) 這一格（plan v17 §5.4.1 第 3 步；d＝往外的方向，selfMat＝結構自己的材質）：
+ * 出界 → edge；空的 → 可以；同材質 → self；否則再往外一格必須同材質（吃掉之後那一層至少留 1 格），不是 → last。
+ */
+export function canTake(vol: Volume, x: number, y: number, z: number, d: Vec3, selfMat: number): Block | null {
+  if (!inVol(vol, x, y, z)) return { why: 'edge' };
+  const i = (z * vol.Y + y) * vol.X + x;
+  const m = vol.data[i];
+  if (isEmpty(m)) return null;
+  if (m === selfMat) return { why: 'self', mat: m, at: i };
+  return matAt(vol, x + d[0], y + d[1], z + d[2]) === m ? null : { why: 'last', mat: m, at: i };
+}
+
+/**
+ * 包在結構外面的薄層（plan v17 §5.4.1 平移）：從結構（mask＝1）出發，沿相連的薄層材質一路收（六鄰接 flood），
+ * 碰到不是薄層、或和結構同材質的就停；轉角因此收得到。收到的格子在 mask 標 2（原地改 mask），回傳收到幾格。
+ */
+export function shellFlood(vol: Volume, mask: Uint8Array, selfMat: number, liner: Uint8Array): number {
+  const { X, Y, Z, data } = vol;
+  const XY = X * Y;
+  const stack: number[] = [];
+  const visit = (n: number) => {
+    if (mask[n]) return;
+    const m = data[n];
+    if (!liner[m] || m === selfMat) return;
+    mask[n] = 2;
+    stack.push(n);
+  };
+  const expand = (i: number) => {
+    const x = i % X;
+    const y = ((i - x) / X) % Y;
+    const z = (i - x - y * X) / XY;
+    if (x > 0) visit(i - 1);
+    if (x < X - 1) visit(i + 1);
+    if (y > 0) visit(i - X);
+    if (y < Y - 1) visit(i + X);
+    if (z > 0) visit(i - XY);
+    if (z < Z - 1) visit(i + XY);
+  };
+  for (let i = 0; i < mask.length; i++) if (mask[i] === 1) expand(i);
+  let n = 0;
+  while (stack.length) {
+    n++;
+    expand(stack.pop()!);
+  }
+  return n;
+}
+
+/** 一排的一維模擬結果：做得到幾格、被誰擋、最遠讀到往外第幾格（0＝結構最外側那一格往外第一格）。 */
+export interface RowSim {
+  done: number;
+  stop: Block | null;
+  reach: number;
+}
+
+/**
+ * 外推的一維模擬（plan v17 §5.4.4 probe／previewBox）：row[k]＝結構最外側那一格往外第 k+1 格的材質（-1＝出界，
+ * 陣列結尾之後當作「不知道」）。照 §5.4.1 一格一格推 n 次，不寫回帳簿。reach ≥ row.length 表示讀出窗外（結果不可靠）。
+ */
+export function simGrowRow(row: number[], n: number, selfMat: number, follow: boolean, liner: Uint8Array): RowSim {
+  const r = row.slice();
+  const at = (k: number) => (k < r.length ? r[k] : -2);
+  let reach = 0;
+  // 每推一格，r 的 0 號往外移一格：讀到第 k 格＝原始的第 step + k 格
+  for (let step = 0; step < n; step++) {
+    let len = 0;
+    if (follow) {
+      for (;;) {
+        const m = at(len);
+        reach = Math.max(reach, step + len);
+        if (m === -2) return { done: step, stop: null, reach: row.length };
+        if (m < 0 || isEmpty(m) || m === selfMat || !liner[m]) break;
+        len++;
+      }
+    }
+    const m = at(len);
+    reach = Math.max(reach, step + len);
+    if (m === -2) return { done: step, stop: null, reach: row.length };
+    let stop: Block | null = null;
+    if (m === -1) stop = { why: 'edge' };
+    else if (!isEmpty(m)) {
+      if (m === selfMat) stop = { why: 'self', mat: m };
+      else {
+        const m2 = at(len + 1);
+        reach = Math.max(reach, step + len + 1);
+        if (m2 === -2) return { done: step, stop: null, reach: row.length };
+        if (m2 !== m) stop = { why: 'last', mat: m };
+      }
+    }
+    if (stop) return { done: step, stop, reach };
+    // 薄層整串往外移一格（蓋掉 b），最前面那一格變成結構
+    for (let j = len; j > 0; j--) r[j] = r[j - 1];
+    r.shift();
+  }
+  return { done: n, stop: null, reach };
 }
 
 export const inVol = (v: Volume, x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < v.X && y < v.Y && z < v.Z;
@@ -65,11 +193,24 @@ const matAt = (v: Volume, x: number, y: number, z: number) => (inVol(v, x, y, z)
 
 /**
  * 從 (x, y, z) 起沿 step 收集前方薄層的體素（遇到 Air、stopMat 或厚於 LINER_MAX 的材質就停）。
+ * liner 有給（plan v17：載入時判定一次的薄層表）就只看表：遇到空的、stopMat 或表上不是薄層的材質就停。
  */
-export const collectLiners = (vol: Volume, start: Vec3, step: Vec3, stopMat: number) => {
+export const collectLiners = (vol: Volume, start: Vec3, step: Vec3, stopMat: number, liner?: Uint8Array) => {
   const { X, Y, data } = vol;
   const cells: number[] = [];
   let [x, y, z] = start;
+  if (liner) {
+    while (inVol(vol, x, y, z)) {
+      const i = (z * Y + y) * X + x;
+      const m = data[i];
+      if (isEmpty(m) || m === stopMat || !liner[m]) break;
+      cells.push(i);
+      x += step[0];
+      y += step[1];
+      z += step[2];
+    }
+    return cells;
+  }
   while (inVol(vol, x, y, z)) {
     const m = data[(z * Y + y) * X + x];
     if (m === AIR || m === stopMat) break;

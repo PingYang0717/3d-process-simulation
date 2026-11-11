@@ -134,8 +134,6 @@ export function sidOf(s: Pick<EditState, 'vol' | 'version'>) {
   return id;
 }
 
-/** 測試用：主執行緒認為每本帳簿現在是哪一版。 */
-export const headsOf = () => new Map(heads);
 
 /**
  * 確保 Worker 的帳簿正好是 s（s 必須是主執行緒這本帳簿目前的內容）；對不上就補送（保險，理論上不會發生）。

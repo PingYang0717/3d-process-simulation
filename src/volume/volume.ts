@@ -1433,23 +1433,6 @@ export function moveLabel(labels: Int32Array, d: { X: number; Y: number }, b: BB
     }
 }
 
-/**
- * 選取 mask 的原地差量更新（plan v15 A1）：只在 box 裡依目前的 labels 與 on（結構編號 → 是否選取）重算
- * mask[i] = labels[i] ≥ 0 && on[labels[i]]（inScope 有給就再 ∧ inScope(i)）；box 外不動。
- * 正確性靠一步之後的不變量：stepTouch 外 labels 沒變、外面的結構編號對到的 key 也沒變。純函式，maskOf 是對照。
- */
-export function patchMask(mask: Uint8Array, labels: Int32Array, on: Uint8Array, dims: { X: number; Y: number }, box: BBox, inScope?: (i: number) => boolean) {
-  const { X, Y } = dims;
-  for (let z = box.z0; z <= box.z1; z++)
-    for (let y = box.y0; y <= box.y1; y++) {
-      const row = (z * Y + y) * X;
-      for (let i = row + box.x0, e = row + box.x1; i <= e; i++) {
-        const l = labels[i];
-        mask[i] = l >= 0 && l < on.length && on[l] && (!inScope || inScope(i)) ? 1 : 0;
-      }
-    }
-  return mask;
-}
 
 /**
  * 一組結構 key 的體素 mask；沒選取回傳 null。

@@ -83,14 +83,3 @@ export function summarize(r: Report, op: Op, dims: Pick<Volume, 'X' | 'Y'>): OpR
     ...(r.done !== undefined ? { done: r.done, stop: r.stop ?? null } : {}),
   };
 }
-
-/** 「4 片有 12 格被 Poly-Si 擋住」。 */
-export function blockedPhrase(r: Pick<OpReport, 'total' | 'blockedBy' | 'slices'>, matName: (id: number) => string) {
-  if (!r.total.blocked) return '';
-  const by = Object.entries(r.blockedBy)
-    .sort((p, q) => q[1] - p[1])
-    .map(([m]) => matName(+m))
-    .slice(0, 2)
-    .join('、');
-  return `${r.slices.length} 片有 ${r.total.blocked.toLocaleString()} 格被 ${by} 擋住`;
-}

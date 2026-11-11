@@ -38,23 +38,6 @@ export interface Report {
   stop?: Block | null;
 }
 export const newReport = (): Report => ({ filled: 0, pushed: 0, removed: 0, blocked: 0, blockedBy: {}, blockedAt: [], skipped: [], fallback: [] });
-export function mergeReport(a: Report, b: Report): Report {
-  const blockedBy = { ...a.blockedBy };
-  for (const [k, v] of Object.entries(b.blockedBy)) blockedBy[+k] = (blockedBy[+k] ?? 0) + v;
-  const out: Report = {
-    filled: a.filled + b.filled,
-    pushed: a.pushed + b.pushed,
-    removed: a.removed + b.removed,
-    blocked: a.blocked + b.blocked,
-    blockedBy,
-    blockedAt: [...a.blockedAt, ...b.blockedAt],
-    skipped: [...a.skipped, ...b.skipped],
-    fallback: [...a.fallback, ...b.fallback],
-  };
-  if (a.done !== undefined || b.done !== undefined) out.done = (a.done ?? 0) + (b.done ?? 0);
-  if (a.stop !== undefined || b.stop !== undefined) out.stop = b.stop ?? a.stop ?? null;
-  return out;
-}
 
 /** VOID（空洞）：相鄰材質規則把它當成空的（可以長進去、不是薄層）。和 volume.ts 的 VOID 相同。 */
 const VOID_ID = 254;

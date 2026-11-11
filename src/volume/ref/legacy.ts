@@ -47,20 +47,6 @@ export function legacyTranslateMask(
   return { X, Y, Z, data: out };
 }
 
-/** 換材質：只改 mask ∩ scope。 */
-export function legacySetMaskMaterial(vol: Volume, mask: Uint8Array, scope: Scope, mat: number): Volume {
-  const { X, Y, Z } = vol;
-  const out = new Uint8Array(vol.data);
-  const b = scopeBox(vol, scope);
-  if (b)
-  for (let z = b.z0; z <= b.z1; z++)
-    for (let y = b.y0; y <= b.y1; y++)
-      for (let x = b.x0; x <= b.x1; x++) {
-        const i = (z * Y + y) * X + x;
-        if (mask[i]) out[i] = mat;
-      }
-  return { X, Y, Z, data: out };
-}
 
 /** 薄層判定：沿方向連續 ≤ 這麼多格才算襯層。 */
 const LINER_MAX = 4;

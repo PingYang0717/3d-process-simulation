@@ -1,4 +1,4 @@
-// M18（plan v18 §5）：開啟直接是主畫面（自動載入簡單範例）；切面放大成主畫面、滾輪縮放、拖拉平移、Esc 還原。
+// M18（plan v18 §5）：開啟直接是主畫面（自動載入簡單範例）；切面放大成主畫面、滾輪縮放、拖拉平移、Esc 還原；範例載入失敗時可以重試。
 // 用法：先 `npm run dev`，再 `node scripts/e2e/m18.cjs [http://localhost:5173] [截圖資料夾]`
 const { chromium } = require('playwright');
 
@@ -178,10 +178,29 @@ async function run(browser, W, H, withUpload) {
   await page.close();
 }
 
+/** 範例載入失敗（Worker 的程式抓不到）：不留白畫面，有「重試」與「上傳 .vti」；重試後進主畫面。 */
+async function runFail(browser) {
+  console.log('---- 載入失敗 ----');
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  let block = true;
+  await page.route(/worker/i, (r) => (block ? r.abort() : r.continue()));
+  await page.goto(url);
+  await page.locator('.boot[role=alert]').waitFor({ timeout: 30000 });
+  ok((await page.locator('.boot').innerText()).includes('範例載入失敗'), 'Worker 起不來：畫面寫「範例載入失敗」');
+  ok(await page.locator('.boot').getByRole('button', { name: /上傳 \.vti/ }).isEnabled(), '失敗時可以改用上傳');
+  block = false;
+  await page.locator('.boot').getByRole('button', { name: /重\s*試/ }).click();
+  await page.locator('.pane-3d canvas').first().waitFor({ timeout: 60000 });
+  await page.waitForFunction(() => window.__ed && !window.__ed.busy && window.__ed.meta.name === '簡單範例', null, { timeout: 60000 });
+  ok((await page.locator('.slice-pane').count()) === 3, '按「重試」後進主畫面');
+  await page.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   await run(browser, 1600, 960, true);
   await run(browser, 1280, 720, false);
+  await runFail(browser);
   await browser.close();
 })().catch((e) => {
   console.error(e.message);

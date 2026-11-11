@@ -26,7 +26,22 @@ function get() {
   worker = src
     ? new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })))
     : new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+  const w = worker;
+  let alive = false;
+  // Worker 起不來（程式抓不到、一啟動就丟錯）：還沒回過任何訊息就出錯。等著的請求全部失敗，下一次呼叫重開一個
+  // （plan v18 §3.1：開啟時範例載入失敗要能「重試」）。已經回過訊息之後的錯不在這裡處理：帳簿還在 Worker 裡，不能丟。
+  worker.onerror = (e) => {
+    if (alive || worker !== w) return;
+    e.preventDefault();
+    w.terminate();
+    worker = null;
+    const err = new Error('背景運算（Web Worker）啟動失敗');
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+    inflight.clear();
+  };
   worker.onmessage = (e: MessageEvent<{ id: number; ok?: boolean; result?: unknown; error?: string; progress?: Progress }>) => {
+    alive = true;
     const p = pending.get(e.data.id);
     if (!p) return;
     if (e.data.progress) {

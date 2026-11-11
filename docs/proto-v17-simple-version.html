@@ -3,12 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>簡化版畫面示意（v17，尚未開工）</title>
+<title>簡化版 prototype（v17）</title>
 <style>
   :root {
     --c-primary: #0b57d0; --c-primary-bg: #e8f1ff; --c-text: #1f2329; --c-text-2: #646a73;
     --c-border: #e4e6eb; --c-bg: #f5f6f8; --c-surface: #fff; --c-up: #d46b08; --c-warn-bg: #fff8ec; --c-warn-border: #ffd591;
-    --poly: #e8604c; --hfo: #7fc8a9; --tin: #8e9aaf; --ild: #dcebd5; --fin: #f3b9a1; --sti: #9fd3e8; --sin: #c9b6e8;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; }
@@ -16,25 +15,27 @@
   button { font: inherit; color: inherit; cursor: pointer; }
   .mock-note { flex: none; padding: 4px 12px; background: var(--c-warn-bg); border-bottom: 1px solid var(--c-warn-border); color: #ad4e00; font-size: 12px; }
   .topbar { flex: none; height: 52px; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--c-surface); border-bottom: 1px solid var(--c-border); }
-  .brand { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .brand { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
   .brand i { width: 26px; height: 26px; border-radius: 6px; background: var(--c-primary); display: inline-block; }
   .file { color: var(--c-text-2); margin-left: 8px; }
   .grow { flex: 1; }
   .btn { height: 32px; padding: 0 12px; border: 1px solid var(--c-border); border-radius: 6px; background: var(--c-surface); white-space: nowrap; }
-  .btn:hover { border-color: var(--c-primary); color: var(--c-primary); }
+  .btn:hover:not(:disabled) { border-color: var(--c-primary); color: var(--c-primary); }
   .btn.primary { background: var(--c-primary); border-color: var(--c-primary); color: #fff; }
-  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary:hover { color: #fff !important; opacity: .9; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
   .body { flex: 1; min-height: 0; display: flex; }
   .left { flex: none; width: 300px; display: flex; flex-direction: column; background: var(--c-surface); border-right: 1px solid var(--c-border); }
   .sec-title { padding: 10px 12px 6px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .sec-title small { font-weight: 400; font-size: 13px; color: var(--c-text-2); }
   .num { width: 20px; height: 20px; border-radius: 50%; background: var(--c-primary); color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
   .list { flex: 1; min-height: 80px; overflow: auto; padding: 0 6px 6px; }
   .grp { padding: 4px 6px; color: var(--c-text-2); font-size: 12px; display: flex; align-items: center; gap: 6px; }
   .sw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex: none; }
-  .item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 5px 8px 5px 26px; border-radius: 6px; }
+  .item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 4px 8px 4px 26px; border-radius: 6px; }
   .item:hover { background: rgba(0,0,0,.04); }
   .item.on { background: var(--c-primary-bg); color: var(--c-primary); font-weight: 600; }
-  .panel { flex: none; border-top: 1px solid var(--c-border); padding-bottom: 12px; position: relative; }
+  .panel { flex: none; border-top: 1px solid var(--c-border); padding-bottom: 12px; }
   .panel.off > :not(.sec-title):not(.empty) { opacity: .3; pointer-events: none; }
   .empty { display: none; margin: 0 12px 8px; padding: 8px 10px; border-radius: 6px; background: var(--c-primary-bg); color: var(--c-primary); }
   .panel.off .empty { display: block; }
@@ -47,194 +48,359 @@
   .faces button, .dpad button { height: 30px; border: 1px solid var(--c-border); border-radius: 6px; background: var(--c-surface); }
   .faces button.on { border-color: var(--c-up); background: #fff3e6; color: var(--c-up); font-weight: 600; }
   .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
-  .dpad button:hover { border-color: var(--c-up); color: var(--c-up); }
+  .dpad button:hover:not(:disabled) { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .two button { height: 40px; border: 1px solid var(--c-border); border-radius: 8px; background: var(--c-surface); font-size: 14px; font-weight: 600; }
-  .two button:hover { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
-  .step { display: flex; align-items: center; gap: 6px; color: var(--c-text-2); font-size: 12px; margin-top: 6px; }
+  .two button:hover:not(:disabled) { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
+  .step { display: flex; align-items: center; gap: 6px; color: var(--c-text-2); font-size: 12px; }
   .step input { width: 52px; height: 26px; border: 1px solid var(--c-border); border-radius: 6px; text-align: center; font: inherit; }
   .nb { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .nb button { border: 1px solid var(--c-border); border-radius: 8px; background: var(--c-surface); padding: 6px 4px 4px; text-align: center; }
   .nb button.on { border-color: var(--c-primary); background: var(--c-primary-bg); color: var(--c-primary); font-weight: 600; }
   .nb svg { display: block; margin: 2px auto 0; }
-  .who { margin-top: 6px; font-size: 12px; color: var(--c-text-2); }
-  .mats button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 5px 8px; border-radius: 6px; text-align: left; }
+  .nb span { font-weight: 400; font-size: 11px; }
+  .who { margin-top: 6px; font-size: 12px; color: var(--c-text-2); min-height: 18px; }
+  .mats button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 4px 8px; border-radius: 6px; text-align: left; }
   .mats button:hover { background: rgba(0,0,0,.04); }
   .mats button.on::after { content: "✓ 目前"; margin-left: auto; color: var(--c-primary); font-size: 12px; }
   .stage { flex: 1; min-width: 0; position: relative; background: #fbfbfc; }
-  .stage svg.scene { width: 100%; height: 100%; display: block; }
-  .hint { position: absolute; left: 12px; top: 12px; background: rgba(255,255,255,.92); border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.8; }
+  .stage svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; }
+  .stage [data-id] { cursor: pointer; }
+  .arrow { cursor: grab; }
+  .arrow:hover path, .arrow.on path { stroke: #faad14; }
+  .hint { position: absolute; left: 12px; top: 12px; background: rgba(255,255,255,.92); border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.8; pointer-events: none; }
   .hint b { color: var(--c-up); }
-  .views { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 4px; }
-  .tip { position: absolute; padding: 3px 8px; border-radius: 6px; background: var(--c-up); color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; }
+  .tip { position: fixed; padding: 3px 8px; border-radius: 6px; background: var(--c-up); color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; z-index: 5; }
   .right { flex: none; width: 250px; display: flex; flex-direction: column; background: var(--c-surface); border-left: 1px solid var(--c-border); }
   .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--c-border); }
-  .pane-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--c-text-2); }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--c-text-2); white-space: nowrap; }
   .pane-head input { flex: 1; min-width: 0; }
-  .pane svg { flex: 1; min-height: 0; width: 100%; }
-  .status { flex: none; height: 36px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--c-surface); border-top: 1px solid var(--c-border); }
+  .pane svg { flex: 1; min-height: 0; width: 100%; background: #eef0f3; }
+  .pane svg rect[data-id] { cursor: pointer; }
+  .status { flex: none; height: 36px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--c-surface); border-top: 1px solid var(--c-border); white-space: nowrap; overflow: hidden; }
   .status a { color: var(--c-primary); cursor: pointer; }
 </style>
 </head>
 <body>
-<div class="mock-note">畫面示意（v17 簡化版，尚未開工）：左欄可以點，用來確認排版與用字；3D 與切面是畫出來的示意圖，不是真的模型。規格見 docs/plan-v17-simple-version.md</div>
+<div class="mock-note">簡化版 prototype：用方塊代替真的模型，操作方式和用字就是之後要做的樣子。可以點結構、按按鈕、拖箭頭、復原。還沒做的：轉視角、真的檔案上傳與匯出。</div>
 
 <div class="topbar">
-  <span class="brand"><i></i>Section Editor 3D</span><span class="file">tcad.vti</span>
+  <span class="brand"><i></i>Section Editor 3D</span><span class="file">範例.vti</span>
   <span class="grow"></span>
-  <button class="btn">↶ 復原</button><button class="btn" disabled>↷ 重做</button>
-  <button class="btn">看原始</button><button class="btn">全部還原</button>
-  <button class="btn primary">⤓ 匯出 .vti</button>
+  <button class="btn" id="undo">↶ 復原</button><button class="btn" id="redo">↷ 重做</button>
+  <button class="btn" id="orig" title="按住看原始，放開回到目前">按住看原始</button><button class="btn" id="reset">全部還原</button>
+  <button class="btn primary" id="export">⤓ 匯出 .vti</button>
 </div>
 
 <div class="body">
   <div class="left">
-    <div class="sec-title"><span class="num">1</span>選一個結構</div>
-    <div class="list" id="list">
-      <div class="grp"><span class="sw" style="background:var(--fin)"></span>Si fin</div>
-      <button class="item" data-name="Si fin 1" data-mat="Si fin">Si fin 1</button>
-      <button class="item" data-name="Si fin 2" data-mat="Si fin">Si fin 2</button>
-      <div class="grp"><span class="sw" style="background:var(--poly)"></span>Poly-Si</div>
-      <button class="item" data-name="Poly-Si 1" data-mat="Poly-Si">Poly-Si 1</button>
-      <button class="item on" data-name="Poly-Si 2" data-mat="Poly-Si">Poly-Si 2</button>
-      <div class="grp"><span class="sw" style="background:var(--hfo)"></span>HfO₂</div>
-      <button class="item" data-name="HfO₂ 1" data-mat="HfO₂">HfO₂ 1</button>
-      <div class="grp"><span class="sw" style="background:var(--tin)"></span>TiN</div>
-      <button class="item" data-name="TiN 1" data-mat="TiN">TiN 1</button>
-      <div class="grp"><span class="sw" style="background:var(--ild)"></span>SiO₂ ILD</div>
-      <button class="item" data-name="SiO₂ ILD 1" data-mat="SiO₂ ILD">SiO₂ ILD 1</button>
-      <div class="grp" style="padding:8px 6px"><a id="clear" style="color:var(--c-primary);cursor:pointer">取消選取（看沒選時的樣子）</a></div>
-    </div>
+    <div class="sec-title"><span class="num">1</span>選一個結構<small>（點清單或點 3D）</small></div>
+    <div class="list" id="list"></div>
 
     <div class="panel" id="panel">
-      <div class="sec-title"><span class="num">2</span>要做什麼<span id="selname" style="font-weight:400;color:var(--c-text-2)"></span></div>
+      <div class="sec-title"><span class="num">2</span>要做什麼<small id="selname"></small></div>
       <div class="empty">先在 3D 或上面的清單點一個結構</div>
       <div class="seg" id="tools">
-        <button class="on" data-tool="push">推拉一面</button>
-        <button data-tool="move">整塊平移</button>
-        <button data-tool="mat">換材質</button>
+        <button data-tool="push">推拉一面</button><button data-tool="move">整塊平移</button><button data-tool="mat">換材質</button>
       </div>
 
       <div id="t-push">
-        <div class="row"><div class="lbl">哪一面（或直接點 3D 上的箭頭）</div>
-          <div class="faces" id="faces"><button class="on">上</button><button>下</button><button>左</button><button>右</button><button>前</button><button>後</button></div>
-        </div>
-        <div class="row two"><button data-act="內縮">← 內縮</button><button data-act="外推">外推 →</button></div>
+        <div class="row"><div class="lbl">哪一面（或直接點 3D 上的箭頭）</div><div class="faces" id="faces"></div></div>
+        <div class="row two"><button id="shrink">← 內縮</button><button id="grow">外推 →</button></div>
       </div>
-
       <div id="t-move" hidden>
-        <div class="row"><div class="lbl">往哪邊搬（按一下搬一次，或在 3D 上拖箭頭）</div>
-          <div class="dpad" id="dpad"><button>上</button><button>左</button><button>前</button><button>下</button><button>右</button><button>後</button></div>
-        </div>
+        <div class="row"><div class="lbl">往哪邊搬（按一下搬一次，或在 3D 上拖箭頭）</div><div class="dpad" id="dpad"></div></div>
       </div>
-
-      <div id="t-step" class="row step">每次 <input id="n" type="number" min="1" value="1"> 格 ＝ <span id="nm">0.5</span> nm</div>
-
+      <div id="t-step" class="row step">每次 <input id="n" type="number" min="1" max="20" value="1"> 格 ＝ <span id="nm"></span> nm</div>
       <div id="t-nb" class="row">
         <div class="lbl">相鄰材質</div>
         <div class="nb" id="nb">
-          <button class="on" data-nb="follow">跟著移動
-            <svg width="92" height="46" viewBox="0 0 92 46"><rect x="6" y="2" width="80" height="6" fill="var(--ild)"/><rect x="6" y="8" width="80" height="12" fill="var(--hfo)"/><rect x="6" y="20" width="80" height="24" fill="var(--poly)"/><path d="M46 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg>
-            <span style="font-weight:400;font-size:11px">鄰居厚度不變</span>
-          </button>
+          <button data-nb="follow">跟著移動
+            <svg width="92" height="46" viewBox="0 0 92 46"><rect x="6" y="2" width="80" height="6" fill="#dcebd5"/><rect x="6" y="8" width="80" height="12" fill="#8e9aaf"/><rect x="6" y="20" width="80" height="24" fill="#e8604c"/><path d="M46 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg>
+            <span>鄰居厚度不變</span></button>
           <button data-nb="stay">留在原地
-            <svg width="92" height="46" viewBox="0 0 92 46"><rect x="6" y="2" width="80" height="14" fill="var(--ild)"/><rect x="6" y="16" width="80" height="4" fill="var(--hfo)"/><rect x="6" y="20" width="80" height="24" fill="var(--poly)"/><path d="M46 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg>
-            <span style="font-weight:400;font-size:11px">鄰居被蓋掉／補滿</span>
-          </button>
+            <svg width="92" height="46" viewBox="0 0 92 46"><rect x="6" y="2" width="80" height="14" fill="#dcebd5"/><rect x="6" y="16" width="80" height="4" fill="#8e9aaf"/><rect x="6" y="20" width="80" height="24" fill="#e8604c"/><path d="M46 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg>
+            <span>鄰居被蓋掉／補滿</span></button>
         </div>
         <div class="who" id="who"></div>
       </div>
-
       <div id="t-mat" hidden>
-        <div class="row"><div class="lbl">換成哪一種（點一下就換）</div>
-          <div class="mats" id="mats"></div>
-        </div>
+        <div class="row"><div class="lbl">換成哪一種（點一下就換）</div><div class="mats" id="mats"></div></div>
       </div>
     </div>
   </div>
 
   <div class="stage">
-    <svg class="scene" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet">
-      <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#d46b08"/></marker></defs>
-      <!-- 基板 -->
-      <polygon points="120,420 520,420 680,330 280,330" fill="#e9e5da"/><polygon points="120,420 520,420 520,470 120,470" fill="#ddd8cb"/><polygon points="520,420 680,330 680,380 520,470" fill="#cfc9ba"/>
-      <!-- 兩根 fin -->
-      <g fill="var(--fin)"><polygon points="190,400 230,400 390,310 350,310" fill="#f7cdb9"/><polygon points="190,400 230,400 230,420 190,420"/>
-      <polygon points="370,400 410,400 570,310 530,310" fill="#f7cdb9"/><polygon points="370,400 410,400 410,420 370,420"/></g>
-      <!-- 後面的 poly -->
-      <g opacity=".55"><polygon points="250,300 610,300 640,283 280,283" fill="#f08a79"/><polygon points="250,300 610,300 610,372 250,372" fill="var(--poly)"/><polygon points="610,300 640,283 640,355 610,372" fill="#c94f3d"/></g>
-      <!-- 選到的 poly：薄層（HfO₂／TiN）包在外面 -->
-      <g id="sel3d">
-        <polygon points="150,318 530,318 566,298 186,298" fill="var(--hfo)"/><polygon points="150,318 530,318 530,410 150,410" fill="var(--tin)"/><polygon points="530,318 566,298 566,390 530,410" fill="#77839a"/>
-        <polygon points="156,324 524,324 556,306 188,306" fill="#f08a79"/><polygon points="156,324 524,324 524,410 156,410" fill="var(--poly)"/><polygon points="524,324 556,306 556,392 524,410" fill="#c94f3d"/>
-        <polygon points="156,324 524,324 556,306 188,306 156,324 156,410 524,410 556,392 556,306" fill="none" stroke="#0b57d0" stroke-width="2" stroke-dasharray="6 4"/>
-        <polygon id="faceTop" points="156,324 524,324 556,306 188,306" fill="#fa8c16" opacity=".55"/>
-        <g stroke="#d46b08" stroke-width="5" marker-end="url(#ah)" fill="none" stroke-linecap="round">
-          <path id="arrTop" d="M356 312V250"/><path d="M542 356h56" opacity=".45"/><path d="M340 372l-22 34" opacity=".45"/>
-        </g>
-        <text x="368" y="262" fill="#d46b08" font-size="14" font-weight="600">上</text>
-        <text x="606" y="361" fill="#d46b08" font-size="13" opacity=".7">右</text>
-        <text x="300" y="424" fill="#d46b08" font-size="13" opacity=".7">前</text>
-        <text x="160" y="290" fill="#0b57d0" font-size="13" font-weight="600" id="lbl3d">Poly-Si 2</text>
-      </g>
-    </svg>
-    <div class="hint"><b>點一下</b>＝選結構<br><b>拖箭頭</b>＝改（放開就完成）<br><b>拖別的地方</b>＝轉視角　滾輪＝縮放</div>
-    <div class="tip" id="tip" style="left:52%;top:36%">外推 2 格（1.0 nm）</div>
-    <div class="views"><button class="btn">正面</button><button class="btn">上面</button><button class="btn">側面</button><button class="btn">全貌</button></div>
+    <svg id="scene" viewBox="0 0 800 520" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="hint"><b>點一下</b>＝選結構<br><b>拖箭頭</b>＝改（放開就完成）<br><b>順著箭頭</b>＝外推、<b>反方向</b>＝內縮</div>
   </div>
 
   <div class="right">
-    <div class="sec-title" style="font-weight:600">2D 切面<span style="font-weight:400;color:var(--c-text-2)">（只看，不能改）</span></div>
-    <div class="pane"><div class="pane-head">正面<input type="range" value="50"><span>48／96</span></div>
-      <svg viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet"><rect width="220" height="120" fill="var(--ild)"/><rect y="92" width="220" height="28" fill="#ddd8cb"/><rect y="78" width="220" height="14" fill="var(--sti)"/><rect x="60" y="50" width="14" height="42" fill="var(--fin)"/><rect x="146" y="50" width="14" height="42" fill="var(--fin)"/><path d="M20 78V34h180v44h-36V46h-22v32h-64V46h-22v32z" fill="var(--poly)" stroke="#0b57d0" stroke-width="1.5"/><rect x="20" y="24" width="180" height="10" fill="var(--sin)"/></svg></div>
-    <div class="pane"><div class="pane-head">上面<input type="range" value="40"><span>38／96</span></div>
-      <svg viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet"><rect width="220" height="120" fill="var(--ild)"/><rect x="60" width="14" height="120" fill="var(--fin)"/><rect x="146" width="14" height="120" fill="var(--fin)"/><rect x="20" y="20" width="180" height="22" fill="var(--poly)" opacity=".6"/><rect x="20" y="66" width="180" height="22" fill="var(--poly)" stroke="#0b57d0" stroke-width="1.5"/></svg></div>
-    <div class="pane"><div class="pane-head">側面<input type="range" value="60"><span>96／160</span></div>
-      <svg viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet"><rect width="220" height="120" fill="var(--ild)"/><rect y="92" width="220" height="28" fill="#ddd8cb"/><rect y="78" width="220" height="14" fill="var(--sti)"/><rect x="40" y="34" width="26" height="44" fill="var(--poly)" opacity=".6"/><rect x="126" y="34" width="26" height="44" fill="var(--poly)" stroke="#0b57d0" stroke-width="1.5"/><rect x="126" y="24" width="26" height="10" fill="var(--sin)"/></svg></div>
+    <div class="sec-title">2D 切面<small>（只看，不能改）</small></div>
+    <div class="pane"><div class="pane-head">正面<input type="range" id="sz" min="0" max="59"><span id="szt"></span></div><svg id="v-front" viewBox="0 0 80 48"></svg></div>
+    <div class="pane"><div class="pane-head">上面<input type="range" id="sy" min="-8" max="39"><span id="syt"></span></div><svg id="v-top" viewBox="0 0 80 60"></svg></div>
+    <div class="pane"><div class="pane-head">側面<input type="range" id="sx" min="0" max="79"><span id="sxt"></span></div><svg id="v-side" viewBox="0 0 60 48"></svg></div>
   </div>
 </div>
 
-<div class="status"><span id="msg">Poly-Si 2 上面外推 1 格（0.5 nm）· HfO₂、TiN 跟著移動</span><a>復原</a></div>
+<div class="status"><span id="msg">還沒有改動。點一個結構開始。</span><a id="undo2" hidden>復原</a></div>
+<div class="tip" id="tip" hidden></div>
 
 <script>
-const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)];
-const MATS = [['Si fin','--fin'],['Poly-Si','--poly'],['HfO₂','--hfo'],['TiN','--tin'],['SiN','--sin'],['SiO₂ ILD','--ild'],['STI SiO₂','--sti']];
-const st = { name: 'Poly-Si 2', mat: 'Poly-Si', tool: 'push', face: '上', nb: 'follow' };
-const n = () => Math.max(1, +$('#n').value || 1);
-const nm = (k) => (k * 0.5).toFixed(1);
-const nbText = () => (st.mat === 'Poly-Si' ? (st.nb === 'follow' ? 'HfO₂、TiN 跟著移動' : '鄰居留在原地') : st.nb === 'follow' ? '沒有會跟著的鄰居' : '鄰居留在原地');
-function render() {
-  const sel = !!st.name;
-  $('#panel').classList.toggle('off', !sel);
-  $('#selname').textContent = sel ? '：' + st.name : '';
-  $('#sel3d').style.display = sel ? '' : 'none';
-  $('#tip').style.display = sel && st.tool !== 'mat' ? '' : 'none';
-  $('#lbl3d').textContent = st.name || '';
-  $$('#list .item').forEach((b) => b.classList.toggle('on', b.dataset.name === st.name));
-  $$('#tools button').forEach((b) => b.classList.toggle('on', b.dataset.tool === st.tool));
-  $('#t-push').hidden = st.tool !== 'push';
-  $('#t-move').hidden = st.tool !== 'move';
-  $('#t-mat').hidden = st.tool !== 'mat';
-  $('#t-step').hidden = $('#t-nb').hidden = st.tool === 'mat';
-  $$('#faces button').forEach((b) => b.classList.toggle('on', b.textContent === st.face));
-  $$('#nb button').forEach((b) => b.classList.toggle('on', b.dataset.nb === st.nb));
-  $('#faceTop').style.display = st.tool === 'push' && st.face === '上' ? '' : 'none';
-  $('#nm').textContent = nm(n());
-  $('#who').textContent = st.mat === 'Poly-Si' ? (st.nb === 'follow' ? '會跟著的：HfO₂、TiN（滑過去 3D 會亮起來）' : 'HfO₂、TiN 不動，會被蓋掉或補滿') : '這一面沒有會跟著的薄層';
-  $('#tip').textContent = st.tool === 'move' ? `往${st.face}搬 ${n()} 格（${nm(n())} nm）` : `外推 ${n()} 格（${nm(n())} nm）`;
-  $('#mats').innerHTML = MATS.map(([m, c]) => `<button class="${m === st.mat ? 'on' : ''}" data-m="${m}"><span class="sw" style="background:var(${c})"></span>${m}</button>`).join('')
-    + '<button data-m="空氣"><span class="sw" style="background:#fff"></span>空氣</button><button data-m="空洞（VOID）"><span class="sw" style="background:#1f1f1f"></span>空洞（VOID）</button>';
+const $ = (s) => document.querySelector(s);
+const NM = 0.5; // 1 格 = 0.5 nm
+const W = { x: [0, 80], y: [-8, 40], z: [0, 60] }; // 模型邊界
+const COLORS = { 'Si 基板': '#ddd8cb', 'Si fin': '#f3b9a1', 'Poly-Si': '#e8604c', 'TiN': '#8e9aaf', 'SiN': '#c9b6e8', 'SiGe': '#e3b505', '空氣': '#ffffff', '空洞（VOID）': '#3a3a3a' };
+const ILD = '#dcebd5';
+const FACES = {
+  上: { axis: 'y', side: 'y1', sign: 1, opp: '下' }, 下: { axis: 'y', side: 'y0', sign: -1, opp: '上' },
+  左: { axis: 'x', side: 'x0', sign: -1, opp: '右' }, 右: { axis: 'x', side: 'x1', sign: 1, opp: '左' },
+  前: { axis: 'z', side: 'z1', sign: 1, opp: '後' }, 後: { axis: 'z', side: 'z0', sign: -1, opp: '前' },
+};
+const box = (x0, x1, y0, y1, z0, z1) => ({ x0, x1, y0, y1, z0, z1 });
+const initial = () => [
+  { id: 'sub', name: 'Si 基板', mat: 'Si 基板', b: box(0, 80, -8, 0, 0, 60) },
+  { id: 'fin1', name: 'Si fin 1', mat: 'Si fin', b: box(20, 26, 0, 14, 0, 60) },
+  { id: 'fin2', name: 'Si fin 2', mat: 'Si fin', b: box(54, 60, 0, 14, 0, 60) },
+  { id: 'tin1', name: 'TiN 1', mat: 'TiN', b: box(4, 76, 0, 26, 8, 22), wraps: 'poly1' },
+  { id: 'poly1', name: 'Poly-Si 1', mat: 'Poly-Si', b: box(6, 74, 0, 24, 10, 20) },
+  { id: 'tin2', name: 'TiN 2', mat: 'TiN', b: box(4, 76, 0, 26, 36, 50), wraps: 'poly2' },
+  { id: 'poly2', name: 'Poly-Si 2', mat: 'Poly-Si', b: box(6, 74, 0, 24, 38, 48) },
+];
+const clone = (s) => JSON.parse(JSON.stringify(s));
+
+let model = initial();
+let undoStack = [], redoStack = [];
+const ui = { sel: 'poly2', tool: 'push', face: '上', nb: 'follow', sx: 40, sy: 12, sz: 43, showOrig: false };
+let drag = null;
+
+const get = (m, id) => m.find((s) => s.id === id);
+const linerOf = (m, id) => m.find((s) => s.wraps === id);
+const stepN = () => Math.max(1, Math.min(20, Math.round(+$('#n').value) || 1));
+const nm = (k) => (Math.abs(k) * NM).toFixed(1);
+
+/** 這個方向還能外推幾格、內縮幾格（碰到模型邊界、或縮到剩 1 格為止）。 */
+function room(b, face) {
+  const f = FACES[face], a = f.axis;
+  const out = f.sign > 0 ? W[a][1] - b[f.side] : b[f.side] - W[a][0];
+  return { out, in: b[a + '1'] - b[a + '0'] - 1 };
 }
-const say = (t) => ($('#msg').textContent = t);
-$('#list').addEventListener('click', (e) => { const b = e.target.closest('.item'); if (b) { st.name = b.dataset.name; st.mat = b.dataset.mat; render(); } });
-$('#clear').onclick = () => { st.name = ''; render(); };
-$('#tools').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { st.tool = b.dataset.tool; render(); } });
-$('#faces').addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') { st.face = e.target.textContent; render(); } });
-$('#nb').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { st.nb = b.dataset.nb; render(); } });
-$('#n').addEventListener('input', render);
-$('#t-push').addEventListener('click', (e) => { const a = e.target.dataset.act; if (a) say(`${st.name} ${st.face}面${a} ${n()} 格（${nm(n())} nm）· ${nbText()}`); });
-$('#dpad').addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') { st.face = e.target.textContent; render(); say(`${st.name} 往${st.face}搬 ${n()} 格（${nm(n())} nm）· ${nbText()}`); } });
-$('#mats').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { say(`${st.name} 換成 ${b.dataset.m}`); st.mat = b.dataset.m; render(); } });
+/** 套用一步，回傳實際做了幾格。 */
+function applyOp(m, op) {
+  const s = get(m, op.id);
+  if (op.kind === 'mat') { s.mat = op.mat; return 1; }
+  const f = FACES[op.face], a = f.axis;
+  const L = op.follow ? linerOf(m, op.id) : null;
+  if (op.kind === 'push') {
+    const r = room(s.b, op.face);
+    const n = Math.max(-r.in, Math.min(r.out, op.n));
+    s.b[f.side] += f.sign * n;
+    if (L) L.b[f.side] = Math.max(W[a][0], Math.min(W[a][1], L.b[f.side] + f.sign * n));
+    return n;
+  }
+  const n = Math.max(-room(s.b, f.opp).out, Math.min(room(s.b, op.face).out, op.n));
+  for (const t of L ? [s, L] : [s]) {
+    t.b[a + '0'] = Math.max(W[a][0], t.b[a + '0'] + f.sign * n);
+    t.b[a + '1'] = Math.min(W[a][1], t.b[a + '1'] + f.sign * n);
+  }
+  return n;
+}
+function describe(op, n) {
+  const s = get(model, op.id), L = linerOf(model, op.id);
+  if (op.kind === 'mat') return `${s.name} 換成 ${op.mat}`;
+  const nb = !L ? '' : op.follow ? `· ${L.mat} 跟著移動` : `· ${L.mat} 留在原地`;
+  if (op.kind === 'push') return `${s.name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${Math.abs(n)} 格（${nm(n)} nm）${nb}`;
+  return `${s.name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${Math.abs(n)} 格（${nm(n)} nm）${nb}`;
+}
+function commit(op) {
+  const before = clone(model);
+  const n = applyOp(model, op);
+  if (!n) { say(op.kind === 'push' ? (op.n > 0 ? '已經到模型邊界，不能再外推' : '已經縮到最小') : '已經到模型邊界，不能再搬', false); model = before; return render(); }
+  undoStack.push(before); redoStack = [];
+  say(describe(op, n), true);
+  render();
+}
+function say(t, canUndo) { $('#msg').textContent = t; $('#undo2').hidden = !canUndo; }
+
+// ---- 3D（斜投影：x 往右、y 往上、z 往前＝左下）----
+const P = (x, y, z) => [150 + 5.4 * x + 2.6 * (60 - z), 420 - 5.4 * y - 1.6 * (60 - z)];
+const SCREEN = { x: [5.4, 0], y: [0, -5.4], z: [-2.6, 1.6] };
+const pts = (a) => a.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(' ');
+const mix = (hex, t) => { // t > 0 變亮、t < 0 變暗
+  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return '#' + c.map((v) => Math.round(t > 0 ? v + (255 - v) * t : v * (1 + t)).toString(16).padStart(2, '0')).join('');
+};
+const faceQuad = (b, face) => ({
+  上: [P(b.x0, b.y1, b.z1), P(b.x1, b.y1, b.z1), P(b.x1, b.y1, b.z0), P(b.x0, b.y1, b.z0)],
+  下: [P(b.x0, b.y0, b.z1), P(b.x1, b.y0, b.z1), P(b.x1, b.y0, b.z0), P(b.x0, b.y0, b.z0)],
+  右: [P(b.x1, b.y0, b.z1), P(b.x1, b.y0, b.z0), P(b.x1, b.y1, b.z0), P(b.x1, b.y1, b.z1)],
+  左: [P(b.x0, b.y0, b.z1), P(b.x0, b.y0, b.z0), P(b.x0, b.y1, b.z0), P(b.x0, b.y1, b.z1)],
+  前: [P(b.x0, b.y0, b.z1), P(b.x1, b.y0, b.z1), P(b.x1, b.y1, b.z1), P(b.x0, b.y1, b.z1)],
+  後: [P(b.x0, b.y0, b.z0), P(b.x1, b.y0, b.z0), P(b.x1, b.y1, b.z0), P(b.x0, b.y1, b.z0)],
+})[face];
+const center = (q) => [(q[0][0] + q[2][0]) / 2, (q[0][1] + q[2][1]) / 2];
+function boxSvg(b, color, id) {
+  return `<g data-id="${id}"><polygon points="${pts(faceQuad(b, '上'))}" fill="${mix(color, 0.3)}"/><polygon points="${pts(faceQuad(b, '右'))}" fill="${mix(color, -0.18)}"/><polygon points="${pts(faceQuad(b, '前'))}" fill="${color}"/></g>`;
+}
+/** 畫的順序：基板 → 由後到前。gate（TiN＋Poly）一組；fin 被 gate 切成幾段，藏在 gate 裡的那段不畫。 */
+function pieces(m) {
+  const out = [];
+  const gates = m.filter((s) => s.wraps).map((l) => ({ l, p: get(m, l.wraps), z0: Math.min(l.b.z0, get(m, l.wraps).b.z0), z1: Math.max(l.b.z1, get(m, l.wraps).b.z1) }));
+  for (const g of gates) out.push({ key: (g.z0 + g.z1) / 2, items: [g.l, g.p] });
+  for (const s of m) {
+    if (s.id === 'sub' || s.wraps || gates.some((g) => g.p === s)) continue;
+    let segs = [[s.b.z0, s.b.z1]];
+    for (const g of gates) {
+      const hit = g.l.b.x0 < s.b.x1 && g.l.b.x1 > s.b.x0 && g.l.b.y1 >= s.b.y1;
+      if (hit) segs = segs.flatMap(([a, c]) => [[a, Math.min(c, g.z0)], [Math.max(a, g.z1), c]].filter(([p, q]) => q > p));
+    }
+    for (const [a, c] of segs) out.push({ key: (a + c) / 2, items: [{ ...s, b: { ...s.b, z0: a, z1: c } }] });
+  }
+  return out.sort((a, b) => a.key - b.key).flatMap((p) => p.items);
+}
+function draw3d(m) {
+  const sub = get(m, 'sub');
+  let h = '<defs><marker id="ah" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto"><path d="M0 0 10 5 0 10z" fill="context-stroke"/></marker></defs>';
+  h += `<rect width="800" height="520" fill="transparent" data-bg="1"/>` + boxSvg(sub.b, COLORS[sub.mat], 'sub');
+  for (const s of pieces(m)) h += boxSvg(s.b, COLORS[s.mat], s.id);
+  const sel = get(m, ui.sel);
+  if (sel && !ui.showOrig) {
+    const b = sel.b;
+    const sil = [P(b.x0, b.y0, b.z1), P(b.x1, b.y0, b.z1), P(b.x1, b.y0, b.z0), P(b.x1, b.y1, b.z0), P(b.x0, b.y1, b.z0), P(b.x0, b.y1, b.z1)];
+    h += `<polygon points="${pts(sil)}" fill="none" stroke="#0b57d0" stroke-width="2" stroke-dasharray="6 4" pointer-events="none"/>`;
+    h += `<text x="${sil[5][0]}" y="${sil[4][1] - 8}" fill="#0b57d0" font-size="14" font-weight="600" pointer-events="none">${sel.name}</text>`;
+    if (ui.tool !== 'mat') {
+      if (ui.tool === 'push') {
+        const vis = '上右前'.includes(ui.face);
+        h += `<polygon points="${pts(faceQuad(b, ui.face))}" fill="#fa8c16" fill-opacity="${vis ? 0.5 : 0.12}" stroke="#fa8c16" stroke-width="1.5" ${vis ? '' : 'stroke-dasharray="4 3"'} pointer-events="none"/>`;
+      }
+      for (const [name, f] of Object.entries(FACES)) {
+        const [cx, cy] = center(faceQuad(b, name));
+        const [vx, vy] = SCREEN[f.axis], len = Math.hypot(vx, vy);
+        const ux = (vx / len) * f.sign, uy = (vy / len) * f.sign;
+        const on = ui.tool === 'push' ? ui.face === name : false;
+        const faint = !'上右前'.includes(name) && !on;
+        h += `<g class="arrow ${on ? 'on' : ''}" data-arrow="${name}" opacity="${faint ? 0.55 : 1}">
+          <path d="M${cx} ${cy}L${cx + ux * 46} ${cy + uy * 46}" stroke="transparent" stroke-width="22" stroke-linecap="round" style="stroke:transparent"/>
+          <path d="M${cx + ux * 4} ${cy + uy * 4}L${cx + ux * 40} ${cy + uy * 40}" stroke="#d46b08" stroke-width="5" stroke-linecap="round" marker-end="url(#ah)"/>
+          <text x="${cx + ux * 58}" y="${cy + uy * 58 + 5}" text-anchor="middle" fill="#ad4e00" font-size="13" font-weight="600" paint-order="stroke" stroke="#fff" stroke-width="3">${name}</text></g>`;
+      }
+    }
+  }
+  $('#scene').innerHTML = h;
+}
+
+// ---- 2D 切面（只看）----
+function draw2d(m) {
+  const order = [...m].sort((a, b) => (a.mat === 'Si fin') - (b.mat === 'Si fin')); // fin 最後畫（包在 gate 裡也看得到）
+  const rect = (s, x, y, w, hh) => `<rect data-id="${s.id}" x="${x}" y="${y}" width="${w}" height="${hh}" fill="${COLORS[s.mat]}" ${s.id === ui.sel && !ui.showOrig ? 'stroke="#0b57d0" stroke-width="0.8"' : ''}/>`;
+  const front = order.filter((s) => s.b.z0 <= ui.sz && ui.sz < s.b.z1).map((s) => rect(s, s.b.x0, 40 - s.b.y1, s.b.x1 - s.b.x0, s.b.y1 - s.b.y0));
+  const top = order.filter((s) => s.b.y0 <= ui.sy && ui.sy < s.b.y1).map((s) => rect(s, s.b.x0, s.b.z0, s.b.x1 - s.b.x0, s.b.z1 - s.b.z0));
+  const side = order.filter((s) => s.b.x0 <= ui.sx && ui.sx < s.b.x1).map((s) => rect(s, 60 - s.b.z1, 40 - s.b.y1, s.b.z1 - s.b.z0, s.b.y1 - s.b.y0));
+  $('#v-front').innerHTML = `<rect width="80" height="48" fill="${ILD}"/>` + front.join('');
+  $('#v-top').innerHTML = `<rect width="80" height="60" fill="${ILD}"/>` + top.join('');
+  $('#v-side').innerHTML = `<rect width="60" height="48" fill="${ILD}"/>` + side.join('');
+  for (const k of ['sx', 'sy', 'sz']) $('#' + k).value = ui[k];
+  $('#szt').textContent = `第 ${ui.sz + 1} 片`; $('#syt').textContent = `第 ${ui.sy + 9} 片`; $('#sxt').textContent = `第 ${ui.sx + 1} 片`;
+}
+
+// ---- 左欄 ----
+function drawPanel(m) {
+  const sel = get(m, ui.sel);
+  const groups = {};
+  for (const s of m) (groups[s.mat] ??= []).push(s);
+  $('#list').innerHTML = Object.entries(groups).map(([mat, ss]) =>
+    `<div class="grp"><span class="sw" style="background:${COLORS[mat]}"></span>${mat}</div>` + ss.map((s) => `<button class="item ${s.id === ui.sel ? 'on' : ''}" data-id="${s.id}">${s.name}</button>`).join('')).join('');
+  $('#panel').classList.toggle('off', !sel);
+  $('#selname').textContent = sel ? '：' + sel.name : '';
+  for (const b of $('#tools').children) b.classList.toggle('on', b.dataset.tool === ui.tool);
+  $('#t-push').hidden = ui.tool !== 'push'; $('#t-move').hidden = ui.tool !== 'move'; $('#t-mat').hidden = ui.tool !== 'mat';
+  $('#t-step').hidden = $('#t-nb').hidden = ui.tool === 'mat';
+  $('#nm').textContent = nm(stepN());
+  $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length; $('#reset').disabled = !undoStack.length;
+  if (!sel) return;
+  const r = room(sel.b, ui.face);
+  $('#faces').innerHTML = Object.keys(FACES).map((f) => `<button class="${f === ui.face ? 'on' : ''}">${f}</button>`).join('');
+  $('#grow').disabled = r.out <= 0; $('#grow').title = r.out <= 0 ? '已經到模型邊界' : '';
+  $('#shrink').disabled = r.in <= 0; $('#shrink').title = r.in <= 0 ? '已經縮到最小' : '';
+  $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((f) => { const no = room(sel.b, f).out <= 0; return `<button ${no ? 'disabled title="已經到模型邊界"' : ''}>${f}</button>`; }).join('');
+  const L = linerOf(m, sel.id);
+  for (const b of $('#nb').children) { b.classList.toggle('on', b.dataset.nb === ui.nb && !!L); b.disabled = !L; }
+  $('#who').textContent = !L ? '這個結構外面沒有貼著的薄層，所以沒有東西會跟著。' : ui.nb === 'follow' ? `會跟著的：${L.mat}（${L.name}）` : `${L.mat}（${L.name}）不動，會被蓋掉或補滿。`;
+  $('#mats').innerHTML = Object.keys(COLORS).filter((k) => k !== 'Si 基板').map((k) => `<button class="${k === sel.mat ? 'on' : ''}" data-m="${k}"><span class="sw" style="background:${COLORS[k]}"></span>${k}</button>`).join('');
+}
+
+const origModel = initial();
+function render() {
+  const m = ui.showOrig ? origModel : drag ? drag.live : model;
+  draw3d(m); draw2d(m); drawPanel(m);
+}
+function select(id) {
+  ui.sel = id;
+  const s = get(model, id);
+  if (s) { ui.sx = Math.floor((s.b.x0 + s.b.x1) / 2); ui.sy = Math.floor((s.b.y0 + s.b.y1) / 2); ui.sz = Math.floor((s.b.z0 + s.b.z1) / 2); }
+  render();
+}
+const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', id: ui.sel, face, n, follow: ui.nb === 'follow' });
+
+// ---- 事件 ----
+$('#list').onclick = (e) => { const b = e.target.closest('.item'); if (b) select(b.dataset.id); };
+$('#tools').onclick = (e) => { const b = e.target.closest('button'); if (b) { ui.tool = b.dataset.tool; render(); } };
+$('#faces').onclick = (e) => { if (e.target.tagName === 'BUTTON') { ui.face = e.target.textContent; render(); } };
+$('#nb').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) { ui.nb = b.dataset.nb; render(); } };
+$('#n').oninput = render;
+$('#grow').onclick = () => commit(curOp(ui.face, stepN()));
+$('#shrink').onclick = () => commit(curOp(ui.face, -stepN()));
+$('#dpad').onclick = (e) => { if (e.target.tagName === 'BUTTON' && !e.target.disabled) commit(curOp(e.target.textContent, stepN())); };
+$('#mats').onclick = (e) => { const b = e.target.closest('button'); if (b) commit({ kind: 'mat', id: ui.sel, mat: b.dataset.m }); };
+function undo() { if (!undoStack.length) return; redoStack.push(clone(model)); model = undoStack.pop(); say('已復原上一步', false); render(); }
+function redo() { if (!redoStack.length) return; undoStack.push(clone(model)); model = redoStack.pop(); say('已重做', true); render(); }
+$('#undo').onclick = $('#undo2').onclick = undo;
+$('#redo').onclick = redo;
+$('#reset').onclick = () => { undoStack.push(clone(model)); redoStack = []; model = initial(); say('已全部還原成原始的樣子', true); render(); };
+$('#export').onclick = () => say('（prototype 沒有真的匯出）正式版會存成一個和輸入同格式的 .vti', false);
+const orig = $('#orig');
+orig.onpointerdown = () => { ui.showOrig = true; render(); };
+orig.onpointerup = orig.onpointerleave = () => { if (ui.showOrig) { ui.showOrig = false; render(); } };
+addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
+  else if (e.key === 'Escape') { if (drag) { drag = null; $('#tip').hidden = true; render(); } else select(null); }
+});
+for (const k of ['sx', 'sy', 'sz']) $('#' + k).oninput = (e) => { ui[k] = +e.target.value; draw2d(ui.showOrig ? origModel : model); };
+for (const v of ['#v-front', '#v-top', '#v-side']) $(v).onclick = (e) => { const id = e.target.dataset.id; if (id) select(id); };
+
+// 3D：點方塊＝選；拖箭頭＝改（順著箭頭＝外推／往那邊搬，反方向＝內縮／往另一邊）
+const scene = $('#scene');
+const toSvg = (e) => { const p = scene.createSVGPoint(); p.x = e.clientX; p.y = e.clientY; return p.matrixTransform(scene.getScreenCTM().inverse()); };
+scene.onpointerdown = (e) => {
+  const a = e.target.closest('[data-arrow]');
+  if (!a) return;
+  const face = a.dataset.arrow;
+  if (ui.tool === 'push') ui.face = face;
+  drag = { face, start: toSvg(e), n: 0, live: clone(model) };
+  scene.setPointerCapture(e.pointerId);
+  render();
+};
+scene.onpointermove = (e) => {
+  if (!drag) return;
+  const f = FACES[drag.face], [vx, vy] = SCREEN[f.axis], len = Math.hypot(vx, vy), p = toSvg(e);
+  const want = Math.round((((p.x - drag.start.x) * vx + (p.y - drag.start.y) * vy) / len / len) * f.sign);
+  drag.live = clone(model);
+  drag.n = applyOp(drag.live, curOp(drag.face, want));
+  const tip = $('#tip');
+  tip.hidden = false; tip.style.left = e.clientX + 16 + 'px'; tip.style.top = e.clientY - 28 + 'px';
+  tip.textContent = !drag.n ? (want ? '到底了' : '拖一下') : ui.tool === 'move' ? `往${drag.n > 0 ? drag.face : f.opp}搬 ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）` : `${drag.n > 0 ? '外推' : '內縮'} ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）`;
+  draw3d(drag.live); draw2d(drag.live);
+};
+scene.onpointerup = scene.onpointercancel = (e) => {
+  if (drag) { const d = drag; drag = null; $('#tip').hidden = true; if (d.n) commit(curOp(d.face, d.n)); else render(); return; }
+};
+scene.onclick = (e) => {
+  if (e.target.closest('[data-arrow]')) return;
+  const g = e.target.closest('[data-id]');
+  if (g) select(g.dataset.id); else if (e.target.dataset.bg) select(null);
+};
 render();
 </script>
 </body>

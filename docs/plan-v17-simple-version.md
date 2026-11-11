@@ -1,7 +1,7 @@
 # v17 簡化版 prototype（規格，尚未開工）
 
 > 分支：`simple-version`（從 `0a40d0d` 分出，完整版留在 `claude/upbeat-einstein-wod16i`）。
-> 這份文件只定義「簡化版長什麼樣、怎麼操作」，**程式一行都還沒動**。畫面示意：`docs/proto-v17-simple-version.html`（靜態示意，可以點）。
+> 這份文件只定義「簡化版長什麼樣、怎麼操作」，**程式一行都還沒動**。可操作的 prototype：`docs/proto-v17-simple-version.html`（用方塊代替真的模型；可以點結構、按按鈕、拖箭頭、復原）。
 > §8 有四個需要你決定的地方，決定後才開工。
 
 ## 0. 一句話

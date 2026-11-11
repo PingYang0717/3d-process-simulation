@@ -20,7 +20,7 @@ describe('apply／chunks／layer 的進度與取消', () => {
     const L = initialLabeled(vol, matName);
     const fin = L.comps.find((c) => c.mat === 3)!;
     const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
-    const op: Op = { kind: 'level', keys: [fin.key], scope: full, dir: [0, -1, 0], to: fin.bbox.y0, local: { center: [0, 0, 0], radius: null }, backfill: 'orig', follow: true };
+    const op: Op = { kind: 'push', keys: [fin.key], scope: full, dir: [0, -1, 0], n: 3, follow: true, backfill: 'outer', policy: 'adjacent', liners: [4, 5, 7] };
     core.handle('fork', { owner: 'c1', src: 'base', sid: 500 });
     const before = core.inspect().books.get('c1')!.data.slice();
     const req = { owner: 'c1', from: 500, to: 501, comps: L.comps, op, matNames, keyCounter: 1000 };

@@ -1,17 +1,33 @@
 // 縮窄時空出來的地方：'outer'（新預設）由外面緊鄰的那一層補上，不留空氣；'orig' 照舊（舊 Op 重播不變）。
 import { describe, expect, it } from 'vitest';
-import { pushSeq } from './volume';
-import { cdSteps } from './ops';
+import { type Backfill, type Vec3, type Volume, growMask } from './volume';
 import { fullScope } from './scope';
-import type { Backfill } from './volume';
+
+/** 沿 x 兩側各推一半（左 floor、右 ceil，和舊的 cd 一樣）：第二面用第一面推完之後結構真正的格子（growMask 的 maskOut）。 */
+function cd(vol: Volume, mask: Uint8Array, delta: number, follow: boolean, backfill: Backfill, policy: 'block' | 'overwrite') {
+  const s = Math.sign(delta);
+  const m = Math.abs(delta);
+  const steps: [Vec3, number][] = [
+    [[-1, 0, 0], s * Math.floor(m / 2)],
+    [[1, 0, 0], s * Math.ceil(m / 2)],
+  ];
+  let cur = vol;
+  let mk = mask;
+  for (const [dir, n] of steps) {
+    if (!n) continue;
+    const next = new Uint8Array(mk.length);
+    cur = growMask(cur, vol, mk, fullScope(vol), dir, n, backfill, follow, undefined, policy, next);
+    mk = next;
+  }
+  return cur;
+}
 
 // 一維：gate(5)×4｜spacer(4)×6｜HfO₂(3)×2｜fin(1)×8｜HfO₂×2｜spacer×6｜gate×4
 const ROW = [5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5];
 const run = (delta: number, follow: boolean, backfill: Backfill, policy: 'block' | 'overwrite' = 'overwrite') => {
   const vol = { X: ROW.length, Y: 1, Z: 1, data: Uint8Array.from(ROW) };
   const mask = Uint8Array.from(ROW.map((m) => (m === 1 ? 1 : 0)));
-  const steps = cdSteps({ kind: 'cd', keys: [], scope: fullScope(vol), axis: 0, delta, anchor: 'center', follow, backfill, policy });
-  return Array.from(pushSeq(vol, vol, mask, steps, backfill, follow, policy).data).join('');
+  return Array.from(cd(vol, mask, delta, follow, backfill, policy).data).join('');
 };
 
 describe("縮窄的回填 'outer'", () => {
@@ -31,18 +47,16 @@ describe("縮窄的回填 'outer'", () => {
     const row = [4, 4, 3, 3, 1, 1, 1, 1, 3, 3, 4, 4];
     const vol = { X: row.length, Y: 1, Z: 1, data: Uint8Array.from(row) };
     const mask = Uint8Array.from(row.map((m) => (m === 1 ? 1 : 0)));
-    const steps = cdSteps({ kind: 'cd', keys: [], scope: fullScope(vol), axis: 0, delta: -2, anchor: 'center', follow: true, backfill: 'outer', policy: 'overwrite' });
-    expect(Array.from(pushSeq(vol, vol, mask, steps, 'outer', true, 'overwrite').data).join('')).toBe('444331133444');
+    expect(Array.from(cd(vol, mask, -2, true, 'outer', 'overwrite').data).join('')).toBe('444331133444');
   });
   it('長寬再縮回來＝原樣（外面的層夠厚）', () => {
     // spacer 8 格：長寬時被推開的 HfO₂ 吃掉 2 格後仍是厚層（> LINER_MAX），縮回時不會被當成襯層一起拉
     const ROW = [5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5];
     const vol = { X: ROW.length, Y: 1, Z: 1, data: Uint8Array.from(ROW) };
     const mask = Uint8Array.from(ROW.map((m) => (m === 1 ? 1 : 0)));
-    const grow = cdSteps({ kind: 'cd', keys: [], scope: fullScope(vol), axis: 0, delta: 4, anchor: 'center', follow: true, backfill: 'outer', policy: 'overwrite' });
-    const g = pushSeq(vol, vol, mask, grow, 'outer', true, 'overwrite');
+    const g = cd(vol, mask, 4, true, 'outer', 'overwrite');
     const m2 = Uint8Array.from(Array.from(g.data).map((m) => (m === 1 ? 1 : 0)));
-    const shrink = cdSteps({ kind: 'cd', keys: [], scope: fullScope(vol), axis: 0, delta: -4, anchor: 'center', follow: true, backfill: 'outer', policy: 'overwrite' });
-    expect(Array.from(pushSeq(g, vol, m2, shrink, 'outer', true, 'overwrite').data).join('')).toBe(ROW.join(''));
+    const back = cd(g, m2, -4, true, 'outer', 'overwrite');
+    expect(Array.from(back.data).join('')).toBe(ROW.join(''));
   });
 });

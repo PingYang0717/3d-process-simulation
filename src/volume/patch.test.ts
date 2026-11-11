@@ -178,8 +178,7 @@ describe('globalIndex（plan v14 §5.1：從 cellCloud 搬來）', () => {
 
 describe('diff 外框 O(X+Y+Z)（plan v15 A2）', () => {
   it('隨機 50 步（含 back／reset）：carryStepStats 維護的 axes → diffBoxOfAxes === tightBox(dims, diff, touch)；recountAxes 重數相同；voidAxes === recountMatAxes(VOID) 整陣列重數（M15.7）', async () => {
-    const { diffBoxOfAxes, newAxes, recountAxes, recountMatAxes, tightBox, unionBox } = await import('./patch');
-    const { stepTouch } = await import('../splits/lifecycle');
+    const { diffBoxOfAxes, newAxes, recountAxes, recountMatAxes, stepTouch, tightBox, unionBox } = await import('./patch');
     let seq = 1000;
     const ctx = { orig: vol, matName, newKey: () => `c${seq++}` };
     const data = vol.data.slice();

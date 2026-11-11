@@ -3,11 +3,10 @@
 // plan v9 §4.3：applyOpInPlace 直接改 data／labels（不影印整個陣列）；applyOpLocal 是複製後呼叫它的純函式包裝。
 // 結果和 applyOp 逐體素相同（apply.test.ts）。
 import { type BBox, type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
-import { type EditState, type LegacyOp, type Op, type OpContext, adjacentDir, isAdjacent, upgradeOp } from './ops';
+import { type EditState, type Op, type OpContext, adjacentDir, isAdjacent } from './ops';
 import { previewBox, previewOp } from './preview';
 import { type Step, cropArr, diffInBox, globalIndex, pasteArr } from './patch';
 import { type Report, newReport } from './kernel';
-import { axisIndex } from './scope';
 
 export interface Applied {
   state: { vol: Volume; L: Labeled };
@@ -26,8 +25,8 @@ export interface AppliedInPlace {
  * 原地套一步：s.vol.data 與 s.L.labels 直接改成結果。順序：先在裁切盒裡算 → 找出 R → 裁「改前」→ 貼 → 原地 relabel。
  * 沒改到任何體素時陣列不動、step 全是 null。
  */
-export function applyOpInPlace(s: EditState, input: Op | LegacyOp, ctx: OpContext): AppliedInPlace {
-  return applyOpCommit(s, applyOpPrepare(s, input, ctx), ctx);
+export function applyOpInPlace(s: EditState, op: Op, ctx: OpContext): AppliedInPlace {
+  return applyOpCommit(s, applyOpPrepare(s, op, ctx), ctx);
 }
 
 /** 第一段算好、還沒貼回陣列的結果（Worker 在這裡可以取消：帳簿一格都還沒動）。 */
@@ -44,18 +43,11 @@ export interface AppliedPrep {
  * 第一段（純算，不改 s）：裁 previewBox、在裁切範圍裡算結果、找出真正改到的外框 R。
  * 重的都在這裡（補平、推面、relabel 以外的部分）；Worker 把它和 applyOpCommit 之間當成取消點。
  */
-export function applyOpPrepare(s: EditState, input: Op | LegacyOp, ctx: OpContext): AppliedPrep {
-  const op = upgradeOp(input);
+export function applyOpPrepare(s: EditState, op: Op, ctx: OpContext): AppliedPrep {
   const report = newReport();
   const box = previewBox(s, op);
   if (!box) return { op, report, box: null, R: null, data: null };
-  const p = previewOp(s, ctx.orig, op, Infinity, report, undefined, box)!;
-  if (op.kind === 'profile') {
-    // scope 裡、選取外框外面的片：這個結構根本不在，算略過
-    const a = axisIndex(op.scope.axis);
-    const [blo, bhi] = [[box.x0, box.y0, box.z0][a], [box.x1, box.y1, box.z1][a]];
-    for (let t = op.scope.lo; t <= op.scope.hi; t++) if (t < blo || t > bhi) report.skipped.push(t);
-  }
+  const p = previewOp(s, ctx.orig, op, Infinity, report, box)!;
   // 被擋的格子：裁切範圍的 index → 整個陣列
   report.blockedAt = globalIndex(box, s.vol, report.blockedAt);
   if (report.stop?.at !== undefined) report.stop = { ...report.stop, at: globalIndex(box, s.vol, [report.stop.at])[0] };
@@ -112,10 +104,10 @@ export function applyOpCommit(s: EditState, prep: AppliedPrep, ctx: OpContext): 
 }
 
 /** 純函式版本：複製 data／labels 後原地套用，s 不變。 */
-export function applyOpLocal(s: EditState, input: Op | LegacyOp, ctx: OpContext): Applied {
+export function applyOpLocal(s: EditState, op: Op, ctx: OpContext): Applied {
   const vol: Volume = { X: s.vol.X, Y: s.vol.Y, Z: s.vol.Z, data: s.vol.data.slice() };
   const labels = s.L.labels.slice();
-  const r = applyOpInPlace({ vol, L: { labels, comps: s.L.comps } }, input, ctx);
+  const r = applyOpInPlace({ vol, L: { labels, comps: s.L.comps } }, op, ctx);
   if (!r.step.data) return { state: { vol: s.vol, L: s.L }, step: r.step, report: r.report };
   return { state: { vol, L: { labels, comps: r.comps } }, step: r.step, report: r.report };
 }

@@ -261,8 +261,6 @@ export default function Section3DPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ed.tool, ed.nmPerVoxel, ed.face, ed.probe],
   );
-  const noOp = useMemo(() => () => null, []);
-  const brush = useMemo(() => ({ mode: 'push' as const, radius: null, shape: 'round' as const }), []);
   const working = !!ed.busy;
 
   const slice = (axis: Axis) => {
@@ -365,26 +363,18 @@ export default function Section3DPage() {
               words={words}
               scope={ed.scope}
               cursor={ed.cursor}
-              clip={null}
-              diffMask={null}
               mode={mode}
-              brush={brush}
               tool={peek || !ed.sel.size || ed.tool === 'mat' ? null : 'handles'}
               dimOthers={ed.sel.size > 0 && !peek}
               faceOp={ed.faceOp}
               onCommit={ed.commit}
-              nmPerVoxel={ed.nmPerVoxel}
-              orig={ed.orig.vol}
               preview={p}
               onPreview={(op) => {
                 if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
                 endLive();
                 return false;
               }}
-              toOp={noOp}
               onPick={(v, m) => ed.pickVoxel(v, m)}
-              onMenu={() => {}}
-              onSculpt={() => {}}
               onHover={hover.set}
               floatRef={tagRef}
               handle={view}

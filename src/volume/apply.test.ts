@@ -42,7 +42,8 @@ describe('只在外框裡算＋補丁（§8.2、§8.3）', () => {
   const cases: [string, Op][] = [
     ['poly 往上長 2（跟推）', { kind: 'push', keys: [poly[0].key], scope: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' }],
     ['poly 往上縮 3（跟退）', { kind: 'push', keys: [poly[1].key], scope: full, dir: [0, -1, 0], n: -3, follow: true, backfill: 'orig' }],
-    ['fin 方頭', { kind: 'level', keys: [fin.key], scope: full, dir: [0, -1, 0], to: fin.bbox.y0, local: { center: [40, 30, 64], radius: null }, backfill: 'orig', follow: true }],
+    ['fin 上面外推 3（相鄰材質規則，跟著移動）', { kind: 'push', keys: [fin.key], scope: full, dir: [0, -1, 0], n: 3, follow: true, backfill: 'outer', policy: 'adjacent', liners: [4, 5, 7] }],
+    ['兩根 poly 往右平移 2（相鄰材質規則）', { kind: 'translate', keys: [poly[1].key, poly[2].key], scope: full, d: [2, 0, 0], backfill: 'outer', follow: true, policy: 'adjacent', liners: [4, 5, 7] }],
     ['兩根 poly 平移', { kind: 'translate', keys: [poly[1].key, poly[2].key], scope: full, d: [3, 0, -2], backfill: 'orig' }],
     ['fin 帶殼平移、只搬一段', { kind: 'translate', keys: [fin.key], scope: { axis: 'z', lo: 40, hi: 90 }, d: [2, 0, 0], backfill: 'orig', follow: true }],
     ['fin 一段換材質（切斷 fin，會多出新結構）', { kind: 'material', keys: [fin.key], scope: { axis: 'z', lo: 60, hi: 64 }, m: 0 }],
@@ -73,7 +74,7 @@ describe('只在外框裡算＋補丁（§8.2、§8.3）', () => {
       { kind: 'material', keys: [fin.key], scope: { axis: 'z', lo: 60, hi: 64 }, m: 0 },
       // 再把切開的地方補回 Si fin：兩塊併回一塊
       { kind: 'push', keys: [fin.key], scope: { axis: 'z', lo: 60, hi: 64 }, dir: [0, 0, 1], n: 5, follow: false, backfill: 'orig' },
-      { kind: 'push', keys: [poly[2].key], scope: full, dir: [1, 0, 0], n: -3, follow: false, backfill: 'orig', local: { center: [120, 30, 100], radius: 5 } },
+      { kind: 'push', keys: [poly[2].key], scope: full, dir: [1, 0, 0], n: -3, follow: false, backfill: 'orig' },
     ];
     let a: EditState = base;
     let b: EditState = base;
@@ -104,10 +105,9 @@ describe('只在外框裡算＋補丁（§8.2、§8.3）', () => {
     expect(got.state.vol).toBe(vol);
   });
 
-  it('報告：方頭不跟推時被 TiN／HfO₂ 擋住的格數', () => {
-    const op: Op = { kind: 'level', keys: [fin.key], scope: full, dir: [0, -1, 0], to: fin.bbox.y0, local: { center: [40, 30, 64], radius: null }, backfill: 'orig', follow: false };
+  it('報告：推面不跟推（block）時被 HfO₂ 擋住的格數', () => {
+    const op: Op = { kind: 'push', keys: [fin.key], scope: full, dir: [0, -1, 0], n: 2, follow: false, backfill: 'orig', policy: 'block' };
     const got = applyOpLocal(base, op, { orig: vol, matName, newKey: () => 'k' });
-    expect(got.report.filled).toBeGreaterThan(0);
     expect(got.report.blocked).toBeGreaterThan(0);
     expect(Object.keys(got.report.blockedBy).map(Number).every((m) => m === 4 || m === 5)).toBe(true);
   }, 30_000);

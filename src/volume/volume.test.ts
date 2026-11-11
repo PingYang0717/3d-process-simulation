@@ -10,7 +10,7 @@ import {
   materialCounts,
 } from './volume';
 import { crc32, zipStore } from './zip';
-import { type EditState, type Op, type OpContext, applyOp, matNameOf, replay, sweepOps } from './ops';
+import { type EditState, type Op, type OpContext, applyOp, matNameOf, replay } from './ops';
 
 const UP: [number, number, number] = [0, -1, 0];
 const DOWN: [number, number, number] = [0, 1, 0];
@@ -104,11 +104,11 @@ describe('逐體素', () => {
     expect((after.get(6) ?? 0) - (before.get(6) ?? 0)).not.toBe(0);
   });
 
-  it('掃描 +1／+2／+3 nm：高 H 42 → 44／46／48、頂部 Y 18 → 16／14／12', () => {
+  it('往上長 +1／+2／+3 nm：高 H 42 → 44／46／48、頂部 Y 18 → 16／14／12', () => {
     const { base, ctx, poly, full } = setup();
     const keys = poly.map((c) => c.key);
     const nm = 0.5;
-    const ops = sweepOps({ kind: 'push', dir: UP }, keys, full, [1, 2, 3].map((v) => Math.round(v / nm)), true, 'orig');
+    const ops: Op[] = [1, 2, 3].map((v) => ({ kind: 'push', keys, scope: full, dir: UP, n: Math.round(v / nm), follow: true, backfill: 'orig' }));
     const p0 = bboxDims(poly[0].bbox);
     expect([p0.h, p0.y]).toEqual([42, 18]);
     const res = ops.map((op) => {

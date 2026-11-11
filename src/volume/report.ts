@@ -1,7 +1,7 @@
 // 一步操作的報告（plan v7 §7.4）：總數、哪幾片有被擋（「看這些片」）、被擋的格子（切面上標紅）。
 import type { Axis, Volume } from './volume';
 import type { Block, Report } from './kernel';
-import { type LegacyOp, type Op, upgradeOp } from './ops';
+import type { Op } from './ops';
 import { axisIndex } from './scope';
 
 export interface SliceReport {
@@ -62,8 +62,7 @@ export function stepEffects(before: Uint8Array, after: Uint8Array, self: Set<num
 export const BLOCKED_CAP = 50_000;
 
 /** Report → OpReport：在 Worker 端做（apply／applyParked），主執行緒只拿摘要，不 clone 整個 blockedAt。 */
-export function summarize(r: Report, input: Op | LegacyOp, dims: Pick<Volume, 'X' | 'Y'>): OpReport {
-  const op = upgradeOp(input);
+export function summarize(r: Report, op: Op, dims: Pick<Volume, 'X' | 'Y'>): OpReport {
   const axis = op.scope.axis;
   const a = axisIndex(axis);
   const per = new Map<number, number>();

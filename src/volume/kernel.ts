@@ -1,5 +1,5 @@
 // 改體素的核心規則（plan v7 §7.2）：加、拿、搬三條規則只寫在這裡。
-// growMask／levelMask／translateMask（3D 與右欄）和 profile（2D 剖面編輯）都呼叫它，所以兩邊結果一致。
+// growMask／translateMask 與相鄰材質規則（adjacentMasks）都呼叫它。
 // 這個檔案不從 volume.ts 匯入執行期的東西（volume.ts 反過來匯入它）。
 import type { Backfill, Vec3, Volume } from './volume';
 

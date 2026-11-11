@@ -3,7 +3,6 @@ import { MATERIALS, type Volume, decodeNpy, demoVolume, encodeNpy, initialLabele
 import { type EditState, type Op, applyOp, matNameOf } from './ops';
 import type { Step } from './patch';
 import { type VtiInspect, decodeVti, encodeVtiLike, inspectVti } from './vti';
-import { crc32 } from './zip';
 
 // 假 Worker：真的跑 workerCore（同一套 handler），請求與回應都經過 structuredClone（和 postMessage 一樣是複本）。
 // 記下每種請求的次數（plan v9 §7：每一步只送 apply、沒有 diff／count；fork 只一次；head 對不上時 put）。
@@ -146,19 +145,6 @@ describe('單本帳簿的 Worker 協定（plan v9 §4.2）', () => {
     expect(sent.at(-1)!.req.owners).toEqual(['p1', 'zz']);
   });
 
-  it('重播：從原始複製出新帳簿、原地套 ops，回傳的 diff／體積帳和內容一致', async () => {
-    const { orig } = await setup();
-    const poly = orig.L.comps.find((c) => c.mat === 6)!;
-    const full = { axis: 'z' as const, lo: 0, hi: orig.vol.Z - 1 };
-    const r = await client.replayIn('r1', orig, { ops: [{ kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 2, follow: true, backfill: 'orig' }], matNames, keyCounter: 1000 });
-    let n = 0;
-    for (let i = 0; i < r.data.length; i++) if (r.data[i] !== orig.vol.data[i]) n++;
-    expect(r.diffCount).toBe(n);
-    expect(n).toBeGreaterThan(0);
-    expect(core.inspect().heads.get('r1')).toBe(r.version);
-    expect(client.headsOf().get('r1')).toBe(r.version);
-  });
-
   it('沒帶版本號的狀態退回用陣列身分配號（同一份陣列同一個號碼）', () => {
     const { sidOf } = client;
     const v = { X: 2, Y: 2, Z: 2, data: new Uint8Array(8) };
@@ -189,18 +175,16 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
   };
   const pv = { cap: Infinity, hidden: new Uint8Array(256), palette: new Float32Array(768).fill(0.5), showDiff: false, seq: 1, mesh: false };
 
-  it('每個 handler 之後 diffBoxOfAxes === tightBox、boxOfAxes(voidAxes) === 暴力 VOID 外框（apply／derive／fork／replay／put／restore／applyParked）', async () => {
+  it('每個 handler 之後 diffBoxOfAxes === tightBox、boxOfAxes(voidAxes) === 暴力 VOID 外框（apply／derive／fork／put）', async () => {
     const { boxOfAxes, diffBoxOfAxes, tightBox } = await import('./patch');
     const { applyStepInPlace } = await import('./patch');
-    const { extractPatch } = await import('../splits/lifecycle');
     const { VOID } = await import('./volume');
     const { orig, own, step } = await setup();
     const checkAll = () => {
-      const { books, scratch } = core.inspect();
+      const { books } = core.inspect();
       for (const [o, b] of books) if (o !== 'base') expect(diffBoxOfAxes(b.axes)).toEqual(b.diffCount ? tightBox(orig.vol, b.diff!, b.touch) : null);
-      // VOID 直方圖（M15.7 A5）：每本（含原始、scratch）都和整個陣列暴力掃出的貼合 VOID 外框相同
+      // VOID 直方圖（M15.7 A5）：每本（含原始）都和整個陣列暴力掃出的貼合 VOID 外框相同
       for (const [, b] of books) expect(boxOfAxes(b.voidAxes)).toEqual(voidBoxBrute(orig.vol, b.data));
-      if (scratch) expect(boxOfAxes(scratch.voidAxes)).toEqual(voidBoxBrute(orig.vol, scratch.data));
     };
     let s = own('ax', orig);
     await tick();
@@ -240,20 +224,9 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
       cur = { ...cur, version: to };
       checkAll();
     }
-    // fork、replay
+    // fork
     void client.forkIn('ax2', cur, client.newVersion());
     await tick();
-    checkAll();
-    await client.replayIn('ax3', orig, { ops: [{ kind: 'push', keys: [poly.key], scope: full, dir: [0, -1, 0], n: 3, follow: true, backfill: 'orig' }], matNames, keyCounter: 1000 });
-    checkAll();
-    // restore（parked → live）
-    const b = core.inspect().books.get('ax3')!;
-    const patch = extractPatch(orig.vol, b.data, b.labels, orig.vol.data, orig.L.labels, b.touch, core.inspect().compsOf.get('ax3')!);
-    await client.restoreIn('ax4', client.newVersion(), patch);
-    checkAll();
-    // applyParked（scratch：原始 → 貼補丁 → 套 op，補丁裡有新的 VOID）
-    await client.applyParkedIn({ patch, ops: [{ kind: 'material', keys: [poly2.key], scope: full, m: VOID }], matNames, keyCounter: 3000 });
-    expect(core.inspect().scratch).not.toBeNull();
     checkAll();
     // put（帳簿掉了之後補送）
     client.dropOwners(['ax']);
@@ -263,13 +236,13 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
     checkAll();
   }, 30_000);
 
-  it('apply 回的 report 已摘要（C7）：cells 是 Int32Array、≤ BLOCKED_CAP；slices 的 blocked 總和 === total.blocked；applyParked 同', async () => {
+  it('apply 回的 report 已摘要（C7）：cells 是 Int32Array、≤ BLOCKED_CAP；slices 的 blocked 總和 === total.blocked', async () => {
     const { BLOCKED_CAP } = await import('./report');
     const { orig, own } = await setup();
     const s = own('rp', orig);
     const fin = s.L.comps.find((c) => c.mat === 3)!;
     const full = { axis: 'z' as const, lo: 0, hi: s.vol.Z - 1 };
-    const op: Op = { kind: 'level', keys: [fin.key], scope: full, dir: [0, -1, 0], to: fin.bbox.y0, local: { center: [40, 30, 64], radius: null }, backfill: 'orig', follow: false };
+    const op: Op = { kind: 'push', keys: [fin.key], scope: full, dir: [0, -1, 0], n: 2, follow: false, backfill: 'orig', policy: 'block' };
     const r = await client.applyIn(s, { op, matNames, keyCounter: 1000 });
     const rep = r.report;
     expect(rep.total.blocked).toBeGreaterThan(0);
@@ -280,9 +253,6 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
     // 被擋的格子都在改前是 TiN／HfO₂（4、5）
     const bad = Array.from(rep.cells).filter((i) => orig.vol.data[i] !== 4 && orig.vol.data[i] !== 5).length;
     expect(bad).toBe(0);
-    const pk = await client.applyParkedIn({ patch: { box: null, data: new Uint8Array(0), labels: new Int32Array(0), comps: orig.L.comps }, ops: [op], matNames, keyCounter: 2000 });
-    expect(pk.reports[0].cells).toBeInstanceOf(Int32Array);
-    expect(pk.reports[0].total.blocked).toBe(rep.total.blocked);
   }, 30_000);
 
   it('VOID 層（A5）：全量不呼叫 boxOf，chunk 集合 === 逐 chunk 暴力找 VOID；一步產生新的 VOID 之後一樣', async () => {
@@ -336,13 +306,12 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
     core.handle('load', { sid: 400, vol: { ...vol, data: vol.data.slice() } });
     const L = initialLabeled(vol, matName);
     const sub = L.comps.reduce((a, c) => (c.count > a.count ? c : a));
-    const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
-    const top = sub.bbox.y0;
-    const pushAt = (center: [number, number, number]): Op => ({ kind: 'push', keys: [sub.key], scope: full, dir: [0, -1, 0], n: 1, follow: false, backfill: 'orig', local: { center, radius: 3, shape: 'square' } });
+    // 只改最前、最後兩片（scope）：兩步的外框分在兩端，touch 撐到整個 Z
+    const pushAt = (z: number): Op => ({ kind: 'push', keys: [sub.key], scope: { axis: 'z', lo: z, hi: z }, dir: [0, -1, 0], n: 1, follow: false, backfill: 'orig' });
     core.handle('fork', { owner: 'cn', src: 'base', sid: 400 });
-    core.handle('apply', { owner: 'cn', from: 400, to: 401, comps: L.comps, op: pushAt([1, top, 1]), matNames, keyCounter: 1000 });
+    core.handle('apply', { owner: 'cn', from: 400, to: 401, comps: L.comps, op: pushAt(0), matNames, keyCounter: 1000 });
     expect(core.inspect().heads.get('cn')).toBe(401);
-    core.handle('apply', { owner: 'cn', from: 401, to: 402, comps: core.inspect().compsOf.get('cn')!, op: pushAt([vol.X - 2, top, vol.Z - 2]), matNames, keyCounter: 1100 });
+    core.handle('apply', { owner: 'cn', from: 401, to: 402, comps: core.inspect().compsOf.get('cn')!, op: pushAt(vol.Z - 1), matNames, keyCounter: 1100 });
     expect(core.inspect().heads.get('cn')).toBe(402);
     const b = core.inspect().books.get('cn')!;
     // touch 已經撐到整個 X×Z；VOID 本身沒動
@@ -369,7 +338,7 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
       if (any) brute.push(k);
     }
     expect(r.items.filter((it) => it.m.quads > 0).map((it) => it.k).sort((a, c) => a - c)).toEqual(brute);
-    // 沒有 base（切 split／開 X-ray）同樣只算這些 chunk
+    // 沒有 base 同樣只算這些 chunk
     const n1 = core.scanStats.layerChunks;
     core.handle('layer', { sid: 402, key: 'void', filter: { mat: VOID }, tint: [0, 0, 0] });
     expect(core.scanStats.layerChunks - n1).toBe(want);
@@ -406,7 +375,7 @@ describe('plan v15 M15.1：axes 外框、報告摘要、VOID 外框、preview �
   }, 30_000);
 });
 
-describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯出帶 crc 與 hint', () => {
+describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯出帶 hint', () => {
   const FX = 8;
   const FY = 6;
   const FZ = 4;
@@ -548,20 +517,18 @@ describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯�
     expect(transfer).toEqual([r.vol.data.buffer]);
   });
 
-  it('export：crc === crc32(bytes)；同格式 parked ≡ live ≡ 純函式整陣列路徑、原始 === 原檔；只重壓碰到的 block', async () => {
-    const { extractPatch } = await import('../splits/lifecycle');
+  it('export：同格式 live ≡ 純函式整陣列路徑、原始 === 原檔；只重壓碰到的 block', async () => {
     const file = await fractionVti();
     await inspectIn(file.slice().buffer);
     const [dec] = await decodeIn({ keepRaw: true });
     const vol = dec.vol;
-    const [ld] = core.handle('load', { sid: 500, vol }) as [{ labels: Int32Array }, unknown];
+    core.handle('load', { sid: 500, vol });
     core.handle('exportMeta', { fractions: dec.info.fractions! });
     const L = initialLabeled(vol, (id) => `材質 ${id}`);
     const req = { format: 'vti', spacing: [0.5, 0.5, 0.5], origin: [0, 0, 0], arrayName: 'material', materials: MATS };
     // 原始：逐位元組 === 原檔，沒有 block 重壓
     const [o, tr] = await exportIn(req);
     expect(bytesSame(o.bytes, file)).toBe(true);
-    expect(o.crc).toBe(crc32(file));
     expect(o.stats).toEqual({ blocks: 0, redone: 0 }); // 沒改點：純函式直接回原檔，沒碰任何 block
     expect(tr).toEqual([o.bytes.buffer]);
     // live：角落的 TiN（4 格、只在第一個 block）換成新材質 9
@@ -573,7 +540,6 @@ describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯�
     expect(b.diffCount).toBe(4);
     const [live] = await exportIn({ ...req, owner: 'e' });
     const ref = live.bytes;
-    expect(live.crc).toBe(crc32(ref));
     // 和純函式帶 hint（diff＋外框）的結果逐位元組相同；整陣列路徑重壓每一塊（壓縮位元組可能不同），比解回來的值
     const diff = new Uint8Array(FN);
     for (let i = 0; i < FN; i++) diff[i] = b.data[i] !== vol.data[i] ? 1 : 0;
@@ -587,29 +553,18 @@ describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯�
     // 解回來的值：角落是 9、其他照舊
     const back = await decodeVti(ref.slice().buffer);
     expect(Array.from(back.vol.data)).toEqual(Array.from(b.data));
-    // parked（補丁）：和 live 逐位元組相同；連做兩次（exportBuf 重複使用）仍相同；原始再匯一次不受影響
-    const patch = extractPatch(vol, b.data, b.labels, vol.data, ld.labels, b.touch, core.inspect().compsOf.get('e')!);
-    const [p1] = await exportIn({ ...req, patch });
-    expect(bytesSame(p1.bytes, ref)).toBe(true);
-    expect(p1.crc).toBe(crc32(ref));
-    const [p2] = await exportIn({ ...req, patch });
-    expect(bytesSame(p2.bytes, ref)).toBe(true);
+    // 原始再匯一次不受影響
     const [o2] = await exportIn(req);
     expect(bytesSame(o2.bytes, file)).toBe(true);
-    // 兩個 parked 匯出重疊（exportBuf busy → 退回複製）也對
-    const [q1, q2] = await Promise.all([exportIn({ ...req, patch }), exportIn({ ...req, patch: { box: null, data: new Uint8Array(0), labels: new Int32Array(0), comps: [] } })]);
-    expect(bytesSame(q1[0].bytes, ref)).toBe(true);
-    expect(bytesSame(q2[0].bytes, file)).toBe(true);
-    // vti1／npy 的 crc
+    // vti1：一律 UInt8 CellData；npy（測試用）
     const [v1] = await exportIn({ ...req, format: 'vti1', owner: 'e' });
-    expect(v1.crc).toBe(crc32(v1.bytes));
     expect(v1.stats).toBeUndefined();
-    const [np] = await exportIn({ ...req, format: 'npy', patch });
-    expect(np.crc).toBe(crc32(np.bytes));
+    expect(Array.from((await decodeVti(v1.bytes.slice().buffer)).vol.data)).toEqual(Array.from(b.data));
+    const [np] = await exportIn({ ...req, format: 'npy', owner: 'e' });
     expect(same(decodeNpy(np.bytes.slice().buffer).data, b.data)).toBe(true);
   }, 30_000);
 
-  it('client：inspectVtiIn 帶 transfer list、decodeVtiIn → exportMetaIn(fractions) → exportIn 回位元組附 crc', async () => {
+  it('client：inspectVtiIn 帶 transfer list、decodeVtiIn → exportMetaIn(fractions) → exportIn 回位元組', async () => {
     const file = await fractionVti();
     const buf = file.slice().buffer;
     sent.length = 0;
@@ -624,7 +579,6 @@ describe('plan v15 M15.5：解碼在 Worker、原檔只留 Worker 一份、匯�
     const bytes = await client.exportIn({ state: orig }, { format: 'vti', spacing: [1, 1, 1], origin: [0, 0, 0], arrayName: 'material', materials: MATS });
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(bytesSame(bytes, file)).toBe(true);
-    expect(bytes.crc).toBe(crc32(file));
     expect(bytes.stats).toEqual({ blocks: 0, redone: 0 });
     const { vol: nv } = await client.decodeNpyIn(encodeNpy(vol).slice().buffer);
     expect(same(nv.data, vol.data)).toBe(true);

@@ -74,7 +74,7 @@ const DEV = (() => {
     return false;
   }
 })();
-/** 開發模式：最近 5,000 筆請求（plan v12 §5.1「永不染色」的 e2e 斷言、§5.4「點卡片不 restore」）。 */
+/** 開發模式：最近 5,000 筆請求（e2e 斷言用）。 */
 function record(type: string, req: unknown) {
   if (!DEV || typeof window === 'undefined') return;
   const w = window as unknown as { __calls?: CallNote[] };
@@ -108,7 +108,7 @@ export function cancelCall(type: string) {
   return true;
 }
 
-// ---- 常駐狀態：版本號（version）＝ Worker 裡的編號（sid）；帳簿（owner）＝一個 split 的那一份陣列 ----
+// ---- 常駐狀態：版本號（version）＝ Worker 裡的編號（sid）；帳簿（owner）＝原始（'base'）或目前（'cur'）的那一份陣列 ----
 // 版本號全域單調遞增：每個新的體素狀態（載入、每一步的結果）拿一個新號碼；改名、改色不換號碼。
 // plan v9 §4.2：Worker 每個 owner 只有一份陣列（原地貼補丁），heads 記主執行緒認為它現在是哪一版。
 
@@ -139,7 +139,7 @@ export const headsOf = () => new Map(heads);
 
 /**
  * 確保 Worker 的帳簿正好是 s（s 必須是主執行緒這本帳簿目前的內容）；對不上就補送（保險，理論上不會發生）。
- * 只在改帳簿的路徑（apply／derive／fork／replay）之前呼叫；畫面的請求直接送 sidOf，過期的由 Worker 回錯誤、丟掉。
+ * 只在改帳簿的路徑（apply／derive／fork）之前呼叫；畫面的請求直接送 sidOf，過期的由 Worker 回錯誤、丟掉。
  */
 export function ensure(s: EditState) {
   const id = sidOf(s);
@@ -177,16 +177,6 @@ export function dropOwners(owners: string[]) {
   if (!owners.length) return;
   for (const o of owners) heads.delete(o);
   void call('drop', { owners }).catch(() => {});
-}
-
-/** 在 Worker 裡從 from 複製出 owner、重播 ops，結果留在 Worker（新的版本號），複本回到主執行緒。 */
-export async function replayIn(owner: string, from: EditState, req: Omit<Requests['replay']['req'], 'owner' | 'src' | 'from' | 'to' | 'comps'>) {
-  const fromId = ensure(from);
-  const to = newVersion();
-  heads.delete(owner);
-  const r = await call('replay', { ...req, owner, src: ownerOf(from), from: fromId, to, comps: from.L.comps });
-  heads.set(owner, to);
-  return { ...r, version: to };
 }
 
 /** 一步操作在 Worker 裡原地算（§4.3）：from.owner 的帳簿前進到新版本號，回傳補丁與報告。 */
@@ -233,28 +223,6 @@ export function probeIn(s: EditState, req: Omit<Requests['probe']['req'], 'sid' 
   return call('probe', { ...req, sid: sidOf(s) });
 }
 
-// ---- split 生命週期（plan v12 §5.3） ----
-
-/** 產生 split：Worker 在 scratch 帳簿上從 from 重播，只回補丁與摘要（不留帳簿）。 */
-export function replayPatchIn(from: EditState, req: Omit<Requests['replayPatch']['req'], 'src' | 'from' | 'comps'>) {
-  const fromId = ensure(from);
-  return call('replayPatch', { ...req, src: ownerOf(from), from: fromId, comps: from.L.comps });
-}
-
-/** parked → live：Worker 開一本 owner 的帳簿（原始＋補丁），版本 sid。補丁陣列不 transfer（主執行緒也要貼）。 */
-export function restoreIn(owner: string, sid: number, patch: Requests['restore']['req']['patch']) {
-  heads.set(owner, sid);
-  return call('restore', { owner, sid, patch }).catch((e) => {
-    if (heads.get(owner) === sid) heads.delete(owner);
-    throw e;
-  });
-}
-
-/** 對 parked split 套一串 Op（scratch 上算，不留帳簿）。 */
-export function applyParkedIn(req: Requests['applyParked']['req']) {
-  return call('applyParked', req);
-}
-
 // ---- 載入與匯出（plan v15 C2～C4：解碼在 Worker、原檔只留 Worker 一份、匯出帶 crc） ----
 
 /** 上傳的 .vti 只看標頭：buf transfer 給 Worker（呼叫之後主執行緒的 buf 已空），Worker 留著等 decodeVtiIn 或 dropVtiIn。 */
@@ -282,15 +250,15 @@ export function exportMetaIn(fractions: Requests['exportMeta']['req']['fractions
   return call('exportMeta', { fractions });
 }
 
-/** 匯出結果：位元組本身，附 Worker 算好的 CRC-32（zip 用）與同格式匯出的 block 統計。 */
-export type ExportBytes = Uint8Array & { crc: number; stats?: ExportStats };
+/** 匯出結果：位元組本身，附同格式匯出的 block 統計。 */
+export type ExportBytes = Uint8Array & { stats?: ExportStats };
 
-/** 匯出一個狀態：live 的帳簿（state）或 parked 的補丁；都沒有＝原始。 */
-export async function exportIn(src: { state?: EditState; patch?: Requests['export']['req']['patch'] }, req: Omit<Requests['export']['req'], 'owner' | 'patch'>): Promise<ExportBytes> {
+/** 匯出一個狀態：目前的帳簿（state）；沒有＝原始。 */
+export async function exportIn(src: { state?: EditState }, req: Omit<Requests['export']['req'], 'owner'>): Promise<ExportBytes> {
   let r: Requests['export']['res'];
   if (src.state && ownerOf(src.state) !== 'base') {
     ensure(src.state);
     r = await call('export', { ...req, owner: ownerOf(src.state) });
-  } else r = await call('export', { ...req, ...(src.patch ? { patch: src.patch } : {}) });
-  return Object.assign(r.bytes, { crc: r.crc, ...(r.stats ? { stats: r.stats } : {}) });
+  } else r = await call('export', req);
+  return Object.assign(r.bytes, r.stats ? { stats: r.stats } : {});
 }

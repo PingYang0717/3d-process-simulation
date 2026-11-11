@@ -1,4 +1,4 @@
-// plan v12 §5.2：Worker 的 diff 外框。apply／undo／redo／replay 後 diffBox ⊇ 所有 diff 格、而且貼合（每一面都有 diff 格）。
+// plan v12 §5.2：Worker 的 diff 外框。apply／undo／redo 後 diffBox ⊇ 所有 diff 格、而且貼合（每一面都有 diff 格）。
 import { describe, expect, it } from 'vitest';
 import { type BBox, MATERIALS } from './volume';
 import { handle, inspect } from './workerCore';
@@ -30,7 +30,7 @@ function scanBox(diff: Uint8Array | null): BBox | null {
 }
 
 describe('diffBox（plan v12 §5.2）', () => {
-  it('apply → 復原 → 重做 → replay：每一步 diffBox ≡ 掃整個 diff 的外框', () => {
+  it('apply → 復原 → 重做 → 另一本重套：每一步 diffBox ≡ 掃整個 diff 的外框', () => {
     handle('load', { sid: 1, vol: { ...vol, data: vol.data.slice() } });
     handle('fork', { owner: 's1', src: 'base', sid: 10 });
     const poly = comp('Poly-Si 3');
@@ -63,8 +63,14 @@ describe('diffBox（plan v12 §5.2）', () => {
     expect(handle('diffBox', { sid: 21 })[0]).toBeNull();
     handle('derive', { owner: 's1', from: 21, to: 22, step: steps[0], dir: 'fwd' });
     check(22);
-    handle('replay', { owner: 's2', src: 'base', from: 1, to: 30, comps: base.L.comps, ops, matNames, keyCounter: 1000 });
-    check(30);
-    expect(handle('diffBox', { sid: 30 })[0]).not.toBeNull();
+    // 另一本帳簿從原始一步一步套同一串
+    handle('fork', { owner: 's2', src: 'base', sid: 30 });
+    let cs2 = base.L.comps;
+    ops.forEach((op, k) => {
+      const r = handle('apply', { owner: 's2', from: 30 + k, to: 31 + k, comps: cs2, op, matNames, keyCounter: 1000 })[0] as { step: Step };
+      cs2 = r.step.labels?.compsAfter ?? cs2;
+    });
+    check(30 + ops.length);
+    expect(handle('diffBox', { sid: 30 + ops.length })[0]).not.toBeNull();
   });
 });

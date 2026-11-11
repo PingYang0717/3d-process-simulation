@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { type Vec3, type Volume, MATERIALS, demoVolume, growMask, initialLabeled, levelMask, localMask, maskOf, translateMask } from './volume';
+import { type Vec3, type Volume, MATERIALS, demoVolume, growMask, initialLabeled, maskOf, translateMask } from './volume';
 import { addCell, moveCells, newReport, removeCell, shellOf } from './kernel';
-import { legacyGrowMask, legacyLevelMask, legacyTranslateMask } from './ref/legacy';
+import { legacyGrowMask, legacyTranslateMask } from './ref/legacy';
 import { matNameOf } from './ops';
 import type { Scope } from './scope';
 
@@ -27,7 +27,6 @@ describe('核心規則改寫後和舊實作逐體素相同（§7.2）', () => {
     ['fin 往右長 2、只改 z 20～60', m(fin.key), { axis: 'z', lo: 20, hi: 60 }, [1, 0, 0], 2, true],
     ['fin 往左縮 1、沿 x 的 scope', m(fin.key), { axis: 'x', lo: fin.bbox.x0, hi: fin.bbox.x0 + 5 }, [-1, 0, 0], -1, true],
     ['poly 往前長 2（z）', m(poly[2].key), full, [0, 0, -1], 2, true],
-    ['poly 筆刷 r4 往上長 3', localMask(vol, m(poly[0].key), UP, [80, poly[0].bbox.y0, 26], 4, 'round'), full, UP, 3, true],
   ];
   for (const [name, mask, scope, dir, n, follow] of grows)
     it(`growMask：${name}`, () => {
@@ -36,20 +35,6 @@ describe('核心規則改寫後和舊實作逐體素相同（§7.2）', () => {
       expect(same(a.data, b.data)).toBe(0);
     }, 30_000);
 
-  const levels: [string, Uint8Array, Scope, Vec3, number, boolean, number][] = [
-    ['fin 補到頂（方頭，跟推）', m(fin.key), full, UP, fin.bbox.y0, true, Infinity],
-    ['fin 補到頂（不跟推）', m(fin.key), full, UP, fin.bbox.y0, false, Infinity],
-    ['fin 削到頂下 3（跟退）', m(fin.key), full, UP, fin.bbox.y0 + 3, true, Infinity],
-    ['fin 筆刷 r6 削到頂下 2、z 30～50', m(fin.key), { axis: 'z', lo: 30, hi: 50 }, UP, fin.bbox.y0 + 2, true, 6],
-    ['poly 往右補到 x = 155', m(poly[1].key), full, [1, 0, 0], 155, true, Infinity],
-  ];
-  for (const [name, mask, scope, dir, to, follow, r] of levels)
-    it(`levelMask：${name}`, () => {
-      const c: Vec3 = [(fin.bbox.x0 + fin.bbox.x1) >> 1, fin.bbox.y0, 40];
-      const a = levelMask(vol, vol, mask, scope, dir, c, r, 'square', to, 'orig', follow);
-      const b = legacyLevelMask(vol, vol, mask, scope, dir, c, r, 'square', to, 'orig', follow);
-      expect(same(a.data, b.data)).toBe(0);
-    }, 30_000);
 
   for (const [name, mask, scope, d] of [
     ['兩根 poly 往右 3、往前 2', maskOf(L, new Set([poly[1].key, poly[2].key]))!, full, [3, 0, -2]],

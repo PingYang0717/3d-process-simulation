@@ -133,6 +133,41 @@ span.group-caret { display: inline-block; width: 24px; flex: none; }
   background-color: var(--c-bg-sub); background-image: linear-gradient(var(--c-border-2) 1px, transparent 1px), linear-gradient(90deg, var(--c-border-2) 1px, transparent 1px); background-size: 24px 24px; }
 .slice-fit { flex: 1; min-width: 0; min-height: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
 .slice-img { position: relative; max-width: 100%; max-height: 100%; cursor: crosshair; box-shadow: 0 0 0 1px rgba(0, 0, 0, .1); }
+/* 拖箭頭時的即時結果：和底圖同尺寸的另一張 canvas，疊在上面 */
+canvas.sedit-pv { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
+/* 小切面的放大鈕、小 3D 的還原鈕靠右 */
+.slice-pane .pane-head .slice-zoom, .pane-3d .pane-head .pane-expand { flex: none; margin-left: auto; color: var(--c-text-soft); }
+
+/* ---- 放大一張切面（plan v18 §3.2）：它變主畫面，3D 與另外兩張是小窗。DOM 不搬，WebGL 不重建 ---- */
+.canvas-area.enlarged { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1.7fr) minmax(0, 1fr); }
+.canvas-area.enlarged .slices { display: contents; }
+.canvas-area.enlarged .slice-pane { min-width: 0; }
+.canvas-area.enlarged .pane-3d { grid-row: 2; }
+.canvas-area.enlarged .slice-pane.big { grid-column: 1 / -1; grid-row: 1; }
+.canvas-area.enlarged .slice-pane:not(.big) { grid-row: 2; }
+@media (min-width: 1200px) {
+  .canvas-area.enlarged { grid-template-columns: minmax(0, 1fr) minmax(220px, 28%); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+  .canvas-area.enlarged .slice-pane.big { grid-column: 1; grid-row: 1 / -1; }
+  .canvas-area.enlarged .pane-3d { grid-column: 2; grid-row: 1; }
+  .canvas-area.enlarged .slice-pane:not(.big) { grid-column: 2; grid-row: auto; }
+}
+/* 主切面的標題列放得下就一排，放不下換行 */
+.slice-pane.big .pane-head { height: auto; min-height: 40px; flex-wrap: wrap; overflow: visible; gap: 8px 10px; }
+.slice-pane.big .pane-head .tb-text { display: none; } .slice-pane.big .pane-head .tb .ant-btn-icon { margin-inline-end: 0 !important; }
+.slice-pane.big .slice-body { padding: 0; }
+.canvas-area.enlarged .slice-pane:not(.big) .slice-hint { display: none; }
+/* 窄螢幕：下排的小切面放不下 ‹ › 片數（滾輪仍可換片），只留標題和放大鈕 */
+@media (max-width: 1199px) { .canvas-area.enlarged .slice-pane:not(.big) .slice-pos { display: none; } }
+/* 3D 只剩一小格：提示、視角列、說明列收起，標題列只留「3D」和放回主畫面的按鈕 */
+.canvas-area.enlarged .pane-3d .pane-head { flex-wrap: nowrap; overflow: hidden; min-height: 34px; height: 34px; }
+.canvas-area.enlarged .pane-3d .legend, .canvas-area.enlarged .pane-3d .viewbar, .canvas-area.enlarged .pane-3d .pane-foot, .canvas-area.enlarged .pane-3d .pane-sub { display: none !important; }
+/* 可縮放的切面 */
+.sedit { position: relative; flex: 1; align-self: stretch; min-width: 0; min-height: 0; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none; }
+.sedit-img { position: absolute; box-shadow: 0 0 0 1px rgba(0, 0, 0, .12); }
+.sedit-img > canvas:first-child { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.sedit-zoombar { position: absolute; right: 12px; bottom: 12px; z-index: 3; display: flex; align-items: center; gap: 2px; padding: 3px; background: rgba(255, 255, 255, .94); border: 1px solid var(--c-border-2); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); cursor: default; }
+.sedit-zoombar .ant-btn { padding-inline: 8px; font-size: 12px; color: var(--c-text-soft); }
+.sedit-zoom { min-width: 40px; padding: 0 6px; font-size: 12px; color: var(--c-text-3); font-variant-numeric: tabular-nums; text-align: right; }
 /* 放大一張切面：它佔上面整排，3D 與另兩張縮到下排（DOM 不動，WebGL 不重建） */
 /* 放大切面時 3D 只剩一小格：工具列與浮動列整個收起，只留標題 */
 

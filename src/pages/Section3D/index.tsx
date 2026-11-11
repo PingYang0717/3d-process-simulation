@@ -1,7 +1,7 @@
 // 簡化版的頁面（plan v17 §5.1）：頂端列、左欄結構、中間 3D＋三張唯讀切面（和原版同位置）、右欄動作面板＋「改了哪些」。
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { App, Button, Divider, InputNumber, Modal, Segmented, Space, Spin, Tag, Tooltip, Typography } from 'antd';
-import { AimOutlined, DownloadOutlined, LeftOutlined, RedoOutlined, RightOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
+import { AimOutlined, DownloadOutlined, ExpandOutlined, LeftOutlined, RedoOutlined, RightOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
 import { type Axis, type MeshData, type Vec3, sameBBox } from '../../volume/volume';
 import { download } from '../../ui/download';
 import { type Op, type SelectMode, useEditor } from './editor';
@@ -12,6 +12,8 @@ import { hiddenTable, palette } from './tables';
 import { type LiveValue, useLive, useLiveValue } from '../../ui/liveValue';
 import type { ViewMode, ViewPreset, View3DHandle } from './views';
 import { SliceView, View3D, preloadViews } from './views.lazy';
+import { SliceZoom } from './SliceZoom';
+import { zoomMemory } from './sliceXf';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { useEvent } from '../../ui/useEvent';
 import { useStable } from '../../ui/stable';
@@ -116,6 +118,12 @@ export default function Section3DPage() {
   /** 改後／改前（plan v17 §5.8：看改動只留這個切換＋「改了哪些」）。 */
   const [mode, setMode] = useState<ViewMode>('now');
   const peek = mode === 'orig';
+  /** 放大成主畫面的那一張切面（plan v18 §3.2）；null＝主畫面是 3D。每次載入新檔案都回到 3D，縮放的記憶也清掉。 */
+  const [big, setBig] = useState<Axis | null>(null);
+  useEffect(() => {
+    setBig(null);
+    zoomMemory.clear();
+  }, [ed.orig]);
   const view = useRef<View3DHandle | null>(null);
   const tagRef = useRef<HTMLDivElement>(null);
 
@@ -230,6 +238,8 @@ export default function Section3DPage() {
     const k = e.key.toLowerCase();
     if (k === 'f' && ed.sel.size) view.current?.setView('fit');
     else if (k === 'h') view.current?.setView('home');
+    // Esc：有選取時先取消選取（editor）；沒有選取才把放大的切面還原
+    else if (e.key === 'Escape' && big && !ed.sel.size) setBig(null);
   };
   const keyRef = useRef(keyDown);
   keyRef.current = keyDown;
@@ -277,7 +287,91 @@ export default function Section3DPage() {
   );
   const working = !!ed.busy;
 
+  /** 改後｜改前、復原／重做：跟著主畫面走（3D，或放大的那張切面）。 */
+  const tools = (
+    <>
+      <Tooltip title={ed.diffCount ? '改後 ⇄ 改前' : '還沒有改動'}>
+        <Segmented
+          size="small"
+          className="tb"
+          value={mode}
+          disabled={!ed.diffCount}
+          onChange={(v) => setMode(v as ViewMode)}
+          options={[
+            { label: '改後', value: 'now' },
+            { label: '改前', value: 'orig' },
+          ]}
+        />
+      </Tooltip>
+      <Space.Compact size="small" className="tb">
+        <Tooltip title="復原上一步（Ctrl+Z）">
+          <Button icon={<UndoOutlined />} disabled={!ed.hist.length || working} onClick={ed.undo} aria-label="復原">
+            <span className="tb-text">復原</span>
+          </Button>
+        </Tooltip>
+        <Tooltip title="重做（Ctrl+Y）">
+          <Button icon={<RedoOutlined />} disabled={!ed.future.length || working} onClick={ed.redo} aria-label="重做">
+            <span className="tb-text">重做</span>
+          </Button>
+        </Tooltip>
+      </Space.Compact>
+    </>
+  );
+  /** ‹ z = 27 › 13.5 nm */
+  const slicePos = (axis: Axis) => {
+    const at = cursorAt(axis);
+    return (
+      <>
+        <Space.Compact size="small" className="slice-pos">
+          <Button icon={<LeftOutlined />} onClick={() => ed.stepCursor(axis, -1)} aria-label="上一片" />
+          <InputNumber size="small" min={0} max={axisMax(axis)} value={at} onChange={(v) => v !== null && setCursorAxis(axis, v)} precision={0} prefix={<span style={{ color: 'var(--c-text-3)' }}>{axis} =</span>} style={{ width: 84 }} />
+          <Button icon={<RightOutlined />} onClick={() => ed.stepCursor(axis, 1)} aria-label="下一片" />
+        </Space.Compact>
+        <Text type="secondary" className="slice-hint" style={{ fontSize: 11 }}>
+          {(at * ed.nmPerVoxel).toFixed(1)} nm
+        </Text>
+      </>
+    );
+  };
+  /** 放大的切面：可縮放、平移（唯讀）；標題列有方向切換和主畫面的工具。 */
+  const mainSlice = (axis: Axis) => (
+    <div className="pane slice-pane big" key={axis} data-axis={axis}>
+      <div className="pane-head">
+        <Tooltip title="3D 放回主畫面（Esc）">
+          <Button size="small" icon={<LeftOutlined />} onClick={() => setBig(null)}>
+            回 3D
+          </Button>
+        </Tooltip>
+        <Segmented size="small" value={axis} onChange={(v) => setBig(v as Axis)} options={(['z', 'y', 'x'] as Axis[]).map((a) => ({ label: AXIS_NAME[a], value: a }))} />
+        {slicePos(axis)}
+        <span className="grow" />
+        {tools}
+      </div>
+      <div className="slice-body">
+        <WithLivePv live={livePv} pv={pv}>
+          {(p) => (
+            <SliceZoom
+              key={axis}
+              vol={shown}
+              axis={axis}
+              at={cursorAt(axis)}
+              materials={ed.materials}
+              hidden={NO_HIDDEN}
+              selMask={peek ? null : ed.selMask}
+              cursor={ed.cursor}
+              scope={ed.sel.size ? ed.scope : null}
+              preview={p && p.base === sidOf(ed.cur) && mode === 'now' ? p : null}
+              selBox={peek ? null : selBBox}
+              onPick={pickInSlice}
+              onStep={stepFns[axis]}
+            />
+          )}
+        </WithLivePv>
+      </div>
+    </div>
+  );
   const slice = (axis: Axis) => {
+    if (big === axis) return mainSlice(axis);
     const at = cursorAt(axis);
     return (
       <div className="pane slice-pane" key={axis} data-axis={axis}>
@@ -285,14 +379,10 @@ export default function Section3DPage() {
           <Text strong style={{ fontSize: 12 }}>
             {AXIS_NAME[axis]}
           </Text>
-          <Space.Compact size="small" className="slice-pos">
-            <Button icon={<LeftOutlined />} onClick={() => ed.stepCursor(axis, -1)} aria-label="上一片" />
-            <InputNumber size="small" min={0} max={axisMax(axis)} value={at} onChange={(v) => v !== null && setCursorAxis(axis, v)} precision={0} prefix={<span style={{ color: 'var(--c-text-3)' }}>{axis} =</span>} style={{ width: 84 }} />
-            <Button icon={<RightOutlined />} onClick={() => ed.stepCursor(axis, 1)} aria-label="下一片" />
-          </Space.Compact>
-          <Text type="secondary" className="slice-hint" style={{ fontSize: 11 }}>
-            {(at * ed.nmPerVoxel).toFixed(1)} nm
-          </Text>
+          {slicePos(axis)}
+          <Tooltip title="放大這張切面（可縮放、平移）">
+            <Button type="text" size="small" className="slice-zoom" icon={<ExpandOutlined />} onClick={() => setBig(axis)} aria-label={`放大 ${AXIS_NAME[axis]}`} />
+          </Tooltip>
         </div>
         <div className="slice-body">
           <WithLivePv live={livePv} pv={pv}>
@@ -328,31 +418,13 @@ export default function Section3DPage() {
           {ed.sel.size ? `已選 ${ed.selName}` : ''}
         </Text>
         <span className="grow" />
-        <Tooltip title={ed.diffCount ? '改後 ⇄ 改前' : '還沒有改動'}>
-          <Segmented
-            size="small"
-            className="tb"
-            value={mode}
-            disabled={!ed.diffCount}
-            onChange={(v) => setMode(v as ViewMode)}
-            options={[
-              { label: '改後', value: 'now' },
-              { label: '改前', value: 'orig' },
-            ]}
-          />
-        </Tooltip>
-        <Space.Compact size="small" className="tb">
-          <Tooltip title="復原上一步（Ctrl+Z）">
-            <Button icon={<UndoOutlined />} disabled={!ed.hist.length || working} onClick={ed.undo} aria-label="復原">
-              <span className="tb-text">復原</span>
-            </Button>
+        {big ? (
+          <Tooltip title="3D 放回主畫面（Esc）">
+            <Button type="text" size="small" className="pane-expand" icon={<ExpandOutlined />} onClick={() => setBig(null)} aria-label="3D 放回主畫面" />
           </Tooltip>
-          <Tooltip title="重做（Ctrl+Y）">
-            <Button icon={<RedoOutlined />} disabled={!ed.future.length || working} onClick={ed.redo} aria-label="重做">
-              <span className="tb-text">重做</span>
-            </Button>
-          </Tooltip>
-        </Space.Compact>
+        ) : (
+          tools
+        )}
       </div>
       <div className="canvas-wrap">
         <div className="legend" aria-hidden>
@@ -493,7 +565,7 @@ export default function Section3DPage() {
         <WithLive live={leftW}>{(w) => <Resizer label="左欄寬度" value={w} min={180} max={420} onDrag={(dx) => leftW.set(Math.max(180, Math.min(420, leftW.get() + dx)))} />}</WithLive>
         <main className="stage" id="stage">
           <BusyBar ed={ed} />
-          <div className="canvas-area">
+          <div className={'canvas-area' + (big ? ` enlarged big-${big}` : '')}>
             {pane3d}
             <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>
           </div>

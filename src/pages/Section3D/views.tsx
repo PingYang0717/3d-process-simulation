@@ -50,6 +50,7 @@ import { HOLE_EPS, previewMesh } from '../../volume/previewMesh';
 import { hiddenTable, palette } from './tables';
 import { SEL_RGB, drawSlice } from './drawSlice';
 import { SlicePreviewLayer } from './SlicePreviewLayer';
+import { SliceOverlay } from './SliceOverlay';
 import { type SelectMode, selectModeOf } from './editor';
 import { faceName } from './stepWords';
 import { Sprite, SpriteMaterial } from 'three';
@@ -57,7 +58,7 @@ import { type Handle3D, HANDLE_PX, faceDragWords, faceHandles, faceSteps, facesC
 import { ArrowHelper } from 'three';
 import { progressWords, useProgress } from '../../ui/useProgress';
 
-import { type Scope, axisLen } from '../../volume/scope';
+import type { Scope } from '../../volume/scope';
 
 /** 選取層沿法線外推的量：固定值，相機再遠也不會和主網格共面閃爍。 */
 const INFLATE = 0.03;
@@ -1619,7 +1620,6 @@ export function SliceView({
     drawSlice(canvasRef.current!, vol, axis, at, rgb, hidden, selMask, diff, null);
   }, [vol, axis, at, rgb, hidden, selMask, diff, W, H]);
 
-  const [cu, cv] = axis === 'z' ? [cursor[0], cursor[1]] : axis === 'y' ? [cursor[0], cursor[2]] : [cursor[2], cursor[1]];
   const imgRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: W, h: H });
@@ -1656,13 +1656,6 @@ export function SliceView({
     return u >= 0 && v >= 0 && u < W && v < H ? toVoxel(u, v) : null;
   };
 
-  const partial = !!scope && scope.axis !== axis && (scope.lo > 0 || scope.hi < axisLen(vol, scope.axis) - 1);
-  const z0 = scope?.lo ?? 0;
-  const z1 = (scope?.hi ?? 0) + 1;
-  // scope 的軸在切面上是橫的（u）還是直的（v）
-  const vertical = !!scope && (axis === 'y' ? scope.axis === 'z' : axis === 'z' ? scope.axis === 'y' : scope.axis === 'y');
-  const frame = { fill: 'var(--c-primary)', fillOpacity: 0.08, stroke: 'var(--c-primary)', strokeWidth: 1, strokeDasharray: '3 3', vectorEffect: 'non-scaling-stroke' } as const;
-
   return (
     <div className="slice-fit" ref={fitRef}>
       <div
@@ -1680,20 +1673,7 @@ export function SliceView({
         <div style={box ? { position: 'absolute', width: `${(W / BW) * 100}%`, height: `${(H / BH) * 100}%`, left: `${(-bu0 / BW) * 100}%`, top: `${(-bv0 / BH) * 100}%` } : { position: 'absolute', inset: 0 }}>
         <canvas ref={canvasRef} style={{ width: '100%', height: '100%', imageRendering: 'pixelated', display: 'block' }} />
         <SlicePreviewLayer vol={vol} axis={axis} at={at} W={W} H={H} preview={preview} selMask={selMask} rgb={rgb} hidden={hidden} />
-        <svg
-          viewBox={`0 0 ${W} ${H}`}
-          preserveAspectRatio="none"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
-        >
-          {partial &&
-            (vertical ? (
-              <rect x={0} y={z0} width={W} height={z1 - z0} {...frame} />
-            ) : (
-              <rect x={z0} y={0} width={z1 - z0} height={H} {...frame} />
-            ))}
-          <line x1={cu + 0.5} y1={0} x2={cu + 0.5} y2={H} stroke="#d46b08" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-          <line x1={0} y1={cv + 0.5} x2={W} y2={cv + 0.5} stroke="#d46b08" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-        </svg>
+        <SliceOverlay vol={vol} axis={axis} W={W} H={H} cursor={cursor} scope={scope} />
         </div>
       </div>
     </div>

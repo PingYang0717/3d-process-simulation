@@ -58,6 +58,7 @@ export function applyOpPrepare(s: EditState, input: Op | LegacyOp, ctx: OpContex
   }
   // 被擋的格子：裁切範圍的 index → 整個陣列
   report.blockedAt = globalIndex(box, s.vol, report.blockedAt);
+  if (report.stop?.at !== undefined) report.stop = { ...report.stop, at: globalIndex(box, s.vol, [report.stop.at])[0] };
   const cropped = cropArr(s.vol.data, s.vol, box);
   const R = diffInBox(cropped, p.data, box);
   return { op, report, box, R, data: p.data };

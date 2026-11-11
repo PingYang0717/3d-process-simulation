@@ -228,6 +228,11 @@ export function previewIn(s: EditState, req: Omit<Requests['preview']['req'], 's
   return call('preview', { ...req, sid: sidOf(s) });
 }
 
+/** 試算（plan v17 §5.4.4）：對 s（目前的版本）算誰跟著、誰變薄、最多幾格。s 過期時 Worker 回錯誤。 */
+export function probeIn(s: EditState, req: Omit<Requests['probe']['req'], 'sid' | 'comps'>) {
+  return call('probe', { ...req, sid: sidOf(s) });
+}
+
 // ---- split 生命週期（plan v12 §5.3） ----
 
 /** 產生 split：Worker 在 scratch 帳簿上從 from 重播，只回補丁與摘要（不留帳簿）。 */

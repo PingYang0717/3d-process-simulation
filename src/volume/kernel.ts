@@ -148,14 +148,15 @@ export function simGrowRow(row: number[], n: number, selfMat: number, follow: bo
     reach = Math.max(reach, step + len);
     if (m === -2) return { done: step, stop: null, reach: row.length };
     let stop: Block | null = null;
+    // at：擋住的那一格在原始的 row 裡是第幾格（呼叫端換成 index）
     if (m === -1) stop = { why: 'edge' };
     else if (!isEmpty(m)) {
-      if (m === selfMat) stop = { why: 'self', mat: m };
+      if (m === selfMat) stop = { why: 'self', mat: m, at: step + len };
       else {
         const m2 = at(len + 1);
         reach = Math.max(reach, step + len + 1);
         if (m2 === -2) return { done: step, stop: null, reach: row.length };
-        if (m2 !== m) stop = { why: 'last', mat: m };
+        if (m2 !== m) stop = { why: 'last', mat: m, at: step + len };
       }
     }
     if (stop) return { done: step, stop, reach };

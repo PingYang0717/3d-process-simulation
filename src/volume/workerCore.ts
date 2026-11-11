@@ -1,16 +1,17 @@
 // Worker 的本體（plan v9 §4.2）：每個 split（owner）的體素、結構編號、diff、體積帳在這裡各只有一份，
 // 每一步原地貼補丁（不整個陣列影印）。原始是 owner 'base'，永遠不寫。
 // 純模組（沒有 self.onmessage），worker.ts 接訊息；測試與 bench 直接呼叫 handle()。
-import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, VOID, greedyMesh, labelComponents } from './volume';
+import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, VOID, greedyMesh, labelComponents, linerTable } from './volume';
 import { type Scope, clipBox } from './scope';
-import { type Op, upgradeOp } from './ops';
+import { type Op, isAdjacent, upgradeOp } from './ops';
+import { type Probe, type ProbeReq, probe } from './probe';
 import { type AppliedPrep, applyOpCommit, applyOpPrepare } from './apply';
 import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
 import { type TracedHandle, ringCache } from '../slice/relative';
 import { type Axes, type DiffAxes, type Step, applyStepInPlace, boxOfAxes, carryStepStats, copyAxes, newAxes, recountAxes, recountMatAxes, unionBox } from './patch';
-import { type OpReport, summarize } from './report';
+import { type OpReport, stepEffects, summarize } from './report';
 import { chunkBox, chunkCount, chunksTouching, gridOf, greedyMeshChunk } from './chunks';
 import { type SplitPatch, type SplitStats, applyPatch, extractPatch, patchStats, stepTouch } from '../splits/lifecycle';
 import { pasteArr, cropArr, globalIndex } from './patch';
@@ -44,7 +45,8 @@ export type LayerFilter = { comps: number[]; scope: Scope; box: BBox } | { mat: 
 
 export interface Requests {
   /** 載入原始：存起來並標記結構；之前的狀態全部丟掉。回傳原始的體積帳（主執行緒不再自己數）。 */
-  load: { req: { sid: number; vol: Volume }; res: { labels: Int32Array; raw: RawComp[]; counts: Float64Array } };
+  /** liners：薄層材質（plan v17 §5.4.2，載入時判定一次）。 */
+  load: { req: { sid: number; vol: Volume }; res: { labels: Int32Array; raw: RawComp[]; counts: Float64Array; liners: number[] } };
   /** 開一本新帳簿：複製 src 目前的內容給 owner（這是整個流程裡唯一的整陣列複製）。sid 省略＝沿用 src 的版本號。 */
   fork: { req: { owner: string; src: string; sid?: number }; res: null };
   /** 保險：主執行緒的內容補送過來（只在 head 對不上時）。comps：拖拉預覽用（plan v15 §10，Worker 存 compsOf）。 */
@@ -118,6 +120,11 @@ export interface Requests {
   npyDecode: { req: { buf: ArrayBuffer }; res: { vol: Volume } };
   /** 保留給測試與保險；UI 每一步不再呼叫（主執行緒自己差量更新，§4.4）。 */
   diff: { req: { sid: number }; res: { mask: Uint8Array; count: number } };
+  /**
+   * 試算（plan v17 §5.4.4）：誰會跟著、誰的厚度會變、最多還能做幾格。不寫回帳簿；sid 過期回錯誤（主執行緒丟掉）。
+   * comps 省略＝用 Worker 自己存的那份。
+   */
+  probe: { req: ProbeReq & { sid: number; comps?: Comp[] }; res: Probe };
   /** 一步操作：owner 的帳簿必須正好是版本 from；原地算（§4.3），沒改到時 head 不動。回傳補丁與已摘要的報告（plan v15 C7：cells 有上限）。 */
   apply: {
     req: { owner: string; from: number; to: number; comps: Comp[]; op: Op; matNames: Record<number, string>; keyCounter: number };
@@ -462,6 +469,14 @@ function* applyGen({ owner, from, to, comps, op, matNames, keyCounter }: Request
   compsOf.set(owner, r.comps);
   // 報告在 Worker 摘要（plan v15 C7）：被擋的格子只回前 BLOCKED_CAP 個，不 clone 整個 blockedAt
   const report = summarize(r.report, op, dims);
+  if (isAdjacent(op)) {
+    // plan v17 §5.5：鄰居怎麼了由這一步的補丁算（O(補丁)）
+    const keys = new Set(op.keys);
+    const self = new Set(comps.filter((c) => keys.has(c.key)).map((c) => c.mat));
+    const fx = r.step.data ? stepEffects(r.step.data.before, r.step.data.after, self, new Set(op.follow ? op.liners : [])) : { effects: { follow: [], lost: [], gained: [], both: [] }, changed: 0 };
+    report.effects = fx.effects;
+    report.changed = fx.changed;
+  }
   return [{ step: r.step, keyCounter: seq(), report }, [...stepBuffers(r.step), report.cells.buffer]];
 }
 
@@ -591,6 +606,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     compsOf.clear();
     const { labels, raw } = labelComponents(vol);
     const { counts, voidAxes } = countAllAndVoid(vol);
+    const liners = linerTable(vol);
     books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, axes: newAxes(dims), voidAxes, touch: null });
     scratch = null;
     exportBuf = null;
@@ -599,7 +615,7 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     // 主執行緒要一份原始的 labels（一次）
     const out = labels.slice();
     const c = counts.slice();
-    return [{ labels: out, raw, counts: c }, [out.buffer, c.buffer]];
+    return [{ labels: out, raw, counts: c, liners }, [out.buffer, c.buffer]];
   },
   fork: ({ owner, src, sid }) => {
     if (owner === BASE_OWNER) throw new Error('原始不能被覆蓋');
@@ -791,6 +807,13 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     return [{ mask, count: b.diffCount }, [mask.buffer]];
   },
   count: ({ sid }) => [Array.from(stateOf(sid).book.counts), []],
+  probe: ({ sid, comps: comps0, ...req }) => {
+    const owner = ownerOfSid(sid);
+    const { vol, labels } = stateOf(sid);
+    const comps = comps0 ?? compsOf.get(owner);
+    if (!comps) throw new Error(`Worker 沒有 ${owner} 的結構清單`);
+    return [probe({ vol, L: { labels, comps } }, req), []];
+  },
   layer: (req) => drain(gens.layer(req)),
   preview: ({ sid, comps: comps0, op, cap, hidden, palette, showDiff, seq, mesh }) => {
     const owner = ownerOfSid(sid);

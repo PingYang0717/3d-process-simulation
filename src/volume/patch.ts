@@ -277,3 +277,13 @@ export function tightBox(dims: Dims, diff: Uint8Array, box: BBox | null): BBox |
     }
   return x1 < 0 ? null : { x0, x1, y0, y1, z0, z1 };
 }
+
+/** 一步碰到的範圍：體素補丁、labels 補丁與換編號的結構外框的聯集（帳簿的 touch 用）。 */
+export function stepTouch(step: Step): BBox | null {
+  let b = step.data ? { ...step.data.box } : null;
+  if (step.labels) {
+    b = unionBox(b, step.labels.box);
+    for (const m of step.labels.moves) b = unionBox(b, m.box);
+  }
+  return b;
+}

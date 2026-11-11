@@ -2,7 +2,7 @@
 // 補丁＝和原始不同（data 或 labels）的外框裡的 data／labels；外框外和原始逐位元組相同（每一步的補丁外框、
 // relabel 的 S 與換編號的結構外框都 union 進 touch，所以外面不會有不同）。
 import type { Axis, BBox, Comp, Labeled, Volume } from '../volume/volume';
-import { type DiffAxes, type Step, boxSize, cropArr, diffBoxOfAxes, newAxes, pasteArr, unionBox } from '../volume/patch';
+import { type DiffAxes, boxSize, cropArr, diffBoxOfAxes, newAxes, pasteArr, stepTouch } from '../volume/patch';
 
 type Dims = { X: number; Y: number; Z: number };
 
@@ -27,14 +27,7 @@ export interface SplitStats {
 }
 
 /** 一步補丁碰到的所有範圍：data 外框、labels 的 S、換編號的結構外框。 */
-export function stepTouch(step: Step): BBox | null {
-  let b = step.data ? { ...step.data.box } : null;
-  if (step.labels) {
-    b = unionBox(b, step.labels.box);
-    for (const m of step.labels.moves) b = unionBox(b, m.box);
-  }
-  return b;
-}
+export { stepTouch };
 
 /** 在 loose 裡掃「data 或 labels 和原始不同」收緊成貼合的外框。O(loose)。 */
 export function changedBox(dims: Dims, data: Uint8Array, labels: Int32Array, orig: Uint8Array, origLabels: Int32Array, loose: BBox | null): BBox | null {

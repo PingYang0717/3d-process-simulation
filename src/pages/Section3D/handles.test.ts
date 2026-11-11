@@ -1,7 +1,7 @@
 // plan v10 §4.5：3D 把手 → Op 的純函式。
 import { describe, expect, it } from 'vitest';
 import type { BBox } from '../../volume/volume';
-import { cornerHandles, cornerRadius, faceAxisName, faceDragWords, faceHandles, faceSteps, facesCamera, pickHandle, pushOpOf } from './handles3d';
+import { faceAxisName, faceDragWords, faceHandles, faceSteps, facesCamera, pickHandle } from './handles3d';
 
 const b: BBox = { x0: 10, x1: 19, y0: 20, y1: 39, z0: 0, z1: 99 };
 
@@ -27,33 +27,7 @@ describe('面把手', () => {
     expect(facesCamera([0, 0, 1], [0, 0, 5])).toBe(true);
     expect(facesCamera([0, 0, -1], [0, 0, 5])).toBe(false);
   });
-  it('產生的 Op 和卡片「長／縮 n」逐欄相同（同一個產生函式）', () => {
-    const scope = { axis: 'z' as const, lo: 0, hi: 99 };
-    const n = faceSteps(32, 0, 10, 0, 10, 50);
-    expect(pushOpOf(['k'], scope, [0, -1, 0], n, true, 'orig')).toEqual({ kind: 'push', keys: ['k'], scope, dir: [0, -1, 0], n: 3, follow: true, backfill: 'orig' });
-    expect(pushOpOf(['k'], scope, [0, -1, 0], 0, true, 'orig')).toBeNull();
-  });
-});
 
-describe('角把手', () => {
-  it('剖面四個角、放在第 t 片中間、往內的角平分線', () => {
-    const cs = cornerHandles(b, 'z', 40);
-    const ul = cs.find((c) => c.id === 'ul')!;
-    expect(ul.pos).toEqual([10, 20, 40.5]);
-    expect(ul.inward[0]).toBeCloseTo(Math.SQRT1_2);
-    expect(ul.inward[1]).toBeCloseTo(Math.SQRT1_2);
-    const lr = cs.find((c) => c.id === 'lr')!;
-    expect(lr.pos).toEqual([20, 40, 40.5]);
-    // 沿 x 的結構：剖面是 z–y
-    const side = cornerHandles(b, 'x', 15).find((c) => c.id === 'ur')!;
-    expect(side.pos).toEqual([15.5, 20, 100]);
-  });
-  it('位移 → 半徑：沿角平分線往內，往外算 0，夾在上限', () => {
-    // 角平分線 1 格（對角，√2 格長）投影到螢幕 (7, 7) px，每格約 10 px
-    expect(cornerRadius(40, 40, 7, 7, 20)).toBe(4);
-    expect(cornerRadius(-40, -40, 7, 7, 20)).toBe(0);
-    expect(cornerRadius(400, 400, 7, 7, 5)).toBe(5);
-  });
 });
 
 describe('點把手', () => {

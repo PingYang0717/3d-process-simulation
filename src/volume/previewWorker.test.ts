@@ -1,131 +1,35 @@
-// plan v9 §4.5／§7：拖拉第 2 級預覽搬到 Worker、每片輪廓快取。
+// plan v9 §4.5／§7：拖拉第 2 級預覽搬到 Worker（plan v17：相鄰材質規則的推拉）。
 import { describe, expect, it } from 'vitest';
-import { DIFF_BIT, MATERIALS, demoVolume, greedyMesh, initialLabeled } from './volume';
+import { DIFF_BIT, MATERIALS, demoVolume, greedyMesh, initialLabeled, linerTable } from './volume';
 import { type EditState, type Op, matNameOf } from './ops';
 import { previewOp } from './preview';
 import { previewMesh } from './previewMesh';
 import { newReport } from './kernel';
-import { type TracedHandle, ringCache, shapeSig } from '../slice/relative';
-import { ModelStore, ringsOf } from '../slice/model';
-import { opOfGesture, sliceContext } from '../pages/Section3D/handleOps';
 import { globalIndex } from './patch';
+import { fullScope } from './scope';
 import * as core from './workerCore';
 
 const matName = matNameOf(MATERIALS);
 const same = (a: ArrayLike<number>, b: ArrayLike<number>) => a.length === b.length && Array.prototype.every.call(a, (v: number, i: number) => v === b[i]);
 
-/** 一個 2×2 的方塊輪廓（左上角在 (x, n)）＋節點把手；給 ringCache 測試用的最小 TracedHandle。 */
-const th = (n: number, x = 0): TracedHandle => ({
-  rings: [{ pts: [[x, n], [x + 2, n], [x + 2, n + 2], [x, n + 2]], raw: [], nodes: new Set([0]), hole: false }],
-  handle: { kind: 'node', key: '', ring: 0, index: 0 },
-});
-
-describe('ringCache LRU 與數值簽名（plan v15 D3）', () => {
-  it('滿 max 之後再放一筆只逐最舊的一筆（命中過的搬到尾端）、stats.traced 只 +1', () => {
-    const c = ringCache(4);
-    for (let i = 0; i < 4; i++) c.get(`k${i}`, () => th(i));
-    expect(c.size()).toBe(4);
-    expect(c.stats.traced).toBe(4);
-    // k0 命中 → 搬到尾端；放第 5 筆逐的是 k1
-    c.get('k0', () => th(0));
-    expect(c.stats.hits).toBe(1);
-    c.get('k4', () => th(4));
-    expect(c.size()).toBe(4);
-    expect(c.stats.traced).toBe(5);
-    for (const k of ['k0', 'k2', 'k3', 'k4']) c.get(k, () => th(99));
-    expect(c.stats.hits).toBe(5);
-    expect(c.stats.traced).toBe(5);
-    c.get('k1', () => th(1));
-    expect(c.stats.traced).toBe(6);
-    expect(c.size()).toBe(4);
-  });
-
-  it('同形狀共用同一份；簽名相同但 pts 不同（人工碰撞）當 miss、不共用；兩個不同形狀的簽名不同', () => {
-    const c = ringCache(8, () => 'collide');
-    const a = c.get('a', () => th(0));
-    expect(c.get('b', () => th(0))).toBe(a);
-    const d = c.get('d', () => th(5));
-    expect(d).not.toBe(a);
-    expect(d.rings[0].pts[0][1]).toBe(5);
-    // 碰撞之後舊的那份仍由 byKey 給回
-    expect(c.get('a', () => th(0))).toBe(a);
-    const c2 = ringCache(8);
-    const x = c2.get('x', () => th(1));
-    expect(c2.get('y', () => th(1))).toBe(x);
-    expect(c2.get('q', () => th(2))).not.toBe(x);
-    expect(shapeSig(th(1))).not.toBe(shapeSig(th(2)));
-    expect(shapeSig(th(1))).toBe(shapeSig(th(1)));
-    expect(shapeSig({ ...th(1), handle: null })).not.toBe(shapeSig(th(1)));
-    expect(shapeSig({ ...th(1), rings: [{ ...th(1).rings[0], hole: true }] })).not.toBe(shapeSig(th(1)));
-  });
-});
-
-/** 拖 fin 右上角節點往右上 k 格的 profile Op（和 bench.ts drag 同一個手勢，整根 scope）。 */
+/** 拖 fin 上面的箭頭 1～6 格（跟著移動）：每一格一個 Op。 */
 function dragOps() {
   const vol = demoVolume();
   const L = initialLabeled(vol, matName);
   const s: EditState = { vol, L, version: 1 };
   const fin = L.comps.find((c) => c.mat === 3)!;
-  const z = (fin.bbox.z0 + fin.bbox.z1) >> 1;
-  const keys = [fin.key];
-  const opts = { scope: { axis: 'z' as const, lo: 0, hi: vol.Z - 1 }, follow: true, backfill: 'orig' as const, nm: 0.5 };
-  const m = new ModelStore().get(L, vol, 'z', z, keys, 1).model;
-  const rings = ringsOf(m, keys);
-  const ctx = { ...sliceContext(L, vol, 'z', z, keys, opts, rings), model: m };
-  const r = rings.get(fin.key)![0];
-  let node = [...r.nodes][0];
-  r.nodes.forEach((i) => {
-    if (r.pts[i][0] - r.pts[i][1] > r.pts[node][0] - r.pts[node][1]) node = i;
-  });
-  const h = { kind: 'node' as const, key: fin.key, ring: 0, index: node };
+  const liners = linerTable(vol);
   const ops: Op[] = [];
-  for (let k = 1; k <= 10; k++) {
-    const { op } = opOfGesture(ctx, h, [k * 0.5, -k * 0.5], false, false);
-    if (op) ops.push(op);
-  }
+  for (let k = 1; k <= 6; k++) ops.push({ kind: 'push', keys: [fin.key], scope: fullScope(vol), dir: [0, -1, 0], n: k, follow: true, backfill: 'outer', policy: 'adjacent', liners });
   return { vol, L, s, ops };
 }
 
-describe('每片輪廓快取（§4.5）', () => {
-  it('同一次拖拉連續 10 個位移共用一份快取：結果和不快取逐格相同、每片只描一次', () => {
-    const { vol, s, ops } = dragOps();
-    expect(ops.length).toBeGreaterThan(5);
-    expect(ops.every((o) => o.kind === 'profile' && o.gestures)).toBe(true);
-    const cache = new Map<string, TracedHandle>();
-    let traced = 0;
-    const ringsFor = (key: string, t: number, make: () => TracedHandle) => {
-      const k = `${key}|${t}`;
-      let hit = cache.get(k);
-      if (!hit) {
-        traced++;
-        hit = make();
-        cache.set(k, hit);
-      }
-      return hit;
-    };
-    let slices = 0;
-    for (const op of ops) {
-      const r1 = newReport();
-      const r2 = newReport();
-      const a = previewOp(s, vol, op, Infinity, r1)!;
-      const b = previewOp(s, vol, op, Infinity, r2, ringsFor)!;
-      expect(b.box).toEqual(a.box);
-      expect(same(a.data, b.data)).toBe(true);
-      expect(r2.blockedAt).toEqual(r1.blockedAt);
-      expect(r2.fallback).toEqual(r1.fallback);
-      slices = Math.max(slices, cache.size);
-    }
-    // 每片只描一次：描的次數＝快取裡的片數（不是 片數 × 幀數）
-    expect(traced).toBe(slices);
-    expect(traced).toBeGreaterThan(10);
-  });
-
-  it('Worker preview：結果＝主執行緒 previewOp，blockedAt 是整個陣列的 index，第二幀起輪廓全部命中快取', () => {
+describe('Worker 的拖拉預覽（§4.5）', () => {
+  it('結果＝主執行緒 previewOp，blockedAt 是整個陣列的 index；超過上限回 none', () => {
     const { vol, L, s, ops } = dragOps();
     core.handle('load', { sid: 5, vol });
     const hidden = new Uint8Array(256);
     const pal = new Float32Array(768).fill(0.5);
-    core.previewStats.traced = core.previewStats.hits = 0;
     ops.forEach((op, k) => {
       const [res] = core.handle('preview', { sid: 5, comps: L.comps, op, cap: Infinity, hidden, palette: pal, showDiff: false, seq: k, mesh: true }) as [
         { box: import('./volume').BBox; data: Uint8Array; blockedAt: number[]; mesh: unknown; seq: number },
@@ -138,10 +42,7 @@ describe('每片輪廓快取（§4.5）', () => {
       expect(same(res.data, p.data)).toBe(true);
       expect(res.blockedAt).toEqual(globalIndex(p.box, vol, rep.blockedAt));
       expect(res.mesh).toBeTruthy();
-      if (k === 0) expect(core.previewStats.hits).toBe(0);
     });
-    expect(core.previewStats.hits).toBeGreaterThan(core.previewStats.traced * (ops.length - 2));
-    // 超過上限回 none
     const [none] = core.handle('preview', { sid: 5, comps: L.comps, op: ops[0], cap: 10, hidden, palette: pal, showDiff: false, seq: 99, mesh: false });
     expect('none' in (none as object)).toBe(true);
   });

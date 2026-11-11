@@ -1,163 +1,46 @@
+// 簡化版的編輯器狀態（plan v17）：只有「原始」與「目前」一本帳簿、推拉／平移／換材質三個動作、相鄰材質規則。
+// 每一步送 Worker（只在外框裡算），回來後主執行緒原地貼補丁；復原／重做存補丁（50 步或 256 MB）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from 'antd';
-import {
-  type Axis,
-  type Backfill,
-  type BBox,
-  type Comp,
-  type Labeled,
-  type Material,
-  type MaterialKind,
-  type Vec3,
-  type Volume,
-  MATERIALS,
-  coordOf,
-  demoVolume,
-  idx,
-  maskOf,
-  materialsFor,
-  nameComponents,
-  patchMask,
-  unionBBox,
-} from '../../volume/volume';
-import { type EditState, type Local, type Op, type Policy, bboxOfKeys, defectBox, levelRefTo, matNameOf, opText } from '../../volume/ops';
-import { type Design, type FactorCtx, combosOf, nameOfCombo, opsOfCombo } from '../../volume/factors';
-import type { BrushShape } from '../../volume/volume';
+import { type BBox, type Comp, type Labeled, type Material, type Vec3, type Volume, MATERIALS, coordOf, demoVolume, idx, materialsFor, nameComponents, unionBBox } from '../../volume/volume';
+import { type EditState, type Op, matNameOf } from '../../volume/ops';
 import type { FractionArray } from '../../volume/vti';
-import { type Scope, axisIndex, axisLen, boxRange, clampScope, fullScope, isFullScope, sameScope, scopeBox } from '../../volume/scope';
-
-/** 範圍：整個結構（預設）、只有目前這一片、自訂一段；軸＝目前主切面的法線軸。 */
-export type ScopeMode = 'whole' | 'slice' | 'custom';
-const isAxis = (v: unknown): v is Axis => v === 'x' || v === 'y' || v === 'z';
-const isScopeMode = (v: unknown): v is ScopeMode => v === 'whole' || v === 'slice' || v === 'custom';
-
-/**
- * 選取 ∩ scope：所見即會被改。scope 是整段時直接回傳原 mask。
- * bbox＝選取的外框（mask 只在裡面有值）：只複製 scope ∩ 外框（plan v9 P10）。
- */
-export function maskInScope(mask: Uint8Array, vol: Volume, scope: Scope, bbox?: BBox | null): Uint8Array {
-  if (isFullScope(scope, vol)) return mask;
-  const out = new Uint8Array(mask.length);
-  const s = scopeBox(vol, scope);
-  const b = s && bbox ? clipScopeBox(bbox, scope) : s;
-  if (!b) return out;
-  const { X, Y } = vol;
-  if (scope.axis === 'z' && !bbox) {
-    const plane = X * Y;
-    out.set(mask.subarray(b.z0 * plane, (b.z1 + 1) * plane), b.z0 * plane);
-    return out;
-  }
-  for (let z = b.z0; z <= b.z1; z++)
-    for (let y = b.y0; y <= b.y1; y++) {
-      const row = (z * Y + y) * X;
-      out.set(mask.subarray(row + b.x0, row + b.x1 + 1), row + b.x0);
-    }
-  return out;
-}
-
-/** mask 沿 axis 每一片有沒有體素（找「最近有這個結構的一片」用）；bbox＝mask 的外框，只掃裡面（plan v9 P10）。 */
-export function slicesWith(mask: Uint8Array, vol: Volume, axis: Axis, bbox?: BBox | null): Uint8Array {
-  const { X, Y, Z } = vol;
-  const out = new Uint8Array(axisLen(vol, axis));
-  const b = bbox ?? { x0: 0, x1: X - 1, y0: 0, y1: Y - 1, z0: 0, z1: Z - 1 };
-  for (let z = b.z0; z <= b.z1; z++)
-    for (let y = b.y0; y <= b.y1; y++) {
-      const row = (z * Y + y) * X;
-      for (let x = b.x0; x <= b.x1; x++) if (mask[row + x]) out[axis === 'x' ? x : axis === 'y' ? y : z] = 1;
-    }
-  return out;
-}
-
-/** 3D 筆刷（聚焦編輯裡的一個工具）：局部長／縮（沿法線 n 格）、局部方頭（補到／削到點到的那一面）；半徑 null = 整面。 */
-export interface Brush {
-  mode: 'push' | 'level';
-  radius: number | null;
-  shape: BrushShape;
-}
-/** 3D 上雕刻的一筆：View3D 送出，editor 補上選取、z 範圍、襯層與回填設定變成 Op。 */
-export type Sculpt = { kind: 'push'; dir: Vec3; n: number; local: Local } | { kind: 'level'; dir: Vec3; to: number; local: Local };
-import { applyIn, applyParkedIn, compsIn, deriveIn, dropOwners, exportIn, exportMetaIn, forkIn, loadOrig, newVersion, replayIn, replayPatchIn, restoreIn, sidOf, cancelCall, isCancelled } from '../../volume/client';
-import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, copyAxes, newAxes, stepBytes, unionBox } from '../../volume/patch';
+import { fullScope } from '../../volume/scope';
+import { applyIn, cancelCall, compsIn, deriveIn, exportIn, exportMetaIn, forkIn, isCancelled, loadOrig, newVersion, probeIn, sidOf } from '../../volume/client';
+import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, cropArr, newAxes, stepBytes, stepTouch, unionBox } from '../../volume/patch';
 import { demoComplexVolume } from '../../volume/demoComplex';
-import { type SplitPatch, type SplitStats, buffersStats, defaultLiveK, extractPatch, restoreBuffers, stepTouch, toPark } from '../../splits/lifecycle';
-import { type OpReport, blockedPhrase } from '../../volume/report';
-import { boxVoxels } from '../../volume/preview';
-import { clipBox as clipScopeBox } from '../../volume/scope';
-import type { PickedHandle } from './SliceEditor';
-import { ModelStore } from '../../slice/model';
-import { pushOpOf } from './handles3d';
+import type { OpReport } from '../../volume/report';
+import type { Probe } from '../../volume/probe';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { useEvent } from '../../ui/useEvent';
-import { useStable } from '../../ui/stable';
+import { type FaceName, FACES, OPPOSITE, blockedText, faceName, faceOf, materialParts, namesOf, stepParts } from './stepWords';
 
-export { type EditState, type Op, applyOp, matNameOf, opText, replay } from '../../volume/ops';
+export { type EditState, type Op, applyOp, matNameOf } from '../../volume/ops';
 
-/**
- * 復原／重做堆疊的一格（§8.3）：補丁＋另一邊的 ops 與版本號。不存整個陣列。
- * hist 裡的 step 往回套（back）回到 version；future 裡的往前套（fwd）。
- */
-export interface HistEntry {
-  step: Step;
-  ops: Op[];
-  version: number;
+/** 「改了哪些」的一筆（plan v17 §5.5）：第一句、每種鄰居各一句；這一步改了幾個體素；點它＝選回這一組結構。 */
+export interface StepNote {
+  parts: string[];
+  changed: number;
+  keys: string[];
 }
 
-/**
- * 一個 split 的帳簿（plan v9 §4.1）：體素、結構編號、和原始不同的格子、材質體積帳，主執行緒只有這一份，
- * 每一步原地貼補丁。cur.vol.data／cur.L.labels 永遠指向這裡（或還沒改過時借用原始）。
- */
-export interface SplitBuffers {
+/** 復原／重做堆疊的一格：補丁＋另一邊的版本號＋這一步的說明。 */
+export interface HistEntry {
+  step: Step;
+  version: number;
+  note: StepNote;
+}
+
+/** 目前這本帳簿（主執行緒只有這一份，每一步原地貼補丁）。 */
+export interface Buffers {
   data: Uint8Array;
   labels: Int32Array;
   diff: Uint8Array;
   diffCount: number;
   counts: Float64Array;
-  /** 所有改過的範圍（寬鬆聯集；plan v12 §5.3）：park 時只掃這裡，外面和原始逐位元組相同。 */
+  /** 所有改過的範圍（寬鬆聯集）：外面和原始逐位元組相同。 */
   touch: BBox | null;
-  /** 三條軸的 diff 直方圖（plan v15 A2）：和 diff 一起差量維護，貼合的 diff 外框 O(X+Y+Z)。 */
   axes: DiffAxes;
-}
-
-export interface Split {
-  id: string;
-  name: string;
-  ops: Op[];
-  /**
-   * 規則：改 buf 內容的同一個 tick 一定換一個新的 cur（新版本號），以 cur／vol／L 身分當 deps 的 memo 才會重算。
-   * parked 的 cur 只有 comps 與版本號是它自己的（陣列是原始的，不要讀；切面用 slabOf、摘要用 statsOf）。
-   */
-  cur: EditState;
-  hist: HistEntry[];
-  future: HistEntry[];
-  /** null＝還沒改過，借用原始的陣列（或 parked）。 */
-  buf: SplitBuffers | null;
-  /** plan v12 §5.3：live＝有帳簿（主執行緒＋Worker 各一本，或借用原始）；parked＝只有補丁。 */
-  state: 'live' | 'parked';
-  /** parked 才有：和原始不同的外框裡的 data／labels。 */
-  patch: SplitPatch | null;
-  /** parked 才有（live 由帳簿算，statsOf）。 */
-  stats?: SplitStats;
-  /** 產生順序（排序用）。 */
-  seq?: number;
-  /** 這個 split 是哪些水平（以 factor.unit 記；plan v11 §4.1）。標註，不影響重播。 */
-  levels?: Record<string, number>;
-  /** 哪一次產生（Design.id）。 */
-  designId?: string;
-  /** 'baseline'、'DOE-1'、使用者自訂。 */
-  tags?: string[];
-  /** 產生時被擋的格數（Report 加總；矩陣表「被擋」欄）。 */
-  blocked?: number;
-}
-
-/** 一步的報告（訊息、「看這些片」、被擋的格子標紅）。cells（Int32Array，≤ BLOCKED_CAP 個）直接給 SliceEditor 的 blocked。 */
-export interface StepReport extends OpReport {
-  op: Op;
-}
-/** 最近一步（plan v15 A1／A4／D2）：seq 每一步 +1（含復原／重做）、box＝stepTouch、owner＝哪個 split 的帳簿。 */
-export interface LastStep {
-  seq: number;
-  box: BBox | null;
-  owner: string;
 }
 
 /** 載入來源；.vti 的 Spacing／Origin／陣列名匯出時原封不動寫回。 */
@@ -169,544 +52,156 @@ export interface Meta {
   arrayName?: string;
   arrays?: string[];
   unit?: 'nm' | 'um';
-  /** .vti 原檔在 Worker 裡（plan v15 C4：主執行緒不留第二份）：照原格式匯出時重新解碼比例陣列（plan v11 §4.0、§9 D18）。 */
+  /** .vti 原檔在 Worker 裡：照原格式匯出時用（比例陣列＋FieldData）。 */
   hasRaw?: boolean;
-  /** PointData 比例陣列（陣列名 → 材質編號）；有它才能照原格式匯出。 */
   fractions?: FractionArray[];
-  /** 材質名稱與顏色從哪來：FieldData 或自動（「材質 n」）。 */
   materialSource?: 'FieldData' | 'auto';
-  /** manifest 的 input：下游知道原檔是哪種格式。 */
   input?: { source: 'PointData' | 'CellData'; fractionArrays?: string[]; fieldData: boolean; dtype: string; compressed: boolean };
 }
 
-export interface Diff {
-  mask: Uint8Array;
-  count: number;
-}
+export type SelectMode = 'set' | 'add' | 'toggle';
+export const selectModeOf = (e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): SelectMode => (e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'toggle' : 'set');
 
+/** 三個動作（plan v17 §5.3）。 */
+export type Tool = 'push' | 'move' | 'mat';
+
+/** 這本帳簿在 Worker 裡的名字。 */
+export const OWNER = 'cur';
 export const BASE_ID = 'base';
-/** 每個 split 留幾步 Undo（存的是補丁，只有改到的外框那麼大）。 */
+/** 復原的筆數與位元組上限。 */
 const HISTORY_LIMIT = 50;
-/** 復原堆疊的位元組上限（plan v15 D1）：筆數之外再限位元組；設定抽屜可調（64／256／1024 MB）。 */
 export const HISTORY_BYTES = 256 * 2 ** 20;
-/**
- * 從最舊開始丟，直到筆數 ≤ HISTORY_LIMIT 且 Σ stepBytes ≤ bytes（至少留 1 筆）。
- * byBytes：是位元組（不只是筆數）把它截掉的——UI 提示一次用。
- */
-export function trimHist(hist: HistEntry[], bytes = HISTORY_BYTES): { hist: HistEntry[]; dropped: number; byBytes: boolean } {
+/** Worker 忙的時候最多排幾步。 */
+export const QUEUE_MAX = 3;
+/** 「每次 n 格」的上限。 */
+export const STEP_MAX = 20;
+
+/** 從最舊開始丟，直到筆數 ≤ 50 且 Σ stepBytes ≤ bytes（至少留 1 筆）。 */
+export function trimHist(hist: HistEntry[], bytes = HISTORY_BYTES): HistEntry[] {
   let total = 0;
   for (const h of hist) total += stepBytes(h.step);
   let k = 0;
-  let byBytes = false;
-  while (hist.length - k > 1 && (hist.length - k > HISTORY_LIMIT || total > bytes)) {
-    if (hist.length - k <= HISTORY_LIMIT) byBytes = true;
-    total -= stepBytes(hist[k++].step);
-  }
-  return { hist: k ? hist.slice(k) : hist, dropped: k, byBytes };
+  while (hist.length - k > 1 && (hist.length - k > HISTORY_LIMIT || total > bytes)) total -= stepBytes(hist[k++].step);
+  return k ? hist.slice(k) : hist;
 }
-/** Worker 忙的時候最多排幾步；再多就拒絕並提示。 */
-export const QUEUE_MAX = 3;
+
 const EMPTY: EditState = { vol: { X: 1, Y: 1, Z: 1, data: new Uint8Array(1) }, L: { labels: new Int32Array([-1]), comps: [] }, version: 0 };
-
-/** split 和原始的 diff（主執行緒差量更新，不再跟 Worker 要，§4.4）；parked 沒有整個陣列的 mask。 */
-export const splitDiff = (s: Pick<Split, 'buf'>): Diff => (s.buf ? { mask: s.buf.diff, count: s.buf.diffCount } : NO_DIFF);
-const NO_DIFF: Diff = { mask: new Uint8Array(0), count: 0 };
-
-/** live split 的摘要快取（同一個 cur 只算一次）。 */
-const statsCache = new WeakMap<EditState, SplitStats>();
-/** 兩種狀態都有的摘要（改了幾格、diff 外框、體積帳；plan v12 §5.3）。原始＝0。 */
-export function statsOf(s: Split, origCounts: Float64Array | null): SplitStats {
-  if (s.state === 'parked' && s.stats) return s.stats;
-  if (!s.buf) return { changed: 0, diffBox: null, counts: origCounts ?? new Float64Array(256) };
-  let st = statsCache.get(s.cur);
-  if (!st) {
-    const t0 = import.meta.env.DEV ? performance.now() : 0;
-    st = buffersStats(s.cur.vol, s.buf);
-    statsCache.set(s.cur, st);
-    // 量測用（perf.cjs，plan v15 A2）：這一步算 diff 外框（diffBoxOfAxes）花了多久
-    if (import.meta.env.DEV) (window as unknown as { __diffBoxMs?: number }).__diffBoxMs = performance.now() - t0;
-  }
-  return st;
-}
-/** 改了幾格（兩種狀態都有）。 */
-export const changedOf = (s: Split) => (s.state === 'parked' ? (s.stats?.changed ?? 0) : (s.buf?.diffCount ?? 0));
-/** parked 的 cur：只有 comps 與版本號是自己的。 */
-const stubOf = (o: EditState, id: string, comps: Comp[], version: number): EditState => ({ vol: o.vol, L: { labels: o.L.labels, comps }, version, owner: id });
-
-/** 帳簿 buf 的某個版本的 wrapper（每一步新物件，陣列身分不變）。 */
-const wrap = (owner: string, buf: SplitBuffers, comps: Comp[], version: number, dims: { X: number; Y: number; Z: number }): EditState => ({
+const wrap = (buf: Buffers, comps: Comp[], version: number, dims: { X: number; Y: number; Z: number }): EditState => ({
   vol: { X: dims.X, Y: dims.Y, Z: dims.Z, data: buf.data },
   L: { labels: buf.labels, comps },
   version,
-  owner,
+  owner: OWNER,
 });
-
-/** 兩個外框：a ⊆ b。 */
-const within = (a: BBox, b: BBox) => a.x0 >= b.x0 && a.x1 <= b.x1 && a.y0 >= b.y0 && a.y1 <= b.y1 && a.z0 >= b.z0 && a.z1 <= b.z1;
-/**
- * 一步之後能不能只在 box 裡補 mask：每個結構編號「選了／沒選」若前後不同，它改前、改後的外框都必須在 box 裡
- * （換編號的 moves、被併掉的、新片段都是；只是鄰居、key 被重新認領的結構則不是 → 重建）。O(結構數)。
- */
-export function canPatchMask(prev: Comp[], next: Comp[], sel: Set<string>, box: BBox) {
-  const n = Math.max(prev.length, next.length);
-  for (let k = 0; k < n; k++) {
-    const o = prev[k];
-    const c = next[k];
-    const was = !!o && sel.has(o.key);
-    const now = !!c && sel.has(c.key);
-    if (was === now) continue;
-    if (o && !within(o.bbox, box)) return false;
-    if (c && !within(c.bbox, box)) return false;
-  }
-  return true;
-}
-/** 同一個 scope 值的簽名（整段＝'full'）。 */
-const scopeKeyOf = (scope: Scope, vol: Volume) => (isFullScope(scope, vol) ? 'full' : `${scope.axis}|${scope.lo}|${scope.hi}`);
-/** scope 只看一個軸：index → 在不在範圍裡。 */
-function inScopeFn(scope: Scope, vol: Volume) {
-  const { X, Y } = vol;
-  const plane = X * Y;
-  const { axis, lo, hi } = scope;
-  const along = axis === 'z' ? (i: number) => Math.floor(i / plane) : axis === 'y' ? (i: number) => Math.floor(i / X) % Y : (i: number) => i % X;
-  return (i: number) => {
-    const t = along(i);
-    return t >= lo && t <= hi;
-  };
-}
-const sameBytes = (a: Uint8Array, b: Uint8Array) => {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
+const changedCount = (st: Step) => {
+  if (!st.data) return 0;
+  let n = 0;
+  const { before, after } = st.data;
+  for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) n++;
+  return n;
 };
-
-/**
- * 選取 mask 與 scope 內 mask 的原地維護（plan v15 A1）：同一個選取裡陣列身分不變，一步之後只在 stepTouch 裡重算。
- * 規則：選取簽名（selKey）或帳簿（vol.data 身分）變了 → 重建（maskOf）；L 變了且 lastStep 正好是這本帳簿的下一步
- * （seq +1）→ 在 lastStep.box 裡 patchMask（canPatchMask 擋掉編號被重新認領的情形）；其他（L 變了但 seq 沒動或跳了
- * 不只一步）→ 一律重建。scope 的值變了只重建 aff（O(外框)），mask 不動；整段時 aff === mask（同一個陣列）。
- * DEV 下每 20 步隨機抽一次和 maskOf 全量比對，不同就 console.error ＋ 重建（e2e 把它當失敗）。
- */
-function useSelMasks(L: Labeled, sel: Set<string>, selKey: string, vol: Volume, owner: string, scope: Scope, selBox: BBox | null, lastStep: LastStep | null) {
-  const ref = useRef<{ key: string; data: Uint8Array | null; L: Labeled | null; seq: number; scopeKey: string; mask: Uint8Array | null; aff: Uint8Array | null }>({
-    key: '',
-    data: null,
-    L: null,
-    seq: 0,
-    scopeKey: '',
-    mask: null,
-    aff: null,
-  });
-  const r = ref.current;
-  const scopeKey = scopeKeyOf(scope, vol);
-  const affOf = (mask: Uint8Array | null) => (mask && scopeKey !== 'full' ? maskInScope(mask, vol, scope, selBox) : mask);
-  const rebuild = () => {
-    r.mask = maskOf(L, sel, vol);
-    r.aff = affOf(r.mask);
-  };
-  if (!sel.size) {
-    r.mask = null;
-    r.aff = null;
-  } else if (selKey !== r.key || vol.data !== r.data || !r.mask || !r.L) rebuild();
-  else {
-    let rebuilt = false;
-    if (L !== r.L) {
-      const step = lastStep && lastStep.seq === r.seq + 1 && lastStep.owner === owner && lastStep.box ? lastStep : null;
-      if (step && canPatchMask(r.L.comps, L.comps, sel, step.box!)) {
-        const on = new Uint8Array(L.comps.length);
-        L.comps.forEach((c, i) => {
-          if (sel.has(c.key)) on[i] = 1;
-        });
-        patchMask(r.mask, L.labels, on, vol, step.box!);
-        if (r.aff !== r.mask && r.aff) patchMask(r.aff, L.labels, on, vol, step.box!, inScopeFn(scope, vol));
-        if (import.meta.env.DEV && Math.random() < 1 / 20) {
-          const want = maskOf(L, sel, vol)!;
-          const wantAff = affOf(want)!;
-          if (!sameBytes(want, r.mask) || !sameBytes(wantAff, r.aff!)) {
-            console.error('selMask 原地維護和 maskOf 全量不同，已重建');
-            rebuild();
-            rebuilt = true;
-          }
-        }
-      } else {
-        rebuild();
-        rebuilt = true;
-      }
-    }
-    if (!rebuilt && scopeKey !== r.scopeKey) r.aff = affOf(r.mask);
-  }
-  r.key = selKey;
-  r.data = vol.data;
-  r.L = L;
-  r.seq = lastStep?.seq ?? 0;
-  r.scopeKey = scopeKey;
-  return { selMask: r.mask, affMask: r.aff };
-}
-
-// ---- useEditor ----
-
-export type SelectMode = 'set' | 'add' | 'toggle';
-/** 聚焦編輯：哪個畫面（3D 把手／筆刷、2D 剖面）。 */
-export type Focus = null | { view: '3d' | '2d'; tool: 'handles' | 'brush' };
-export const selectModeOf = (e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): SelectMode =>
-  e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'toggle' : 'set';
-
-export interface MenuState {
-  x: number;
-  y: number;
-  key: string | null;
-  /** 沿射線往裡面還有哪些結構（含第一個），「這裡的其他結構」用。 */
-  along?: string[];
-  /** 點到的體素與面的外法線（3D；聚焦編輯的「{方向}長／縮…」「在這個面上看 2D 剖面」用）。 */
-  voxel?: number | null;
-  n?: Vec3 | null;
+/** 結構的中心那一格（不在結構裡就用它的第一格）。 */
+function centerOf(L: Labeled, vol: Volume, c: Comp): Vec3 {
+  const b = c.bbox;
+  const p: Vec3 = [(b.x0 + b.x1) >> 1, (b.y0 + b.y1) >> 1, (b.z0 + b.z1) >> 1];
+  const k = L.comps.indexOf(c);
+  return L.labels[idx(vol, p[0], p[1], p[2])] === k ? p : coordOf(vol, c.seed);
 }
 
 export function useEditor() {
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const [materials, setMaterials] = useState<Material[]>([]);
   const materialsRef = useRef(materials);
   materialsRef.current = materials;
   const [meta, setMeta] = useState<Meta>({ format: 'demo' });
   const [origState, setOrig] = useState<EditState | null>(null);
-  // 一開始只有「原始」；第一次在原始上調整會自動建立 Split 1
-  const [splits, setSplitsState] = useState<Split[]>([]);
-  /** 編輯頁／實驗頁（plan v12 §5.4、§10 D5）：Ctrl+1／Ctrl+2。3D 只在編輯頁掛載。 */
-  const [page, setPage] = usePersisted<'edit' | 'lab'>('page', 'edit', (v): v is 'edit' | 'lab' => v === 'edit' || v === 'lab');
-  const [activeId, setActiveIdState] = useState(BASE_ID);
-  // 排隊中的步驟要接在前一步的結果後面，所以 split 清單另外放一份在 ref（每次改都同步更新）
-  const splitsRef = useRef<Split[]>([]);
-  const activeRef = useRef(BASE_ID);
-  const setSplits = useCallback((v: Split[] | ((all: Split[]) => Split[])) => {
-    const next = typeof v === 'function' ? v(splitsRef.current) : v;
-    // 開發模式檢查（plan v9 §9）：每個有帳簿的 split，cur 一定指向它自己的帳簿
-    if (import.meta.env.DEV)
-      for (const sp of next)
-        if (sp.buf && (sp.cur.vol.data !== sp.buf.data || sp.cur.L.labels !== sp.buf.labels || sp.cur.owner !== sp.id))
-          console.error(`split ${sp.id} 的 cur 沒有指向自己的帳簿`);
-    splitsRef.current = next;
-    setSplitsState(next);
-  }, []);
-  /** 直接切（目標一定是 live 或原始）；對外的 setActiveId 會先 restore parked（plan v12 §5.3）。 */
-  const setActiveRaw = useCallback((id: string) => {
-    activeRef.current = id;
-    setActiveIdState(id);
-    touchLru(id);
-  }, []);
-  /** 最近用過的 split（最近的在前）：live 集合的 LRU。 */
-  const lru = useRef<string[]>([]);
-  const touchLru = (id: string) => {
-    if (id === BASE_ID) return;
-    lru.current = [id, ...lru.current.filter((x) => x !== id)].slice(0, 64);
+  const [origCounts, setOrigCounts] = useState<Float64Array | null>(null);
+  const origRef = useRef(origState);
+  origRef.current = origState;
+  const origCountsRef = useRef(origCounts);
+  origCountsRef.current = origCounts;
+  /** 目前：還沒改過＝原始（借用原始的陣列，buf 為 null）。 */
+  const [curState, setCurState] = useState<EditState | null>(null);
+  const [buf, setBufState] = useState<Buffers | null>(null);
+  const [hist, setHistState] = useState<HistEntry[]>([]);
+  const [future, setFutureState] = useState<HistEntry[]>([]);
+  // 排隊中的步驟接在前一步的結果後面：帳簿的狀態另外放一份在 ref（每次改都同步更新）
+  const book = useRef<{ cur: EditState | null; buf: Buffers | null; hist: HistEntry[]; future: HistEntry[] }>({ cur: null, buf: null, hist: [], future: [] });
+  const setBook = (b: Partial<typeof book.current>) => {
+    Object.assign(book.current, b);
+    if ('cur' in b) setCurState(b.cur!);
+    if ('buf' in b) setBufState(b.buf!);
+    if ('hist' in b) setHistState(b.hist!);
+    if ('future' in b) setFutureState(b.future!);
   };
-  /** 最近一步的報告（被擋的片、格子）。 */
-  const [report, setReport] = useState<StepReport | null>(null);
-  /** 排隊等 Worker 的步驟數（不含正在算的那一步）。 */
-  const [queued, setQueued] = useState(0);
-  const queue = useRef<Op[]>([]);
   const [sel, setSel] = useState<Set<string>>(new Set());
+  /** 最後選的那個結構（箭頭畫在它的外框上）。 */
+  const [lastKey, setLastKey] = useState<string | null>(null);
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<Vec3>([0, 0, 0]);
-  // 範圍（Scope）：一個狀態，位置列與右欄兩處顯示。軸＝主切面的法線軸（上次用的方向記在 localStorage）
-  const [editAxis, setEditAxis] = usePersisted<Axis>('editAxis', 'z', isAxis);
-  const [scopeMode, setScopeMode] = usePersisted<ScopeMode>('scopeMode', 'whole', isScopeMode);
-  /** 自訂範圍的兩端（絕對座標，沿 editAxis）。 */
-  const [customRange, setCustomRange] = useState<[number, number]>([0, 0]);
-  /**
-   * 聚焦編輯（plan v10 §4.5）：null＝瀏覽（3D 上怎麼拖都只轉視角）；3d＝3D 把手或筆刷；2d＝2D 剖面。
-   * E：瀏覽 → 3D 把手 → 2D 剖面 → 瀏覽（D9），Esc 離開；選取與範圍留著。
-   */
-  const [focus, setFocus] = useState<Focus>(null);
-  /** 選到結構時主切面自動放大到它。 */
-  const [autoZoom, setAutoZoom] = usePersisted('autoZoom', true);
-  /** 大操作確認門檻（體素數）：一步會動到的範圍超過就先問。 */
-  const [bigOp, setBigOp] = usePersisted('bigOp', 4_000_000, (v): v is number => typeof v === 'number' && v > 0);
-  /** 多選時把手勢也做在長得一樣的結構上（§7.7）。 */
-  const [mirror, setMirror] = usePersisted('mirror', true);
-  /** 主切面上選到的把手（節點／邊）：右欄數值輸入、方向鍵。 */
-  const [handle, setHandle] = useState<PickedHandle | null>(null);
-  // 跨次記住：襯層跟推、nm 比例（載入有 spacing 的 .vti 會覆蓋）、筆刷
-  const [follow, setFollow] = usePersisted('follow', true);
-  /** 3D 推面碰到厚的別的材質：預設擋住（plan v11 §4.10）；設定裡可改回蓋過去。 */
-  const [pushPolicy, setPushPolicy] = usePersisted<Policy>('pushPolicy', 'block', (v): v is Policy => v === 'block' || v === 'overwrite');
-  /** 進階：自由形變（2D 節點可任意拖、Alt／Shift 修飾鍵、單點）；預設關（§4.10 P13）。 */
-  const [freeform, setFreeform] = usePersisted('freeform', false);
-  /** 進階：筆刷頁籤（§4.10 P15）；預設關。 */
-  const [brushOn, setBrushOn] = usePersisted('brushOn', false);
-  /** 並排／疊圖的基準：原始（BASE_ID）或某個 split（§4.4 A vs B）。 */
-  const [compareBase, setCompareBase] = useState<string>('base');
-  /** 產生過的實驗設計（manifest 的 designs）。 */
-  const [designs, setDesigns] = useState<Design[]>([]);
-  const designSeq = useRef(1);
-  /** 矩陣表的「匯出時不包含」（預設全包含）。 */
-  const [exportOff, setExportOff] = useState<Set<string>>(new Set());
-  const [backfill, setBackfill] = useState<Backfill>('outer');
+  const [tool, setTool] = usePersisted<Tool>('v17tool', 'push', (v): v is Tool => v === 'push' || v === 'move' || v === 'mat');
+  const [face, setFace] = usePersisted<FaceName>('v17face', '上', (v): v is FaceName => FACES.some((f) => f.name === v));
+  const [stepN, setStepNRaw] = usePersisted('v17n', 1, (v): v is number => typeof v === 'number' && v >= 1 && v <= STEP_MAX);
+  const setStepN = (n: number) => setStepNRaw(Math.max(1, Math.min(STEP_MAX, Math.round(n) || 1)));
+  /** 相鄰材質：跟著移動（true）／留在原地（false）。 */
+  const [follow, setFollow] = usePersisted('v17follow', true);
   const [nmPerVoxel, setNmPerVoxel] = usePersisted('nmPerVoxel', 0.5, (v): v is number => typeof v === 'number' && v > 0);
-  const [brush, setBrush] = usePersisted<Brush>(
-    'brush',
-    { mode: 'push', radius: 6, shape: 'round' },
-    (v): v is Brush => !!v && typeof v === 'object' && ['push', 'level'].includes((v as Brush).mode) && ['round', 'square'].includes((v as Brush).shape),
-  );
-  /** 每一步送 Worker 前先叫它：View3D 在主執行緒用裁切的小塊立刻畫出結果（正式結果幾秒後覆蓋）。 */
-  const previewHook = useRef<((op: Op) => void) | null>(null);
-  /** 剛做了什麼：訊息＋那一步改到的外框（改後模式畫橘色虛線外框淡出，plan v12 §5.1 D1）。 */
-  const [last, setLast] = useState<{ text: string; at: number; box?: BBox } | null>(null);
-  /** 同時 live 幾個 split（plan v12 §10 D4）：0＝依大小自動（8／3／1）。 */
-  const [liveKSetting, setLiveK] = usePersisted('liveK', 0, (v): v is number => typeof v === 'number' && v >= 0 && v <= 64);
-  /** 復原堆疊的記憶體上限（MB；plan v15 D1）：64／256／1024。 */
-  const [histBytes, setHistBytes] = usePersisted<number>('histBytes', HISTORY_BYTES >> 20, (v): v is number => v === 64 || v === 256 || v === 1024);
-  const histBytesRef = useRef(histBytes);
-  histBytesRef.current = histBytes;
-  /** 堆疊被位元組上限截掉時提示一次（換檔重置）。 */
-  const histWarned = useRef(false);
-  /** 最近一步（含復原／重做；plan v15 A1）：selMask 只在它的 box 裡補。 */
-  const [lastStep, setLastStep] = useState<LastStep | null>(null);
-  const stepCounter = useRef(0);
-  const noteStep = (owner: string, step: Step) => setLastStep({ seq: ++stepCounter.current, box: stepTouch(step), owner });
-  /** 推一筆進復原堆疊：筆數與位元組上限（D1）。 */
-  const pushHist = (hist: HistEntry[], entry: HistEntry) => {
-    const t = trimHist([...hist, entry], histBytesRef.current * 2 ** 20);
-    if (t.byBytes && !histWarned.current) {
-      histWarned.current = true;
-      message.info({ key: 'hist', content: `復原記憶體達上限（${histBytesRef.current} MB），最早的 ${t.dropped} 步已不能復原；可在設定調高` });
-    }
-    return t.hist;
-  };
-  /** 產生中可以取消（已產生的留著）。 */
-  const cancelGen = useRef(false);
-  /** 產生進度（實驗頁顯示 k／N）。 */
-  const [genProgress, setGenProgress] = useState<{ done: number; total: number; designId: string } | null>(null);
-  /** 套用一步後閃橘色虛線外框（設定可關）。 */
-  const [stepFlash, setStepFlash] = usePersisted('stepFlash', true);
-  const [menu, setMenu] = useState<MenuState | null>(null);
-  /** 計算中的說明（例如「計算中…」）；有值時其他改體素的動作先擋下。 */
+  /** 最近一步的報告。 */
+  const [report, setReport] = useState<OpReport | null>(null);
+  /** 底下一行：上一步的一句話（canUndo＝後面放「復原」）。 */
+  const [last, setLast] = useState<{ text: string; canUndo: boolean; at: number; box?: BBox } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  /** 原始的材質體積帳（載入時 Worker 數一次）。 */
-  const [origCounts, setOrigCounts] = useState<Float64Array | null>(null);
-  const origCountsRef = useRef<Float64Array | null>(null);
-  origCountsRef.current = origCounts;
-  const keySeq = useRef(1000);
-  const splitSeq = useRef(1);
-  /** 2D 編輯的幾何層（plan v8 §6）：每片一份、每個版本留快照；所有拖拉、數值輸入、方向鍵都改它。 */
-  const models = useRef(new ModelStore()).current;
-  if (import.meta.env.DEV) (window as unknown as { __models?: ModelStore }).__models = models;
-  /** 已經算完的步數（不論有沒有改到）：幾何層靠它知道「放開的那一步回來了」。 */
-  const [stepSeq, setStepSeq] = useState(0);
-  /** 2D 編輯的設定（plan v8 §5.4）：輪廓畫幾何線或階梯；拖拉中跟手（放開才吸附）或邊拖邊吸附。 */
-  const [outlineStyle, setOutlineStyle] = usePersisted<'geometry' | 'stairs'>('outlineStyle', 'geometry', (v): v is 'geometry' | 'stairs' => v === 'geometry' || v === 'stairs');
-  const [snapMode, setSnapMode] = usePersisted<'release' | 'live'>('snapMode', 'release', (v): v is 'release' | 'live' => v === 'release' || v === 'live');
+  const [queued, setQueued] = useState(0);
+  const queue = useRef<Op[]>([]);
   const running = useRef(false);
-  const newSplitId = () => `s${splitSeq.current++}`;
+  const keySeq = useRef(1000);
+  /** 每一步送 Worker 前先叫它：畫面在主執行緒用裁切的小塊立刻畫出結果。 */
+  const previewHook = useRef<((op: Op) => void) | null>(null);
 
   const ready = !!origState;
   const orig = origState ?? EMPTY;
-  const isBase = activeId === BASE_ID;
-  const active = splits.find((s) => s.id === activeId) ?? null;
-  const cur = active ? active.cur : orig;
+  const cur = curState ?? orig;
   const vol = cur.vol;
   const L = cur.L;
-  // 幾何快照只留回得去的版本（plan v15 D2）：每個 split 的 cur／hist／future 的版本號，加上原始的
-  useEffect(() => {
-    const live = new Set<number>([sidOf(orig)]);
-    for (const s of splits) {
-      live.add(sidOf(s.cur));
-      for (const h of s.hist) live.add(h.version);
-      for (const f of s.future) live.add(f.version);
-    }
-    models.prune(live);
-  }, [splits, orig, models]);
-  const hist = active?.hist ?? [];
-  const future = active?.future ?? [];
-  // 量測用（perf.cjs，plan v15 D1）：目前 split 的復原堆疊位元組 Σ stepBytes（getter，讀的時候才算）
-  const histRef = useRef(hist);
-  histRef.current = hist;
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    Object.defineProperty(window, '__histBytes', { get: () => histRef.current.reduce((n, h) => n + stepBytes(h.step), 0), configurable: true });
-  }, []);
 
   const matName = useMemo(() => matNameOf(materials), [materials]);
   const matNames = useMemo(() => Object.fromEntries(materials.map((m) => [m.id, m.name])), [materials]);
+  /** 薄層材質（plan v17 §5.4.2）：載入時判定、清單上可以手動切換。 */
+  const liners = useMemo(() => materials.filter((m) => m.liner).map((m) => m.id), [materials]);
   const compByKey = useMemo(() => new Map(L.comps.map((c) => [c.key, c])), [L]);
-  const origByKey = useMemo(() => new Map(orig.L.comps.map((c) => [c.key, c])), [orig]);
   const selComps = useMemo(() => L.comps.filter((c) => sel.has(c.key)), [L, sel]);
-  /** 選取結構在 L.comps 裡的 index（給 Worker 畫選取層）。 */
   const selIdx = useMemo(() => L.comps.flatMap((c, i) => (sel.has(c.key) ? [i] : [])), [L, sel]);
   const selBox: BBox | null = useMemo(() => unionBBox(selComps), [selComps]);
-  /** 選取結構沿 editAxis 的起止（「整個結構（z 0～127）」的數字）。 */
-  const selRange = useMemo<[number, number] | null>(() => (selBox ? boxRange(selBox, editAxis) : null), [selBox, editAxis]);
-  /** 實際送進 Op 的範圍：整個結構＝整段（選取本來就只有那段，重播到別的 split 也不會被切掉）。 */
-  /*
-   * 身分規則（plan v15 §4、§10）：
-   * - 同一個選取裡 selMask／affMask 陣列身分不變（useSelMasks 原地維護）；
-   * - 任何要跟著步驟重算的 memo 都必須把 vol 或 L 放進 deps（不能靠 selMask 身分）；
-   * - scope／gesture／geo／selBBox 以值比較：值相同就是同一個物件（useStable），cursor 連點、每一步都不會換新；
-   * - 回傳給 UI 的事件 handler 都經 useEvent，身分永遠相同；op factory（pushOp、cdOp…）、matName 維持 useCallback／useMemo，
-   *   它們的身分代表輸入（sel、scope）變了，OpCard 的 useMemo 靠它重算。
-   */
-  const sliceAt = scopeMode === 'slice' ? cursor[axisIndex(editAxis)] : -1;
-  const scopeRaw: Scope = useMemo(() => {
-    if (scopeMode === 'slice') return clampScope({ axis: editAxis, lo: sliceAt, hi: sliceAt }, vol);
-    if (scopeMode === 'custom') return clampScope({ axis: editAxis, lo: customRange[0], hi: customRange[1] }, vol);
-    return fullScope(vol, editAxis);
-  }, [scopeMode, editAxis, sliceAt, customRange[0], customRange[1], vol]); // eslint-disable-line react-hooks/exhaustive-deps
-  const scope = useStable(scopeRaw, sameScope);
-  const setCustom = useCallback(
-    (lo: number, hi: number) => {
-      const c = clampScope({ axis: editAxis, lo, hi }, vol);
-      setCustomRange([c.lo, c.hi]);
-    },
-    [editAxis, vol],
-  );
-  // 換結構時，自訂的兩端夾到結構的範圍裡（完全沒交集就用整個結構）；換軸時舊的數字沒有意義，直接用整個結構
-  const selKey = [...sel].sort().join(',');
-  const rangeAxis = useRef(editAxis);
-  useEffect(() => {
-    if (!selRange) return;
-    if (rangeAxis.current !== editAxis) {
-      rangeAxis.current = editAxis;
-      setCustomRange([selRange[0], selRange[1]]);
-      return;
-    }
-    setCustomRange(([a, b]) => {
-      const lo = Math.max(a, selRange[0]);
-      const hi = Math.min(b, selRange[1]);
-      return lo <= hi ? [lo, hi] : [selRange[0], selRange[1]];
-    });
-    // 只在選取或軸改變時夾；長高之後外框變了不必重夾
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selKey, editAxis]);
-  // 選取 mask 原地維護（plan v15 A1）：同一個選取裡身分不變；要跟著步驟重算的 memo 把 vol／L 放進 deps
-  const tMask = import.meta.env.DEV ? performance.now() : 0;
-  const { selMask, affMask } = useSelMasks(L, sel, selKey, vol, cur.owner ?? BASE_ID, scope, selBox, lastStep);
-  // 量測用（perf.cjs，plan v15 A1）：這次 render 維護 selMask／affMask 花了多久（沒事做時 ≈ 0）
-  if (import.meta.env.DEV) (window as unknown as { __selMaskMs?: number }).__selMaskMs = performance.now() - tMask;
-  const selCount = useMemo(() => selComps.reduce((s, c) => s + c.count, 0), [selComps]);
+  const selMat = selComps[0]?.mat ?? null;
+  /** 箭頭畫在哪個結構上：最後選的（還在的話），否則第一個。 */
+  const handleComp = (lastKey && sel.has(lastKey) ? compByKey.get(lastKey) : undefined) ?? selComps[0] ?? null;
+  const selName = namesOf(selComps, matName);
+  /** 選取的 mask（3D 判斷滑鼠是不是在已選的結構上、切面描藍邊）。 */
+  const selMask = useMemo(() => {
+    if (!selIdx.length || !selBox) return null;
+    const on = new Uint8Array(L.comps.length);
+    for (const i of selIdx) on[i] = 1;
+    const m = new Uint8Array(L.labels.length);
+    const { X, Y } = vol;
+    for (let z = selBox.z0; z <= selBox.z1; z++)
+      for (let y = selBox.y0; y <= selBox.y1; y++)
+        for (let i = (z * Y + y) * X + selBox.x0, e = i + selBox.x1 - selBox.x0; i <= e; i++) {
+          const l = L.labels[i];
+          if (l >= 0 && on[l]) m[i] = 1;
+        }
+    return m;
+  }, [L, selIdx, selBox, vol]);
+  const diffCount = buf?.diffCount ?? 0;
+  const scope = useMemo(() => fullScope(vol), [vol]);
 
-  /** 目前 split 和原始不同的外框（「對準差異」、縮圖；plan v12 §5.2）。 */
-  const diffBox = useMemo(() => (active ? statsOf(active, origCounts).diffBox : null), [active, cur, origCounts]); // eslint-disable-line react-hooks/exhaustive-deps
-  /** 目前 split 的 diff 與體積帳：讀帳簿（cur 每一步換新，所以這裡每一步重算）。 */
-  const diff: Diff = useMemo(() => (active ? splitDiff(active) : NO_DIFF), [active, cur]);
-  const counts = useMemo(
-    () => (origCounts ? { before: Array.from(origCounts), after: Array.from(active?.buf?.counts ?? origCounts) } : null),
-    [origCounts, active, cur],
-  );
-
-  const changedKeys = useMemo(() => {
-    const out = new Set<string>();
-    L.comps.forEach((c) => {
-      const o = origByKey.get(c.key);
-      if (
-        !o ||
-        o.count !== c.count ||
-        o.mat !== c.mat ||
-        o.bbox.x0 !== c.bbox.x0 ||
-        o.bbox.y0 !== c.bbox.y0 ||
-        o.bbox.z0 !== c.bbox.z0 ||
-        o.bbox.x1 !== c.bbox.x1 ||
-        o.bbox.y1 !== c.bbox.y1 ||
-        o.bbox.z1 !== c.bbox.z1
-      )
-        out.add(c.key);
-    });
-    return out;
-  }, [L, origByKey]);
-  /** 各材質體積帳。 */
-  const ledger = useMemo(() => {
-    if (!counts) return [];
-    const ids = new Set<number>();
-    counts.before.forEach((n, id) => n && ids.add(id));
-    counts.after.forEach((n, id) => n && ids.add(id));
-    return [...ids]
-      .sort((a, b) => a - b)
-      .map((id) => ({ id, name: matName(id), before: counts.before[id], after: counts.after[id] }));
-  }, [counts, matName]);
-
-  const describe = useCallback(
-    (op: Op, at: Labeled) => opText(op, at, vol, nmPerVoxel, matName),
-    [vol, nmPerVoxel, matName],
-  );
-
-  const origRef = useRef(origState);
-  origRef.current = origState;
-  /** 這一步真正改了幾格（補丁裡前後不同的格數）。 */
-  const changedCount = (st: Step) => {
-    if (!st.data) return 0;
-    let n = 0;
-    const { before, after } = st.data;
-    for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) n++;
-    return n;
-  };
-  const blockedText = (r: Pick<OpReport, 'total' | 'blockedBy' | 'slices'>) => blockedPhrase(r, matName);
-  /** 「已套用到整根（z 0～127）」「已套用到此片（z = 64）」「已套用到 z 40～80」。 */
-  const appliedText = (op: Op, from: EditState) => {
-    const a = op.scope.axis;
-    if (op.scope.lo === op.scope.hi) return `已套用到此片（${a} = ${op.scope.lo}）`;
-    if (isFullScope(op.scope, from.vol)) {
-      const keys = new Set(op.keys);
-      const b = unionBBox(from.L.comps.filter((c) => keys.has(c.key)));
-      const r = b ? boxRange(b, a) : null;
-      return `已套用到${op.keys.length > 1 ? '整個結構' : '整根'}${r ? `（${a} ${r[0]}～${r[1]}）` : ''}`;
-    }
-    return `已套用到 ${a} ${op.scope.lo}～${op.scope.hi}`;
-  };
-  /** 訊息前半：結構＋動作（範圍放在 appliedText，不重複）。 */
-  const headText = (op: Op, from: EditState) => `${describe({ ...op, scope: fullScope(from.vol, op.scope.axis) } as Op, from.L)} · ${appliedText(op, from)}`;
-  /** 訊息後半：「· 1,152 格 · 4 片有 12 格被 Poly-Si 擋住 · 3 片沒有這個結構，略過」。 */
-  const resultText = (r: StepReport & { changed?: number }) =>
-    `${r.changed !== undefined ? ` · ${r.changed.toLocaleString()} 格` : ''}${r.total.blocked ? ` · ${blockedText(r)}` : ''}${
-      r.total.skippedSlices ? ` · ${r.total.skippedSlices} 片沒有這個結構，略過` : ''
-    }${r.total.fallbackSlices ? ` · ${r.total.fallbackSlices} 片對不到同一個${r.op.kind === 'profile' && Object.values(r.op.gestures ?? {})[0]?.kind === 'node' ? '節點' : '邊'}，用參考片的位置` : ''}`;
-
-  /** 選取裡已經不存在的 key 拿掉；一個都沒少就回傳原來的 Set（身分不變，plan v15 A1）。 */
-  const keepSel = (s: EditState) =>
-    setSel((prev) => {
-      if (!prev.size) return prev;
-      const keys = new Set(s.L.comps.map((c) => c.key));
-      const next = [...prev].filter((k) => keys.has(k));
-      return next.length === prev.size ? prev : new Set(next);
-    });
-
-  /** 在 Worker 裡從 from 複製出帳簿 owner、重播 ops（含 relabel）；busy 橫條顯示 label。失敗回 null 並提示，不會卡在計算中。 */
-  const run = useCallback(
-    async (owner: string, from: EditState, ops: Op[], label: string): Promise<{ cur: EditState; buf: SplitBuffers; blocked: number } | null> => {
-      setBusy(label);
-      running.current = true;
-      try {
-        const r = await replayIn(owner, from, { ops, matNames, keyCounter: keySeq.current });
-        keySeq.current = r.keyCounter;
-        const buf: SplitBuffers = { data: r.data, labels: r.labels, diff: r.diff, diffCount: r.diffCount, counts: r.counts, touch: r.touch, axes: r.axes };
-        return { cur: wrap(owner, buf, r.comps, r.version, from.vol), buf, blocked: r.blocked };
-      } catch (e) {
-        dropOwners([owner]);
-        message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
-        return null;
-      } finally {
-        setBusy(null);
-        running.current = false;
-      }
-    },
-    [matNames, message],
-  );
-
-  /**
-   * 第一次要改之前：把原始複製進這個 split 的帳簿（主執行緒與 Worker 各一次），之後原地改。
-   * 借用中的 split 內容一定是原始（新 split、丟掉所有改動、借用中的複本）。
-   */
-  /**
-   * 第一次在原始上改動，要先把原始抄一份當新 split 的帳簿：data（1 B／格）＋labels（4 B／格）＋diff（1 B／格），
-   * ×3 範例 5,300 萬格就是 318 MB。之前這一整份是在按「套用」的 click handler 裡同步抄的，實測主執行緒卡 2.1 s（審查問題 4）。
-   * 現在載入完就在 idle 時分段先抄好（每次最多 6 ms），own() 直接拿；還沒抄完就只補剩下的那一段。
-   * 用掉之後 spareGen +1 再抄一份備著（使用者回到原始再改一次也不會卡）。
-   */
-  const spare = useRef<{ src: EditState; buf: SplitBuffers; at: number } | null>(null);
-  const [spareGen, setSpareGen] = useState(0);
+  // ---- 第一次改之前：把原始抄一份當帳簿（載入完就在 idle 時分段先抄好，不卡在按下去的那一刻） ----
+  const spare = useRef<{ src: EditState; buf: Buffers; at: number } | null>(null);
   useEffect(() => {
     const o = origState;
-    const oc = origCountsRef.current;
+    const oc = origCounts;
     spare.current = null;
     if (!o || !oc) return;
     const N = o.vol.data.length;
-    const entry = { src: o, buf: { data: new Uint8Array(N), labels: new Int32Array(N), diff: new Uint8Array(N), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) } as SplitBuffers, at: 0 };
+    const entry = { src: o, buf: { data: new Uint8Array(N), labels: new Int32Array(N), diff: new Uint8Array(N), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) } as Buffers, at: 0 };
     spare.current = entry;
     const STEP = 1 << 21;
     let cancelled = false;
@@ -726,99 +221,81 @@ export function useEditor() {
     return () => {
       cancelled = true;
     };
-  }, [origState, spareGen]);
-  const own = (sp: Split): Split => {
-    if (sp.buf) return sp;
-    if (sp.state === 'parked') throw new Error(`split ${sp.name} 還沒載入（parked）`);
+  }, [origState, origCounts]);
+  /** 帳簿：有了直接用；還沒有就拿先抄好的那一份（沒抄完的尾巴現在補），Worker 也 fork 一份。 */
+  const own = (): { cur: EditState; buf: Buffers } => {
+    const b = book.current;
+    if (b.buf && b.cur) return { cur: b.cur, buf: b.buf };
     const o = origRef.current!;
     const oc = origCountsRef.current!;
-    let buf: SplitBuffers;
     const s = spare.current;
+    let nb: Buffers;
     if (s && s.src === o) {
-      // 先抄好的那一份：沒抄完的尾巴現在補（通常早就抄完了）
       const N = o.vol.data.length;
       if (s.at < N) {
         s.buf.data.set(o.vol.data.subarray(s.at), s.at);
         s.buf.labels.set(o.L.labels.subarray(s.at), s.at);
         s.at = N;
       }
-      buf = s.buf;
+      nb = s.buf;
       spare.current = null;
-      setSpareGen((g) => g + 1);
-    } else {
-      buf = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) };
-    }
-    const version = sidOf(sp.cur);
-    void forkIn(sp.id, sp.cur).catch(() => {});
-    return { ...sp, buf, cur: wrap(sp.id, buf, sp.cur.L.comps, version, o.vol) };
+    } else nb = { data: o.vol.data.slice(), labels: o.L.labels.slice(), diff: new Uint8Array(o.vol.data.length), diffCount: 0, counts: oc.slice(), touch: null, axes: newAxes(o.vol) };
+    const version = sidOf(o);
+    void forkIn(OWNER, o, version).catch(() => {});
+    const c = wrap(nb, o.L.comps, version, o.vol);
+    setBook({ cur: c, buf: nb });
+    return { cur: c, buf: nb };
   };
 
-  /** 一步送 Worker（只在外框裡算），回來後主執行緒原地貼補丁、差量更新 diff 與體積帳。失敗回 null。 */
-  const applyOne = async (sp: Split, op: Op) => {
-    const from = sp.cur;
-    const buf = sp.buf!;
-    try {
-      const r = await applyIn(from, { op, matNames, keyCounter: keySeq.current });
-      keySeq.current = r.keyCounter;
-      if (!r.step.data) return { next: null, step: r.step, report: r.report };
-      const comps = applyStepInPlace(from.vol, buf.data, buf.labels, r.step, 'fwd');
-      buf.diffCount = carryStepStats(from.vol, buf.data, origRef.current!.vol.data, buf.diff, buf.diffCount, buf.counts, r.step, 'fwd', buf.axes);
-      buf.touch = unionBox(buf.touch, stepTouch(r.step));
-      const next = wrap(sp.id, buf, comps ?? from.L.comps, r.version, from.vol);
-      return { next, step: r.step, report: r.report };
-    } catch (e) {
-      if (isCancelled(e)) {
-        message.info({ key: 'queue', content: '已取消，這一步沒有套用' });
-        return null;
-      }
-      message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
-      return null;
+  /** 一步的說明（plan v17 §5.5）；一格都沒做回傳 null 與「擋下來了」的原因。 */
+  const describe = (op: Op, from: EditState, r: OpReport, after: Comp[] | null): { parts: string[] | null; text: string } => {
+    const keys = new Set(op.keys);
+    const comps = from.L.comps.filter((c) => keys.has(c.key));
+    const who = namesOf(comps, matName);
+    const stopWho = r.stop?.at !== undefined && from.L.labels[r.stop.at] >= 0 ? from.L.comps[from.L.labels[r.stop.at]]?.label : undefined;
+    if (op.kind === 'material') {
+      const now = after ? namesOf(after.filter((c) => keys.has(c.key)), matName) : undefined;
+      const parts = materialParts(who, matName(op.m), now);
+      return { parts, text: parts.join(' · ') };
     }
+    if (op.kind !== 'push' && op.kind !== 'translate') return { parts: null, text: '' };
+    const done = r.done ?? 0;
+    if (!done) return { parts: null, text: blockedText(r.stop, matName, stopWho) };
+    const dir = op.kind === 'push' ? op.dir : op.d;
+    const n = op.kind === 'push' ? op.n : Math.abs(op.d[0] + op.d[1] + op.d[2]);
+    const parts = stepParts({ kind: op.kind, who, face: faceName(dir), n, done, nmPerVoxel, follow: !!op.follow, effects: r.effects, stop: r.stop, stopWho }, matName);
+    return { parts, text: parts.join(' · ') };
   };
 
-  /** 排隊中的一步：接在目前 split 最新的結果後面（從 ref 讀，不用 render 時的舊值）。 */
+  // ---- 一步：送 Worker、原地貼、記進復原堆疊 ----
   const commitOne = async (op: Op) => {
     const o = origRef.current;
     if (!o) return;
-    const active = splitsRef.current.find((x) => x.id === activeRef.current) ?? null;
-    // 原始保持唯讀：在原始上調整就先開一個新 split（有改到才留下）
-    const fresh = !active;
-    const sp = own(active ?? { id: newSplitId(), name: '', cur: o, ops: [], hist: [], future: [], buf: null, state: 'live', patch: null, seq: genSeq.current++ });
-    if (active) setSplits((all) => all.map((x) => (x.id === sp.id ? sp : x)));
-    const from = sp.cur;
-    const r = await applyOne(sp, op);
-    if (!r || !r.next) {
-      if (fresh) dropOwners([sp.id]);
-      if (!r) return;
-    }
-    // 按了取消、但 Worker 已經過了安全點（結果寫回了）：這一步照常記下來，排隊跑完後立刻復原它
-    if (cancelRef.current && r.next) undoAfter.current = true;
-    // 報告已在 Worker 摘要（plan v15 C7）：cells 是 Int32Array，SliceEditor 直接讀
-    const rep: StepReport & { changed: number } = { ...r.report, op, changed: changedCount(r.step) };
-    setReport(rep);
-    if (!r.next) {
-      setLast({ text: `${headText(op, from)} · 沒有改到任何體素${rep.total.blocked ? `（${blockedText(rep)}）` : ''}`, at: Date.now() });
+    const { cur: from, buf: b } = own();
+    let r;
+    try {
+      r = await applyIn(from, { op, matNames, keyCounter: keySeq.current });
+    } catch (e) {
+      if (isCancelled(e)) message.info({ key: 'queue', content: '已取消，這一步沒有套用' });
+      else message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
       return;
     }
-    const next = r.next;
-    // 寫進 manifest 的結果摘要（重播時忽略，§11）
-    const t = rep.total;
-    op = { ...op, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed: rep.changed } } as unknown as Op;
-    const entry: HistEntry = { step: r.step, ops: sp.ops, version: sidOf(from) };
-    if (fresh) {
-      const name = `Split ${splitsRef.current.length + 1}`;
-      setSplits((all) => [...all, { ...sp, name, cur: next, ops: [op], hist: [entry], future: [] }]);
-      noteStep(sp.id, r.step);
-      setActiveRaw(sp.id);
-      enforceK();
-      keepSel(next);
-      setLast({ text: `原始保持不變，已自動建立 ${name}：${headText(op, o)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
+    keySeq.current = r.keyCounter;
+    setReport(r.report);
+    if (!r.step.data) {
+      const d = describe(op, from, r.report, null);
+      setLast({ text: op.kind === 'material' ? '已經是這個材質' : d.text, canUndo: false, at: Date.now() });
       return;
     }
-    setSplits((all) => all.map((x) => (x.id === sp.id ? { ...x, cur: next, ops: [...x.ops, op], hist: pushHist(x.hist, entry), future: [] } : x)));
-    noteStep(sp.id, r.step);
+    const comps = applyStepInPlace(from.vol, b.data, b.labels, r.step, 'fwd');
+    b.diffCount = carryStepStats(from.vol, b.data, o.vol.data, b.diff, b.diffCount, b.counts, r.step, 'fwd', b.axes);
+    b.touch = unionBox(b.touch, stepTouch(r.step));
+    const next = wrap(b, comps ?? from.L.comps, r.version, from.vol);
+    const d = describe(op, from, r.report, comps);
+    const note: StepNote = { parts: d.parts ?? [d.text], changed: r.report.changed ?? changedCount(r.step), keys: [...op.keys] };
+    setBook({ cur: next, hist: trimHist([...book.current.hist, { step: r.step, version: sidOf(from), note }]), future: [] });
     keepSel(next);
-    setLast({ text: `${headText(op, from)}${resultText(rep)}`, at: Date.now(), box: r.step.data?.box });
+    setLast({ text: d.text, canUndo: true, at: Date.now(), box: r.step.data.box });
   };
 
   const drain = async () => {
@@ -826,18 +303,12 @@ export function useEditor() {
     setBusy('計算中…');
     try {
       while (queue.current.length) {
-        // 每一步都用最新一次 render 的 commitOne（材質名稱、nm 比例等才是最新的）
-        try {
-          await latest.current.commitOne(queue.current[0]);
-        } finally {
-          setStepSeq((n) => n + 1);
-        }
+        await latest.current.commitOne(queue.current[0]);
         queue.current.shift();
         setQueued(Math.max(0, queue.current.length - 1));
       }
     } finally {
       running.current = false;
-      cancelRef.current = false;
       setBusy(null);
       setQueued(0);
       if (undoAfter.current) {
@@ -846,32 +317,9 @@ export function useEditor() {
       }
     }
   };
-  /** 使用者按了取消（這一輪排隊有效，drain 結束時清掉）。 */
-  const cancelRef = useRef(false);
-  /**
-   * 取消（plan v16）：清掉還沒開始的步驟；正在算的那一步請 Worker 在安全點停（算完還沒寫回帳簿之前）；
-   * 已經過了安全點的做完後自動復原。3D 網格、選取層的更新也一起停（復原後會重畫）。
-   */
-  const cancel = useCallback(() => {
-    if (!running.current) return;
-    const dropped = Math.max(0, queue.current.length - 1);
-    queue.current.length = Math.min(queue.current.length, 1);
-    setQueued(0);
-    cancelRef.current = true;
-    const asked = cancelCall('apply');
-    cancelCall('chunks');
-    cancelCall('layer');
-    message.info({ key: 'queue', content: `${dropped ? `已清掉排隊的 ${dropped} 步；` : ''}${asked ? '正在算的那一步會在安全點停下（已寫回的會自動復原）' : '已取消'}` });
-  }, [message]);
-
-  /**
-   * 所有改體素的路徑都經過 commit：記 Op、可復原、可在別的 split 重播。
-   * Worker 忙的時候排隊（最多 QUEUE_MAX 步），依序接在前一步的結果後面；超過就拒絕並提示。
-   */
   const enqueue = (op: Op) => {
     if (queue.current.length > QUEUE_MAX) {
       message.warning({ key: 'queue', content: '還在算前面的步驟，請稍等' });
-      setStepSeq((n) => n + 1);
       return;
     }
     if (!running.current) previewHook.current?.(op);
@@ -879,741 +327,314 @@ export function useEditor() {
     setQueued(Math.max(0, queue.current.length - 1));
     if (!running.current) void latest.current.drain();
   };
-  /** 這一步大概會動到多少體素（選取外框 ∩ 範圍）。 */
-  const opVoxels = (op: Op) => {
-    const s = splitsRef.current.find((x) => x.id === activeRef.current)?.cur ?? origRef.current;
-    if (!s) return 0;
-    const keys = new Set(op.keys);
-    const b = unionBBox(s.L.comps.filter((c) => keys.has(c.key)));
-    const c = b && clipScopeBox(b, op.scope);
-    return c ? boxVoxels(c) : 0;
-  };
   const latest = useRef({ enqueue, drain, commitOne });
   latest.current = { enqueue, drain, commitOne };
-  const bigRef = useRef(bigOp);
-  bigRef.current = bigOp;
-  const commit = useCallback(
-    (op: Op) => {
-      if (!origRef.current) return;
-      const n = opVoxels(op);
-      if (n > bigRef.current && op.kind !== 'material') {
-        const comps = (splitsRef.current.find((x) => x.id === activeRef.current)?.cur ?? origRef.current).L.comps.filter((c) => op.keys.includes(c.key));
-        const who = comps.length === 1 ? comps[0].label : `${comps.length} 個結構`;
-        modal.confirm({
-          title: '這一步範圍很大',
-          content: `這一步會改到約 ${Math.round(n / 1e4).toLocaleString()} 萬格（整個 ${who}），可能要幾秒。繼續？`,
-          okText: '繼續',
-          cancelText: '取消',
-          onOk: () => latest.current.enqueue(op),
-          // 取消：幾何層回到放開前（當作這一步算完、沒改到）
-          onCancel: () => setStepSeq((n) => n + 1),
-        });
-        return;
-      }
-      latest.current.enqueue(op);
-    },
-    // enqueue／drain／commitOne 每次 render 都換新的，經由 latest 取用最新的那一份
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [message, modal],
-  );
-  // 換選取或換方向時把手失效
-  useEffect(() => setHandle(null), [selKey, editAxis]);
+  const commit = useCallback((op: Op) => {
+    if (!origRef.current) return;
+    latest.current.enqueue(op);
+  }, []);
+  /** 取消：清掉還沒開始的步驟；正在算的那一步請 Worker 在安全點停。 */
+  const cancel = useCallback(() => {
+    if (!running.current) return;
+    queue.current.length = Math.min(queue.current.length, 1);
+    setQueued(0);
+    cancelCall('apply');
+    cancelCall('chunks');
+    cancelCall('layer');
+  }, []);
 
-  /** 復原／重做的一格：先通知 Worker（它可能要補送改前的內容），再原地貼、差量更新 diff 與體積帳，回傳新的 cur。 */
-  const stepInPlace = (act: Split, h: HistEntry, dir: 'fwd' | 'back', o: EditState): EditState => {
-    const buf = act.buf!;
-    void deriveIn(act.cur, h.version, h.step, dir).catch(() => {});
-    const comps = applyStepInPlace(o.vol, buf.data, buf.labels, h.step, dir);
-    buf.diffCount = carryStepStats(o.vol, buf.data, o.vol.data, buf.diff, buf.diffCount, buf.counts, h.step, dir, buf.axes);
-    buf.touch = unionBox(buf.touch, stepTouch(h.step));
-    return wrap(act.id, buf, comps ?? act.cur.L.comps, h.version, o.vol);
+  /** 選取裡已經不存在的 key 拿掉。 */
+  const keepSel = (s: EditState) =>
+    setSel((prev) => {
+      if (!prev.size) return prev;
+      const keys = new Set(s.L.comps.map((c) => c.key));
+      const next = [...prev].filter((k) => keys.has(k));
+      return next.length === prev.size ? prev : new Set(next);
+    });
+
+  // ---- 復原／重做／全部還原 ----
+  const stepInPlace = (h: HistEntry, dir: 'fwd' | 'back'): EditState => {
+    const o = origRef.current!;
+    const { cur: c, buf: b } = book.current;
+    void deriveIn(c!, h.version, h.step, dir).catch(() => {});
+    const comps = applyStepInPlace(o.vol, b!.data, b!.labels, h.step, dir);
+    b!.diffCount = carryStepStats(o.vol, b!.data, o.vol.data, b!.diff, b!.diffCount, b!.counts, h.step, dir, b!.axes);
+    b!.touch = unionBox(b!.touch, stepTouch(h.step));
+    return wrap(b!, comps ?? c!.L.comps, h.version, o.vol);
   };
-
-  /** 排隊中按復原：先清掉還沒開始的步驟，正在算的那一步做完再復原它。 */
   const undoAfter = useRef(false);
   const undoRef = useRef<() => void>(() => {});
   const undo = useCallback(() => {
     if (running.current) {
-      const dropped = queue.current.length - 1;
       queue.current.length = Math.min(queue.current.length, 1);
       setQueued(0);
       undoAfter.current = true;
-      message.info({ key: 'queue', content: dropped > 0 ? `已清掉排隊的 ${dropped} 步，正在算的那一步完成後復原` : '這一步完成後復原' });
       return;
     }
-    const act = splitsRef.current.find((x) => x.id === activeRef.current);
-    const o = origRef.current;
-    if (!act || !act.hist.length || !o || !act.buf) return;
-    const h = act.hist[act.hist.length - 1];
-    const prev = stepInPlace(act, h, 'back', o);
-    setSplits((all) =>
-      all.map((x) =>
-        x.id === act.id
-          ? { ...x, cur: prev, ops: h.ops, hist: x.hist.slice(0, -1), future: [{ step: h.step, ops: x.ops, version: sidOf(x.cur) }, ...x.future] }
-          : x,
-      ),
-    );
-    noteStep(act.id, h.step);
+    const { hist: hs, cur: c, buf: b } = book.current;
+    if (!hs.length || !c || !b) return;
+    const h = hs[hs.length - 1];
+    const prev = stepInPlace(h, 'back');
+    setBook({ cur: prev, hist: hs.slice(0, -1), future: [{ step: h.step, version: sidOf(c), note: h.note }, ...book.current.future] });
     keepSel(prev);
     setReport(null);
-    setLast(null);
-  }, [message, setSplits]);
+    setLast({ text: `已復原：${h.note.parts.join(' · ')}`, canUndo: false, at: Date.now() });
+  }, []);
   undoRef.current = undo;
-
   const redo = useCallback(() => {
     if (running.current) return;
-    const act = splitsRef.current.find((x) => x.id === activeRef.current);
-    const o = origRef.current;
-    if (!act || !act.future.length || !o || !act.buf) return;
-    const f = act.future[0];
-    const next = stepInPlace(act, f, 'fwd', o);
-    setSplits((all) =>
-      all.map((x) =>
-        x.id === act.id
-          ? { ...x, cur: next, ops: f.ops, hist: pushHist(x.hist, { step: f.step, ops: x.ops, version: sidOf(x.cur) }), future: x.future.slice(1) }
-          : x,
-      ),
-    );
-    noteStep(act.id, f.step);
+    const { future: fs, cur: c, buf: b } = book.current;
+    if (!fs.length || !c || !b) return;
+    const f = fs[0];
+    const next = stepInPlace(f, 'fwd');
+    setBook({ cur: next, hist: trimHist([...book.current.hist, { step: f.step, version: sidOf(c), note: f.note }]), future: fs.slice(1) });
     keepSel(next);
     setReport(null);
-    setLast(null);
-  }, [setSplits]);
-
-  const resetAll = useCallback(() => {
-    if (!active || running.current) return;
-    // 帳簿釋放，回到借用原始
-    dropOwners([active.id]);
-    setSplits((all) => all.map((s) => (s.id === active.id ? { ...s, cur: orig, ops: [], hist: [], future: [], buf: null } : s)));
-    setReport(null);
-    setLast(null);
-  }, [active, orig]);
-
-  // ---- split ----
-
-  /** 產生順序（排序用）。 */
-  const genSeq = useRef(1);
-  const liveKRef = useRef(liveKSetting);
-  liveKRef.current = liveKSetting;
-  /** live 上限 K（plan v12 §5.3、§10 D4）：設定 0＝依大小自動。 */
-  const liveLimit = () => liveKRef.current || defaultLiveK(origRef.current?.vol.data.length ?? 0);
-
-  /** park：裁補丁（O(touch)）、丟帳簿與復原記錄（ops 留著，§10 D3），Worker drop。 */
-  const parkOne = (id: string) => {
-    const sp = splitsRef.current.find((x) => x.id === id);
-    const o = origRef.current;
-    if (!sp || !o || sp.state === 'parked' || !sp.buf || id === activeRef.current) return;
-    const buf = sp.buf;
-    const patch = extractPatch(o.vol, buf.data, buf.labels, o.vol.data, o.L.labels, buf.touch, sp.cur.L.comps);
-    const st = buffersStats(o.vol, buf);
-    const stats: SplitStats = { ...st, counts: st.counts.slice() };
-    dropOwners([id]);
-    setSplits((all) => all.map((x) => (x.id === id ? { ...x, state: 'parked', buf: null, patch, stats, hist: [], future: [], cur: stubOf(o, id, sp.cur.L.comps, sidOf(sp.cur)) } : x)));
-  };
-  /** live（有帳簿的）超過 K 個就 park 最久沒用的；目前的與 pinned 不 park。 */
-  const enforceK = (pinned: string[] = []) => {
-    const live = splitsRef.current.filter((x) => x.state === 'live' && x.buf).map((x) => x.id);
-    for (const id of toPark(live, lru.current, liveLimit(), activeRef.current, pinned)) parkOne(id);
-  };
-  /**
-   * parked → live（plan v12 §5.3）：Worker 原始複本＋貼補丁、主執行緒同樣；比重播快，而且不依賴重播。
-   * busy 列「正在載入 {name}…」。已經是 live 回 true。
-   */
-  const ensureLive = async (id: string): Promise<boolean> => {
-    const sp = splitsRef.current.find((x) => x.id === id);
-    const o = origRef.current;
-    const oc = origCountsRef.current;
-    if (!sp || !o || !oc) return false;
-    if (sp.state !== 'parked' || !sp.patch) return true;
-    const patch = sp.patch;
-    const v = newVersion();
-    const was = running.current;
-    running.current = true;
-    setBusy(`正在載入 ${sp.name}…`);
-    try {
-      await restoreIn(id, v, patch);
-    } catch (e) {
-      message.error(`載入 ${sp.name} 失敗：${(e as Error)?.message ?? e}`);
-      return false;
-    } finally {
-      setBusy(null);
-      running.current = was;
-    }
-    if (!splitsRef.current.some((x) => x.id === id && x.state === 'parked')) return true;
-    const buf: SplitBuffers = restoreBuffers(o.vol, o.vol.data, o.L.labels, oc, patch);
-    setSplits((all) => all.map((x) => (x.id === id ? { ...x, state: 'live', buf, patch: null, stats: undefined, cur: wrap(id, buf, patch.comps, v, o.vol) } : x)));
-    return true;
-  };
-  /**
-   * 設為目前（plan v12 §5.3）：parked 先 restore（非同步；切之前 cur 仍是上一個，3D 不會閃空畫面），之後超過 K 的 park。
-   */
-  const setActiveId = useCallback(
-    async (id: string) => {
-      if (id === activeRef.current) return;
-      if (id !== BASE_ID) {
-        const sp = splitsRef.current.find((x) => x.id === id);
-        if (!sp) return;
-        if (sp.state === 'parked') {
-          if (running.current) {
-            message.warning({ key: 'queue', content: '還在算，等一下再切' });
-            return;
-          }
-          if (!(await ensureLive(id))) return;
-          if (sp.ops.length) message.info({ key: 'restore', content: `已載入 ${sp.name}（復原記錄已釋放，ops 仍可重播）` });
-        }
-      }
-      setActiveRaw(id);
-      enforceK();
-    },
-    // ensureLive／enforceK 只讀 ref
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [message],
-  );
-
-  const addSplit = useCallback(
-    async (name?: string, ops: Op[] = []) => {
-      if (running.current) return;
-      const id = newSplitId();
-      const made = ops.length ? await run(id, orig, ops, '重播中…') : { cur: orig, buf: null };
-      if (!made) return;
-      setSplits((all) => [...all, { id, name: name ?? `Split ${all.length + 1}`, cur: made.cur, buf: made.buf, ops, hist: [], future: [], state: 'live', patch: null, seq: genSeq.current++ }]);
-      setActiveRaw(id);
-      enforceK();
-      return id;
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [orig, run],
-  );
-
-  const duplicateSplit = useCallback(
-    (id: string) => {
-      if (running.current) return;
-      const src = splitsRef.current.find((s) => s.id === id);
-      const o = origRef.current;
-      if (!src || !o) return;
-      const nid = newSplitId();
-      const base = { ...src, id: nid, name: `${src.name} 複本`, hist: [], future: [], seq: genSeq.current++ };
-      if (src.state === 'parked' && src.patch) {
-        // parked：複製補丁（O(外框)），不 restore、不切過去
-        const patch: SplitPatch = { ...src.patch, data: src.patch.data.slice(), labels: src.patch.labels.slice() };
-        setSplits((all) => [...all, { ...base, patch, cur: stubOf(o, nid, patch.comps, newVersion()) }]);
-        return nid;
-      }
-      // 各自一本：有帳簿就複製一份（新版本號，Worker 也 fork 一份），借用中的照樣借用
-      let cur = src.cur;
-      let buf: SplitBuffers | null = null;
-      if (src.buf) {
-        buf = {
-          data: src.buf.data.slice(),
-          labels: src.buf.labels.slice(),
-          diff: src.buf.diff.slice(),
-          diffCount: src.buf.diffCount,
-          counts: src.buf.counts.slice(),
-          touch: src.buf.touch && { ...src.buf.touch },
-          axes: copyAxes(src.buf.axes),
-        };
-        const v = newVersion();
-        void forkIn(nid, src.cur, v).catch(() => {});
-        cur = wrap(nid, buf, src.cur.L.comps, v, src.cur.vol);
-      }
-      setSplits((all) => [...all, { ...base, cur, buf }]);
-      setActiveRaw(nid);
-      enforceK();
-      return nid;
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
-
-  const renameSplit = useCallback(
-    (id: string, name: string) => setSplits((all) => all.map((s) => (s.id === id ? { ...s, name: name || s.name } : s))),
-    [],
-  );
-
-  /** 刪掉一批 split（刪除勾選的、撤銷這次產生）；目前的被刪就切到第一個 live 的（沒有就原始）。 */
-  const removeSplits = useCallback(
-    (ids: string[]) => {
-      if (running.current) return;
-      const gone = new Set(ids);
-      const rest = splitsRef.current.filter((s) => !gone.has(s.id));
-      dropOwners(splitsRef.current.filter((s) => gone.has(s.id) && s.buf).map((s) => s.id));
-      lru.current = lru.current.filter((x) => !gone.has(x));
-      setSplits(rest);
-      setExportOff((prev) => new Set([...prev].filter((x) => !gone.has(x))));
-      if (gone.has(activeRef.current)) setActiveRaw(rest.find((s) => s.state === 'live')?.id ?? BASE_ID);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
-  const removeSplit = useCallback((id: string) => removeSplits([id]), [removeSplits]);
-
-  /** 實驗設計用的情境（opsOfCombo）：從哪個狀態量、全域的襯層／回填／policy。 */
-  const factorCtx = useCallback(
-    (from: EditState): FactorCtx => ({ L: from.L, vol: from.vol, nmPerVoxel, follow, backfill, policy: pushPolicy }),
-    [nmPerVoxel, follow, backfill, pushPolicy],
-  );
-
-  /** 寫進 manifest 的一步結果摘要（重播時忽略，§11）。報告已在 Worker 摘要（plan v15 C7）。 */
-  const withReport = (op0: Op, r: OpReport, changed: number) => {
-    const t = r.total;
-    return { ...op0, report: { filled: t.filled, pushed: t.pushed, blocked: t.blocked, skippedSlices: t.skippedSlices, changed } } as unknown as Op;
-  };
-
-  /**
-   * 對指定的 split 依序 commit 一串 Op（不必是目前的 split；每個 Op 一步復原）。levels 合併進去。
-   * parked 的在 Worker 的 scratch 上算、不 restore（plan v12 §5.3 applyParked）。
-   * 回傳這幾步被擋的格數；失敗回 null。plan v11 §4.2「套用到所有現有 split」用。
-   */
-  const commitTo = async (splitId: string, ops: Op[], levels?: Record<string, number>, designId?: string) => {
-    let sp = splitsRef.current.find((x) => x.id === splitId);
-    const o = origRef.current;
-    if (!sp || !o) return null;
-    let blocked = 0;
-    if (sp.state === 'parked' && sp.patch) {
-      let r;
-      try {
-        r = await applyParkedIn({ patch: sp.patch, ops, matNames, keyCounter: keySeq.current });
-      } catch (e) {
-        message.error(`計算失敗，這一步沒有套用：${(e as Error)?.message ?? e}`);
-        return null;
-      }
-      keySeq.current = r.keyCounter;
-      const added = ops.flatMap((op0, k) => {
-        blocked += r.reports[k].total.blocked;
-        return r.changed[k] ? [withReport(op0, r.reports[k], r.changed[k])] : [];
-      });
-      const res = r;
-      setSplits((all) =>
-        all.map((x) =>
-          x.id === splitId
-            ? { ...x, patch: res.patch, stats: res.stats, ops: [...x.ops, ...added], cur: stubOf(o, splitId, res.patch.comps, newVersion()), levels: { ...x.levels, ...levels }, designId: x.designId ?? designId, blocked: (x.blocked ?? 0) + blocked }
-            : x,
-        ),
-      );
-      return blocked;
-    }
-    sp = own(sp);
-    const owned = sp;
-    setSplits((all) => all.map((x) => (x.id === owned.id ? owned : x)));
-    for (const op0 of ops) {
-      const cur = splitsRef.current.find((x) => x.id === splitId)!;
-      const from = cur.cur;
-      const r = await applyOne(cur, op0);
-      if (!r) return null;
-      blocked += r.report.total.blocked;
-      if (!r.next) continue;
-      const op = withReport(op0, r.report, changedCount(r.step));
-      const entry: HistEntry = { step: r.step, ops: cur.ops, version: sidOf(from) };
-      const next = r.next;
-      setSplits((all) => all.map((x) => (x.id === splitId ? { ...x, cur: next, ops: [...x.ops, op], hist: pushHist(x.hist, entry), future: [] } : x)));
-      noteStep(splitId, r.step);
-    }
-    setSplits((all) =>
-      all.map((x) =>
-        x.id === splitId ? { ...x, levels: { ...x.levels, ...levels }, designId: x.designId ?? designId, blocked: (x.blocked ?? 0) + blocked } : x,
-      ),
-    );
-    return blocked;
-  };
-
-  /**
-   * 照實驗設計產生 split（plan v11 §4.2；v12 §5.3）：每個組合 → opsOfCombo → Worker 在 scratch 帳簿上重播、只回補丁
-   * → parked split（主執行緒不碰 O(N)）。水平等於標稱的組合沒有 Op（對照組），仍佔一個 split（借用原始，不佔記憶體）。
-   * 產生中可取消（已產生的留著）；完成後第一個設為目前（restore 成 live），不切頁、不切 3D（§10 D8）。
-   * from 'all'：只允許單一組合，對每個現有 split 各 commit 一次同一組 Op（parked 的不 restore）。
-   */
-  const addDesign = useCallback(
-    async (design: Design, onProgress?: (done: number, total: number) => void): Promise<string[]> => {
-      const o = origRef.current;
-      if (running.current || !o) return [];
-      const combos = combosOf(design, nmPerVoxel);
-      if (!combos.length) return [];
-      const id = design.id ?? `d${designSeq.current++}`;
-      const d: Design = { ...design, id, at: design.at ?? Date.now() };
-      setDesigns((all) => [...all.filter((x) => x.id !== id), d]);
-      cancelGen.current = false;
-      if (design.from === 'all' && splitsRef.current.length) {
-        if (combos.length !== 1) return [];
-        const ids = splitsRef.current.map((x) => x.id);
-        running.current = true;
-        try {
-          for (let k = 0; k < ids.length; k++) {
-            if (cancelGen.current) break;
-            setBusy(`套用到 ${k + 1}／${ids.length} 個 split…`);
-            setGenProgress({ done: k, total: ids.length, designId: id });
-            onProgress?.(k, ids.length);
-            const sp = splitsRef.current.find((x) => x.id === ids[k]);
-            if (!sp) continue;
-            await commitTo(sp.id, opsOfCombo(d, combos[0], factorCtx(sp.cur)), combos[0], id);
-          }
-        } finally {
-          running.current = false;
-          setBusy(null);
-          setGenProgress(null);
-        }
-        setLast({ text: `已套用到 ${ids.length} 個 split`, at: Date.now() });
-        return ids;
-      }
-      const act = design.from === 'active' ? (splitsRef.current.find((x) => x.id === activeRef.current) ?? null) : null;
-      const from = act ? act.cur : o;
-      const prefix = act ? act.ops : [];
-      const ctx = factorCtx(from);
-      const names = new Set(splitsRef.current.map((x) => x.name));
-      const made: string[] = [];
-      let cancelled = false;
-      running.current = true;
-      try {
-        for (let i = 0; i < combos.length; i++) {
-          if (cancelGen.current) {
-            cancelled = true;
-            break;
-          }
-          const ops = opsOfCombo(d, combos[i], ctx);
-          let name = nameOfCombo(d, combos[i], i + 1);
-          for (let k = 2; names.has(name); k++) name = `${nameOfCombo(d, combos[i], i + 1)}_${k}`;
-          names.add(name);
-          const sid = newSplitId();
-          setBusy(`產生 ${name}（${i + 1}／${combos.length}）…`);
-          setGenProgress({ done: i, total: combos.length, designId: id });
-          onProgress?.(i, combos.length);
-          const meta = { id: sid, name, ops: [...prefix, ...ops], hist: [], future: [], levels: { ...act?.levels, ...combos[i] }, designId: id, tags: ops.length ? [] : ['baseline'], seq: genSeq.current++ };
-          let sp: Split;
-          if (!ops.length && !act) sp = { ...meta, cur: o, buf: null, state: 'live', patch: null, blocked: 0 };
-          else {
-            let r;
-            try {
-              r = await replayPatchIn(from, { ops, matNames, keyCounter: keySeq.current });
-            } catch (e) {
-              message.error(`產生 ${name} 失敗：${(e as Error)?.message ?? e}`);
-              break;
-            }
-            keySeq.current = r.keyCounter;
-            sp = { ...meta, cur: stubOf(o, sid, r.patch.comps, newVersion()), buf: null, state: 'parked', patch: r.patch, stats: r.stats, blocked: r.blocked };
-          }
-          setSplits((all) => [...all, sp]);
-          made.push(sid);
-        }
-      } finally {
-        running.current = false;
-        setBusy(null);
-        setGenProgress(null);
-      }
-      if (!made.length) return [];
-      // §10 D8：第一個設為目前（restore 成 live），不切頁、不切 3D
-      if (await ensureLive(made[0])) {
-        setActiveRaw(made[0]);
-        enforceK();
-      }
-      setLast({ text: `已產生 ${made.length} 個 split${cancelled ? `（已取消，其餘 ${combos.length - made.length} 個沒有產生）` : ''}`, at: Date.now() });
-      return made;
-    },
-    // commitTo／applyOne 每次 render 都換新的，只讀 ref 裡的最新狀態
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nmPerVoxel, factorCtx, run],
-  );
-  /** 取消產生（已產生的留著）。 */
-  const cancelDesign = useCallback(() => {
-    cancelGen.current = true;
+    setLast({ text: `已重做：${f.note.parts.join(' · ')}`, canUndo: true, at: Date.now() });
   }, []);
-
   /**
-   * 匯出一個 split 的位元組（plan v12 §5.3）：在 Worker 裡編碼；live 用它的帳簿、parked 用補丁、原始／借用中的用原始。
+   * 全部還原（plan v17 §5.8）：回到原始；它本身是一步（補丁＝改過的範圍裡「目前 → 原始」），可以復原。
    */
-  const exportBytes = useCallback(
-    (s: Split | null, req: { format: 'vti' | 'vti1' | 'npy'; spacing: number[]; origin: number[]; arrayName: string }) => {
-      const mats = materialsRef.current.map((m) => ({ id: m.id, name: m.name, color: m.color }));
-      if (s && s.state === 'parked' && s.patch) return exportIn({ patch: s.patch }, { ...req, materials: mats });
-      return exportIn({ state: s?.buf ? s.cur : undefined }, { ...req, materials: mats });
-    },
-    [],
-  );
-
-  const setSplitTags = useCallback((id: string, tags: string[]) => setSplits((all) => all.map((x) => (x.id === id ? { ...x, tags } : x))), [setSplits]);
+  const resetAll = useCallback(() => {
+    const o = origRef.current;
+    const { cur: c, buf: b } = book.current;
+    if (running.current || !o || !c || !b || !b.diffCount || !b.touch) return;
+    const box = b.touch;
+    const step: Step = {
+      data: { box, before: cropArr(b.data, o.vol, box), after: cropArr(o.vol.data, o.vol, box) },
+      labels: { box, before: cropArr(b.labels, o.vol, box), after: cropArr(o.L.labels, o.vol, box), moves: [], compsBefore: c.L.comps, compsAfter: o.L.comps },
+    };
+    const note: StepNote = { parts: ['全部還原（回到原始）'], changed: b.diffCount, keys: [] };
+    const h: HistEntry = { step, version: sidOf(c), note };
+    // 往前套：Worker 的帳簿從目前到一個新版本（內容＝原始）
+    const v = newVersion();
+    void deriveIn(c, v, step, 'fwd').catch(() => {});
+    const comps = applyStepInPlace(o.vol, b.data, b.labels, step, 'fwd');
+    b.diffCount = carryStepStats(o.vol, b.data, o.vol.data, b.diff, b.diffCount, b.counts, step, 'fwd', b.axes);
+    const next = wrap(b, comps ?? o.L.comps, v, o.vol);
+    setBook({ cur: next, hist: trimHist([...book.current.hist, h]), future: [] });
+    keepSel(next);
+    setReport(null);
+    setLast({ text: '已全部還原，輸出與原始相同', canUndo: true, at: Date.now() });
+  }, []);
 
   // ---- 選取 ----
-
-  const selectKeys = useCallback((keys: string[], mode: SelectMode = 'set') => {
-    setSel((prev) => {
-      if (mode === 'set') return new Set(keys);
-      const next = new Set(prev);
-      if (mode === 'add') keys.forEach((k) => next.add(k));
-      else keys.forEach((k) => (next.has(k) ? next.delete(k) : next.add(k)));
-      return next;
-    });
-  }, []);
+  const selectKeys = useCallback(
+    (keys: string[], mode: SelectMode = 'set') => {
+      const cs = book.current.cur?.L.comps ?? origRef.current?.L.comps ?? [];
+      const byKey = new Map(cs.map((c) => [c.key, c]));
+      setSel((prev) => {
+        if (mode === 'set') return new Set(keys);
+        // 多選只收相同材質（plan v17 §5.2）
+        const first = [...prev].map((k) => byKey.get(k)).find((c) => !!c);
+        const ok = first ? keys.filter((k) => byKey.get(k)?.mat === first.mat) : keys;
+        if (first && ok.length < keys.length) message.info({ key: 'multi', content: `只能多選相同材質：已選的是 ${matName(first.mat)}` });
+        const next = new Set(prev);
+        if (mode === 'add') ok.forEach((k) => next.add(k));
+        else ok.forEach((k) => (next.has(k) ? next.delete(k) : next.add(k)));
+        return next;
+      });
+      if (keys.length) setLastKey(keys[keys.length - 1]);
+      // 選到隱藏材質裡的結構：打開
+      const mats = keys.map((k) => byKey.get(k)?.mat).filter((m): m is number => m !== undefined);
+      setHidden((h) => (mats.some((m) => h.has(m)) ? new Set([...h].filter((m) => !mats.includes(m))) : h));
+    },
+    [message, matName],
+  );
   const clearSel = useCallback(() => setSel(new Set()), []);
+  /** 點清單：選取並把十字移到它的中心（選了一定看得到）。 */
+  const selectFromList = useCallback(
+    (key: string, mode: SelectMode) => {
+      selectKeys([key], mode);
+      const s = book.current.cur ?? origRef.current;
+      const c = s?.L.comps.find((x) => x.key === key);
+      if (s && c) setCursor(centerOf(s.L, s.vol, c));
+    },
+    [selectKeys],
+  );
   const pickVoxel = useCallback(
-    (i: number, mode: SelectMode = 'set') => {
-      const l = L.labels[i];
+    (i: number | null, mode: SelectMode = 'set') => {
+      const s = book.current.cur ?? origRef.current;
+      if (!s) return;
+      const l = i === null ? -1 : s.L.labels[i];
       if (l < 0) {
         if (mode === 'set') clearSel();
         return;
       }
-      selectKeys([L.comps[l].key], mode);
+      selectKeys([s.L.comps[l].key], mode);
+      setCursor(coordOf(s.vol, i!));
     },
-    [L, selectKeys, clearSel],
+    [selectKeys, clearSel],
   );
-  const selectMaterial = useCallback(
-    (mat: number, mode: SelectMode = 'set') =>
-      selectKeys(
-        L.comps.filter((c) => c.mat === mat).map((c) => c.key),
-        mode,
-      ),
-    [L, selectKeys],
-  );
-  const selectAll = useCallback(
-    () => selectKeys(L.comps.filter((c) => !hidden.has(c.mat)).map((c) => c.key)),
-    [L, hidden, selectKeys],
-  );
+  /** 選全部同材質（「選全部 Poly-Si（2）」、Ctrl+A）。 */
+  const selectSame = useCallback(() => {
+    if (selMat === null) return;
+    setSel(new Set(L.comps.filter((c) => c.mat === selMat).map((c) => c.key)));
+  }, [L, selMat]);
   const toggleHidden = useCallback(
-    (mat: number) =>
+    (mat: number) => {
       setHidden((prev) => {
         const next = new Set(prev);
         if (next.has(mat)) next.delete(mat);
         else next.add(mat);
         return next;
-      }),
-    [],
+      });
+      // 把目前選取的材質隱藏：取消選取
+      if (selMat === mat && !hidden.has(mat)) setSel(new Set());
+    },
+    [selMat, hidden],
   );
 
-  // ---- 調整 ----
-
-  // 每個操作只有一條產生路徑（plan v10 §3）：卡片的預覽、套用、方向鍵、右鍵都呼叫這幾個 xxxOp，再交給 commit。
-  /** 整塊移動；withShell＝外面的薄襯層一起搬。 */
-  const translateOp = useCallback(
-    (d: Vec3, withShell = false): Op | null =>
-      !sel.size || (!d[0] && !d[1] && !d[2]) ? null : { kind: 'translate', keys: [...sel], scope, d, backfill, ...(withShell ? { follow: true } : {}) },
-    [sel, scope, backfill],
-  );
-  /** 長／縮：dir 那一面沿法線 n 格（負＝縮）；local＝筆刷。 */
+  // ---- 動作（plan v17 §5.3）：都作用在整個結構、相鄰材質規則 ----
   const pushOp = useCallback(
-    (dir: Vec3, n: number, local?: Local, policy: Policy = pushPolicy): Op | null => pushOpOf([...sel], scope, dir, n, follow, backfill, local, policy),
-    [sel, scope, follow, backfill, pushPolicy],
+    (f: FaceName, n: number): Op | null =>
+      !sel.size || !n ? null : { kind: 'push', keys: [...sel], scope, dir: faceOf(f).d, n, follow, backfill: 'outer', policy: 'adjacent', liners },
+    [sel, scope, follow, liners],
   );
-  const materialOp = useCallback((m: number): Op | null => (sel.size ? { kind: 'material', keys: [...sel], scope, m } : null), [sel, scope]);
-  /** 對稱 CD（plan v11 §4.5）：axis 那一軸總寬 +delta（兩側或單側）。 */
-  const cdOp = useCallback(
-    (axis: 0 | 1 | 2, delta: number, anchor: 'center' | 'lo' | 'hi', policy: Policy = pushPolicy): Op | null =>
-      !sel.size || !delta ? null : { kind: 'cd', keys: [...sel], scope, axis, delta, anchor, follow, backfill, policy },
-    [sel, scope, follow, backfill, pushPolicy],
-  );
-  /** 保形層加厚／減薄（§4.6）。 */
-  const dilateOp = useCallback(
-    (n: number): Op | null => (!sel.size || !n ? null : { kind: 'dilate', keys: [...sel], scope, n, metric: 'euclid', follow, backfill }),
-    [sel, scope, follow, backfill],
-  );
-  /** 側壁斜度（§4.8）：along＝高度軸。 */
-  const taperOp = useCallback(
-    (face: Vec3, along: 0 | 1 | 2, top: number, bottom: number, both: boolean, policy: Policy = pushPolicy): Op | null =>
-      !sel.size || (!top && !bottom) ? null : { kind: 'taper', keys: [...sel], scope, face, along, top, bottom, ...(both ? { both: true } : {}), follow, backfill, policy },
-    [sel, scope, follow, backfill, pushPolicy],
-  );
-  /** 缺陷注入（§4.7）：只對一個 host；center 0～1、size 格。 */
-  const defectOp = useCallback(
-    (shape: 'slab' | 'sphere' | 'box', center: Vec3, size: Vec3, mat: number): Op | null => {
-      if (sel.size !== 1) return null;
-      const keys = [...sel];
-      const b = bboxOfKeys(L, keys);
-      const abs = b && defectBox(b, center, size);
-      return abs ? { kind: 'defect', keys, scope, shape, center, size, mat, abs } : null;
+  const moveOp = useCallback(
+    (f: FaceName, n: number): Op | null => {
+      if (!sel.size || !n) return null;
+      const d = faceOf(n > 0 ? f : OPPOSITE[f]).d.map((v) => v * Math.abs(n)) as Vec3;
+      return { kind: 'translate', keys: [...sel], scope, d, backfill: 'outer', follow, policy: 'adjacent', liners };
     },
-    [sel, scope, L],
+    [sel, scope, follow, liners],
   );
-  const translate = useCallback(
-    (d: Vec3, withShell = false) => {
-      const op = translateOp(d, withShell);
-      if (op) commit(op);
-    },
-    [translateOp, commit],
+  /** 3D 箭頭拖 n 格 → Op（推拉＝外推／內縮那一面；平移＝往箭頭方向搬）。 */
+  const faceOp = useCallback(
+    (dir: Vec3, n: number): Op | null => (tool === 'move' ? moveOp(faceName(dir), n) : pushOp(faceName(dir), n)),
+    [tool, moveOp, pushOp],
   );
-  const push = useCallback(
-    (dir: Vec3, n: number, local?: Local) => {
-      const op = pushOp(dir, n, local);
-      if (op) commit(op);
-    },
-    [pushOp, commit],
-  );
-  const level = useCallback(
-    (dir: Vec3, to: number, local: Local) => {
-      if (!sel.size) return;
-      commit({ kind: 'level', keys: [...sel], scope, dir, to, local, backfill, follow });
-    },
-    [sel, scope, backfill, follow, commit],
-  );
-  /** 3D 筆刷的一筆 → Op（即時預覽和正式套用用同一個）；沒選取或 n = 0 回傳 null。 */
-  const opFor = useCallback(
-    (s: Sculpt): Op | null => {
-      if (!sel.size) return null;
-      const keys = [...sel];
-      if (s.kind === 'level') return { kind: 'level', keys, scope, dir: s.dir, to: s.to, local: s.local, backfill, follow };
-      if (!s.n) return null;
-      return { kind: 'push', keys, scope, dir: s.dir, n: s.n, follow, backfill, local: s.local, policy: pushPolicy };
-    },
-    [sel, scope, follow, backfill, pushPolicy],
-  );
-  const sculpt = useCallback(
-    (s: Sculpt) => {
-      const op = opFor(s);
-      if (op) commit(op);
-    },
-    [opFor, commit],
-  );
-  /**
-   * 整個選取沿 dir 方頭：補到最外側那一點：每一排都補到和最高點一樣高（圓頭、斜角變方頭）。
-   * 只填空氣與可跟推的襯層，不吃厚的鄰居。回傳目標座標；沒選取回傳 null。
-   */
-  const levelTarget = useCallback(
-    (dir: Vec3) => {
-      const b = unionBBox(selComps);
-      if (!b) return null;
-      const a = dir[0] ? 0 : dir[1] ? 1 : 2;
-      const sum = dir[0] + dir[1] + dir[2];
-      return sum < 0 ? [b.x0, b.y0, b.z0][a] : [b.x1, b.y1, b.z1][a];
-    },
-    [selComps],
-  );
-  /** 方頭（整個選取沿 dir 補到最外側）。 */
-  const levelOp = useCallback(
-    (dir: Vec3, ref?: { key: string; side: 'lo' | 'hi'; offset: number }): Op | null => {
-      const b = unionBBox(selComps);
-      const to = ref ? levelRefTo(L, dir, ref) : levelTarget(dir);
-      if (!b || to === null || !sel.size) return null;
-      const center: Vec3 = [(b.x0 + b.x1) >> 1, (b.y0 + b.y1) >> 1, (b.z0 + b.z1) >> 1];
-      return { kind: 'level', keys: [...sel], scope, dir, to, local: { center, radius: null }, backfill, follow, ...(ref ? { ref } : {}) };
-    },
-    [selComps, levelTarget, sel, scope, backfill, follow, L],
-  );
-  const levelWhole = useCallback(
-    (dir: Vec3) => {
-      const op = levelOp(dir);
-      if (op) commit(op);
-    },
-    [levelOp, commit],
-  );
-  const setMaterial = useCallback(
-    (m: number) => {
-      const op = materialOp(m);
-      if (op) commit(op);
-    },
-    [materialOp, commit],
-  );
+  const push = useEvent((f: FaceName, n: number) => {
+    const op = pushOp(f, n);
+    if (op) commit(op);
+  });
+  const move = useEvent((f: FaceName, n: number) => {
+    const op = moveOp(f, n);
+    if (op) commit(op);
+  });
+  /** 換材質：換到檔案裡原本沒有的材質時，新材質沿用來源材質的薄層設定（plan v17 §5.4.2）。 */
+  const setMaterial = useEvent((m: number) => {
+    if (!sel.size) return;
+    const src = materialsRef.current.find((x) => x.id === selMat);
+    const dst = materialsRef.current.find((x) => x.id === m);
+    if (dst && src && !L.comps.some((c) => c.mat === m) && !!dst.liner !== !!src.liner) setMaterials((ms) => ms.map((x) => (x.id === m ? { ...x, liner: !!src.liner } : x)));
+    commit({ kind: 'material', keys: [...sel], scope, m });
+  });
+
+  // ---- 試算（plan v17 §5.4.4）：同時最多一個在飛、永遠送最新的 ----
+  const [probe, setProbe] = useState<{ sig: string; p: Probe } | null>(null);
+  const probeSig = ready && sel.size && tool !== 'mat' ? `${sidOf(cur)}|${[...sel].sort().join(',')}|${tool}|${tool === 'push' ? face : ''}|${follow}|${liners.join(',')}` : '';
+  const probeFly = useRef<{ inflight: boolean; pending: (() => void) | null }>({ inflight: false, pending: null });
+  useEffect(() => {
+    if (!probeSig) return;
+    const send = () => {
+      const s = book.current.cur ?? origRef.current;
+      if (!s) return;
+      probeFly.current.inflight = true;
+      const sig = probeSig;
+      probeIn(s, { keys: [...sel], kind: tool === 'move' ? 'translate' : 'push', dir: faceOf(face).d, follow, liners })
+        .then((p) => setProbe({ sig, p }))
+        .catch(() => {})
+        .finally(() => {
+          probeFly.current.inflight = false;
+          const next = probeFly.current.pending;
+          probeFly.current.pending = null;
+          next?.();
+        });
+    };
+    if (probeFly.current.inflight) probeFly.current.pending = send;
+    else send();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [probeSig]);
+  const probeNow = probe && probe.sig === probeSig ? probe.p : null;
 
   // ---- 載入與材質 ----
-
-  /** 載入一個陣列：Worker 標記結構，材質沒給就一律「材質 n」。 */
   const loadVolume = useCallback(async (v: Volume, m: Meta, mats?: Material[]) => {
     if (running.current) return;
     setBusy('分析結構中…');
     running.current = true;
     try {
-      const { labels, raw, version, counts: oc } = await loadOrig(v);
-      // 每個非 0 編號至少有一塊結構，所以從結構清單就知道有哪些材質
-      let table = materialsFor(raw.map((r) => r.mat));
-      if (mats) table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
+      const r = await loadOrig(v);
+      const linerSet = new Set(r.liners);
+      let table = materialsFor(r.raw.map((x) => x.mat));
+      if (mats) {
+        table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
+        // 內建範例：表上其他材質也列出來（換材質可以換成檔案裡沒有的，例如 SiGe）
+        for (const x of mats) if (!table.some((t) => t.id === x.id)) table.push(x);
+        table.sort((a, b) => a.id - b.id);
+      }
+      table = table.map((t) => ({ ...t, liner: linerSet.has(t.id) }));
       setMaterials(table);
       setMeta(m);
-      const comps = nameComponents(raw, matNameOf(table));
-      setOrig({ vol: v, L: { labels, comps }, version, owner: BASE_ID });
-      setOrigCounts(oc);
-      // 原始的結構清單給 Worker 一份（plan v15 §10）：拖拉預覽不再每幀送 comps
+      const comps = nameComponents(r.raw, matNameOf(table));
+      const o: EditState = { vol: v, L: { labels: r.labels, comps }, version: r.version, owner: BASE_ID };
+      setOrig(o);
+      setOrigCounts(r.counts);
       void compsIn(BASE_ID, comps).catch(() => {});
-      histWarned.current = false;
-      setLastStep(null);
-      // 匯出照原格式要的比例陣列（原檔已在 Worker，plan v15 C4）；沒有就連原檔一起放掉
       void exportMetaIn(m.hasRaw && m.fractions ? m.fractions : null).catch(() => {});
-      lru.current = [];
-      genSeq.current = 1;
-      models.clear();
+      setBook({ cur: null, buf: null, hist: [], future: [] });
       keySeq.current = 1000;
-      splitSeq.current = 1;
-      setSplits([]);
-      setDesigns([]);
-      designSeq.current = 1;
-      setCompareBase(BASE_ID);
-      setActiveId(BASE_ID);
       setSel(new Set());
       setHidden(new Set());
-      setLast(null);
-      setCustomRange([0, axisLen(v, 'z') - 1]);
+      setReport(null);
+      setProbe(null);
       setCursor([v.X >> 1, v.Y >> 1, v.Z >> 1]);
       if (m.spacing) setNmPerVoxel(m.unit === 'um' ? m.spacing[0] * 1000 : m.spacing[0]);
+      const names = table.filter((t) => t.liner).map((t) => t.name);
+      setLast({ text: names.length ? `已載入。薄層：${names.join('、')}（判斷錯了可以在左邊清單切換）` : '已載入。沒有判定為薄層的材質', canUndo: false, at: Date.now() });
     } finally {
       setBusy(null);
       running.current = false;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /** 內建範例（只有它自帶名稱表）；scale 放大每一軸。kind 'complex'＝比較像真實製程的範例（demoComplex.ts）。 */
+  /** 內建範例：簡單（3 根 fin × 3 根閘極）、複雜（比較像真實製程）。 */
   const demo = useCallback(
-    (scale = 1, kind: 'basic' | 'complex' = 'basic') =>
-      loadVolume(
-        kind === 'complex' ? demoComplexVolume(scale) : demoVolume(scale),
-        { format: 'demo', name: kind === 'complex' ? `複雜範例${scale > 1 ? ` ×${scale}` : ''}` : scale > 1 ? `範例 ×${scale}` : undefined },
-        MATERIALS,
-      ),
+    (kind: 'basic' | 'complex' = 'basic') =>
+      loadVolume(kind === 'complex' ? demoComplexVolume(1) : demoVolume(1), { format: 'demo', name: kind === 'complex' ? '複雜範例' : '簡單範例' }, MATERIALS),
     [loadVolume],
   );
+  /** 改名：結構名字前綴跟著換（原始、目前、復原堆疊裡的都換）。 */
+  const renameMaterial = useEvent((id: number, name: string) => {
+    if (!name) return;
+    const old = matName(id);
+    setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, name } : m)));
+    const fix = (comps: Comp[]) => comps.map((c) => (c.mat === id && c.label.startsWith(old) ? { ...c, label: name + c.label.slice(old.length) } : c));
+    const fixS = (s: EditState): EditState => ({ ...s, L: { ...s.L, comps: fix(s.L.comps) } });
+    const fixH = (h: HistEntry): HistEntry => (h.step.labels ? { ...h, step: { ...h.step, labels: { ...h.step.labels, compsBefore: fix(h.step.labels.compsBefore), compsAfter: fix(h.step.labels.compsAfter) } } } : h);
+    setOrig((o) => o && fixS(o));
+    const b = book.current;
+    setBook({ cur: b.cur && fixS(b.cur), hist: b.hist.map(fixH), future: b.future.map(fixH) });
+  });
+  const setMaterialColor = useEvent((id: number, color: string) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, color } : m))));
+  /** 薄層標記（自動判定錯的時候的出路）。 */
+  const toggleLiner = useEvent((id: number) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, liner: !m.liner } : m))));
 
-  const renameMaterial = useCallback(
-    (id: number, name: string) => {
-      if (!name) return;
-      const old = matName(id);
-      setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, name } : m)));
-      const fixL = (l: Labeled): Labeled => ({
-        ...l,
-        comps: l.comps.map((c) => (c.mat === id ? { ...c, label: name + c.label.slice(old.length) } : c)),
-      });
-      const fix = (s: EditState): EditState => ({ ...s, L: fixL(s.L) });
-      const fixComps = (comps: Comp[]) => fixL({ labels: new Int32Array(0), comps }).comps;
-      const fixEntry = (h: HistEntry): HistEntry =>
-        h.step.labels ? { ...h, step: { ...h.step, labels: { ...h.step.labels, compsBefore: fixComps(h.step.labels.compsBefore), compsAfter: fixComps(h.step.labels.compsAfter) } } } : h;
-      setOrig((o) => o && fix(o));
-      setSplits((all) =>
-        all.map((s) => ({
-          ...s,
-          cur: fix(s.cur),
-          patch: s.patch ? { ...s.patch, comps: fixComps(s.patch.comps) } : null,
-          hist: s.hist.map(fixEntry),
-          future: s.future.map(fixEntry),
-        })),
-      );
-    },
-    [matName],
-  );
-
-  const setMaterialColor = useCallback(
-    (id: number, color: string) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, color } : m))),
-    [],
-  );
-  /** 材質類別（plan v11 §4.10）：換材質清單的「合理」分組用，寫進 manifest。 */
-  const setMaterialKind = useCallback(
-    (id: number, kind: MaterialKind) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, kind } : m))),
-    [],
-  );
+  // ---- 匯出：一顆按鈕、一個 .vti，格式和輸入相同（比例陣列＋FieldData 的檔照原檔寫回；否則 UInt8 CellData） ----
+  const exportVti = useEvent(() => {
+    const spacing = meta.spacing ?? [nmPerVoxel, nmPerVoxel, nmPerVoxel];
+    const origin = meta.origin ?? [0, 0, 0];
+    const like = !!(meta.hasRaw && meta.fractions);
+    const mats = materialsRef.current.map((m) => ({ id: m.id, name: m.name, color: m.color }));
+    const b = book.current;
+    return exportIn({ state: b.buf && b.cur ? b.cur : undefined }, { format: 'vti', spacing, origin, arrayName: meta.arrayName && !like ? meta.arrayName : 'material', materials: mats });
+  });
 
   // ---- 十字 ----
-
-  const stepCursor = useCallback(
-    (axis: 'x' | 'y' | 'z', delta: number) =>
-      setCursor((c) => {
-        const a = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-        const max = axis === 'x' ? vol.X : axis === 'y' ? vol.Y : vol.Z;
-        const next: Vec3 = [...c];
-        next[a] = Math.max(0, Math.min(max - 1, c[a] + delta));
-        return next;
-      }),
-    [vol],
+  const stepCursor = useEvent((axis: 'x' | 'y' | 'z', delta: number) =>
+    setCursor((c) => {
+      const a = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+      const max = axis === 'x' ? vol.X : axis === 'y' ? vol.Y : vol.Z;
+      const next: Vec3 = [...c];
+      next[a] = Math.max(0, Math.min(max - 1, c[a] + delta));
+      return next;
+    }),
   );
-  const cursorIndex = idx(vol, cursor[0], cursor[1], cursor[2]);
-  const voxelCoord = useCallback((i: number) => coordOf(vol, i), [vol]);
 
-  // ---- 鍵盤 ----
-
+  // ---- 鍵盤（plan v17 §5.6）：方向鍵對應模型的上下左右前後 ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (typingIn(e.target)) return;
-      // Modal／Drawer 開著：Esc 關它、Ctrl+Z 留給輸入框，不動模型
-      if (overlayOpen()) return;
+      if (typingIn(e.target) || overlayOpen()) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
       if (mod && k === 'z') {
@@ -1627,251 +648,112 @@ export function useEditor() {
         redo();
         return;
       }
-      if (mod && (k === '1' || k === '2')) {
-        e.preventDefault();
-        setPage(k === '1' ? 'edit' : 'lab');
-        return;
-      }
-      // 實驗頁：編輯用的鍵（方向鍵移動、復原、[ ] 切 split…）不動模型
-      if (page === 'lab') return;
       if (mod && k === 'a') {
         e.preventDefault();
-        selectAll();
+        selectSame();
         return;
       }
+      if (mod || e.altKey) return;
       if (e.key === 'Escape') {
-        // 一層一層退：先關選單，再離開聚焦編輯（選取留著），再取消選取
-        if (menu) setMenu(null);
-        else if (focus) setFocus(null);
-        else clearSel();
+        clearSel();
         return;
       }
-      if (e.key === '[' || e.key === ']') {
-        const ids = [BASE_ID, ...splits.map((s) => s.id)];
-        const at = ids.indexOf(activeId);
-        setActiveId(ids[(at + (e.key === ']' ? 1 : ids.length - 1)) % ids.length]);
-        return;
-      }
-      // 焦點在按鈕、滑桿、分頁等控制項上時，方向鍵留給它們，不動模型
+      // 焦點在滑桿、下拉、輸入框上：方向鍵留給它們
       const ae = document.activeElement as HTMLElement | null;
-      const onControl =
-        !!ae && ae !== document.body && !!ae.closest('button,a,[role=slider],[role=radio],[role=tab],[role=switch],[role=menuitem],[role=option],.ant-select,.ant-segmented');
-      if (onControl) return;
-      const step = e.shiftKey ? 10 : 1;
-      const moves: Record<string, Vec3> = {
-        ArrowLeft: [-step, 0, 0],
-        ArrowRight: [step, 0, 0],
-        ArrowUp: [0, -step, 0],
-        ArrowDown: [0, step, 0],
-        PageUp: [0, 0, -step],
-        PageDown: [0, 0, step],
-      };
-      if (moves[e.key] && sel.size) {
+      if (ae && ae.closest('[role=slider],.ant-select,.ant-input-number,input,textarea')) return;
+      const f = FACES.find((x) => x.key === e.key);
+      if (f && sel.size) {
         e.preventDefault();
-        translate(moves[e.key]);
+        if (tool === 'move') move(f.name, stepN);
+        else if (tool === 'push') setFace(f.name);
+        return;
+      }
+      if ((e.key === '+' || e.key === '=' || e.key === '-') && sel.size && tool === 'push') {
+        e.preventDefault();
+        push(face, e.key === '-' ? -stepN : stepN);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undo, redo, selectAll, clearSel, translate, sel.size, splits, activeId, menu, focus, page]);
-  // 沒有選取就沒有聚焦編輯；載入新檔案也回到瀏覽
-  useEffect(() => {
-    if (!sel.size) setFocus(null);
-  }, [sel.size]);
-  useEffect(() => setFocus(null), [origState]);
+  }, [undo, redo, selectSame, clearSel, sel.size, tool, face, stepN, move, push, setFace]);
 
-  // 回傳給 UI 的事件 handler 都經 useEvent（plan v15 B2）：身分永遠相同、呼叫時用最新的 closure，子元件才能 memo、listener 只掛一次。
-  // 不包的：commit／undo／redo（已是 useCallback、有 effect 依賴它們）、op factory（pushOp、cdOp…；OpCard 靠它們的身分重算）、
-  // matName／opText（useMemo／useCallback，身分代表 materials 變了）、useState 的 setter（本來就穩定）。
-  const ev = {
-    resetAll: useEvent(resetAll),
-    setActiveId: useEvent(setActiveId),
-    addSplit: useEvent(addSplit),
-    duplicateSplit: useEvent(duplicateSplit),
-    renameSplit: useEvent(renameSplit),
-    removeSplit: useEvent(removeSplit),
-    removeSplits: useEvent(removeSplits),
-    ensureLive: useEvent(ensureLive),
-    exportBytes: useEvent(exportBytes),
-    addDesign: useEvent(addDesign),
-    cancelDesign: useEvent(cancelDesign),
-    commitTo: useEvent(commitTo),
-    factorCtx: useEvent(factorCtx),
-    setSplitTags: useEvent(setSplitTags),
-    selectKeys: useEvent(selectKeys),
-    clearSel: useEvent(clearSel),
-    pickVoxel: useEvent(pickVoxel),
-    selectMaterial: useEvent(selectMaterial),
-    selectAll: useEvent(selectAll),
-    toggleHidden: useEvent(toggleHidden),
-    stepCursor: useEvent(stepCursor),
-    voxelCoord: useEvent(voxelCoord),
-    setCustom: useEvent(setCustom),
-    translate: useEvent(translate),
-    push: useEvent(push),
-    level: useEvent(level),
-    sculpt: useEvent(sculpt),
-    levelTarget: useEvent(levelTarget),
-    levelWhole: useEvent(levelWhole),
-    setMaterial: useEvent(setMaterial),
-    loadVolume: useEvent(loadVolume),
-    demo: useEvent(demo),
-    renameMaterial: useEvent(renameMaterial),
-    setMaterialColor: useEvent(setMaterialColor),
-    setMaterialKind: useEvent(setMaterialKind),
-    park: useEvent(parkOne),
-    stats: useEvent((s: Split) => statsOf(s, origCounts)),
-  };
-
-  return {
-    page,
-    setPage,
+  // 開發模式：e2e（scripts/e2e/m17.cjs）讀狀態
+  const steps = hist.length;
+  const out = {
     ready,
     materials,
     matName,
+    liners,
     meta,
+    orig,
     cur,
     vol,
-    orig,
     L,
     comps: L.comps,
     compByKey,
-    origByKey,
     hist,
     future,
+    steps,
+    diffCount,
     undo,
     redo,
-    resetAll: ev.resetAll,
+    resetAll,
     busy,
-    splits,
-    activeId,
-    setActiveId: ev.setActiveId,
-    active,
-    isBase,
-    addSplit: ev.addSplit,
-    duplicateSplit: ev.duplicateSplit,
-    renameSplit: ev.renameSplit,
-    removeSplit: ev.removeSplit,
-    removeSplits: ev.removeSplits,
-    ensureLive: ev.ensureLive,
-    park: ev.park,
-    liveK: liveKSetting,
-    setLiveK,
-    liveLimit: liveLimit(),
-    histBytes,
-    setHistBytes,
-    lastStep,
-    stats: ev.stats,
-    origCounts,
-    diffBox,
-    exportBytes: ev.exportBytes,
-    addDesign: ev.addDesign,
-    cancelDesign: ev.cancelDesign,
-    genProgress,
-    commitTo: ev.commitTo,
-    factorCtx: ev.factorCtx,
-    designs,
-    setSplitTags: ev.setSplitTags,
-    exportOff,
-    setExportOff,
-    compareBase,
-    setCompareBase,
-    pushPolicy,
-    setPushPolicy,
-    freeform,
-    setFreeform,
-    brushOn,
-    setBrushOn,
-    cdOp,
-    dilateOp,
-    taperOp,
-    defectOp,
-    opText: describe,
+    queued,
+    cancel,
+    report,
+    last,
+    setLast,
     sel,
     selComps,
     selIdx,
+    selBox,
     selMask,
-    affMask,
-    selCount,
-    selectKeys: ev.selectKeys,
-    clearSel: ev.clearSel,
-    pickVoxel: ev.pickVoxel,
-    selectMaterial: ev.selectMaterial,
-    selectAll: ev.selectAll,
+    selMat,
+    selName,
+    handleComp,
+    selectKeys,
+    selectFromList,
+    clearSel,
+    pickVoxel,
+    selectSame,
     hidden,
-    toggleHidden: ev.toggleHidden,
+    toggleHidden,
     cursor,
     setCursor,
-    stepCursor: ev.stepCursor,
-    cursorIndex,
-    voxelCoord: ev.voxelCoord,
-    commit,
-    report,
-    setReport,
-    models,
-    stepSeq,
-    version: sidOf(cur),
-    outlineStyle,
-    setOutlineStyle,
-    snapMode,
-    setSnapMode,
-    handle,
-    setHandle,
-    mirror,
-    setMirror,
-    bigOp,
-    setBigOp,
-    queued,
-    scope,
-    scopeMode,
-    setScopeMode,
-    editAxis,
-    setEditAxis,
-    customRange,
-    setCustom: ev.setCustom,
-    selBox,
-    selRange,
-    focus,
-    setFocus,
-    autoZoom,
-    setAutoZoom,
+    stepCursor,
+    cursorIndex: idx(vol, cursor[0], cursor[1], cursor[2]),
+    tool,
+    setTool,
+    face,
+    setFace,
+    stepN,
+    setStepN,
     follow,
     setFollow,
-    backfill,
-    setBackfill,
     nmPerVoxel,
     setNmPerVoxel,
-    brush,
-    setBrush,
-    diff,
-    changedKeys,
-    ledger,
-    last,
-    setLast,
-    stepFlash,
-    setStepFlash,
-    menu,
-    setMenu,
-    cancel,
-    translate: ev.translate,
-    translateOp,
-    push: ev.push,
+    scope,
+    commit,
+    push,
+    move,
     pushOp,
-    materialOp,
-    levelOp,
-    level: ev.level,
-    opFor,
-    sculpt: ev.sculpt,
-    levelTarget: ev.levelTarget,
-    levelWhole: ev.levelWhole,
+    moveOp,
+    faceOp,
+    setMaterial,
+    probe: probeNow,
     previewHook,
-    setMaterial: ev.setMaterial,
-    loadVolume: ev.loadVolume,
-    demo: ev.demo,
-    renameMaterial: ev.renameMaterial,
-    setMaterialColor: ev.setMaterialColor,
-    setMaterialKind: ev.setMaterialKind,
+    loadVolume,
+    demo,
+    renameMaterial,
+    setMaterialColor,
+    toggleLiner,
+    exportVti,
+    origCounts,
+    version: sidOf(cur),
   };
+  if (import.meta.env.DEV) (window as unknown as { __ed?: unknown }).__ed = out;
+  return out;
 }
 
 export type Editor = ReturnType<typeof useEditor>;

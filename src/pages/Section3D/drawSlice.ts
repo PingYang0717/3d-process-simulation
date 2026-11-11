@@ -5,7 +5,13 @@
 // plan v15 §5.6 C6：crop 有給就只走裁切窗的列與行、輸出裁切窗大小（縮圖不再整片畫完再裁）；drawSlice 每個 canvas 重用自己的 out。
 import type { Axis, Vec3, Volume } from '../../volume/volume';
 import type { Preview } from '../../volume/preview';
-import type { UVBox } from './overlay';
+/** 切面上的外框（含端點）。 */
+export interface UVBox {
+  u0: number;
+  v0: number;
+  u1: number;
+  v1: number;
+}
 
 /** 選取混的藍。 */
 export const SEL_RGB: Vec3 = [22, 119, 255];

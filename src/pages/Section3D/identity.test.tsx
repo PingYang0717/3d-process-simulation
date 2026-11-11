@@ -199,22 +199,22 @@ describe('memoEd', () => {
     function Impl({ ed, width }: { ed: Editor; width: number }) {
       renders++;
       handler = () => (ed as unknown as { cursor: number[] }).cursor[2];
-      return createElement('div', null, `${(ed as unknown as { selCount: number }).selCount}:${width}`);
+      return createElement('div', null, `${(ed as unknown as { selName: number }).selName}:${width}`);
     }
-    const M = memoEd(Impl, ['selCount'], 'TestA');
-    const ed1 = edOf({ selCount: 1, cursor: [0, 0, 1], sel: new Set() });
+    const M = memoEd(Impl, ['selName'], 'TestA');
+    const ed1 = edOf({ selName: 1, cursor: [0, 0, 1], sel: new Set() });
     const r = mount(createElement(M, { ed: ed1, width: 100 }));
     expect(renders).toBe(1);
     // cursor 不在 uses：跳過 render，但 handler 透過 Proxy 讀到最新值
     r.rerender(createElement(M, { ed: edOf({ ...ed1, cursor: [0, 0, 7] }), width: 100 }));
     expect(renders).toBe(1);
     expect(handler!()).toBe(7);
-    // selCount 在 uses：render
-    r.rerender(createElement(M, { ed: edOf({ ...ed1, selCount: 2 }), width: 100 }));
+    // selName 在 uses：render
+    r.rerender(createElement(M, { ed: edOf({ ...ed1, selName: 2 }), width: 100 }));
     expect(renders).toBe(2);
     expect(r.host.textContent).toBe('2:100');
     // 其他 props 變了：render
-    r.rerender(createElement(M, { ed: edOf({ ...ed1, selCount: 2 }), width: 120 }));
+    r.rerender(createElement(M, { ed: edOf({ ...ed1, selName: 2 }), width: 120 }));
     expect(renders).toBe(3);
     expect(r.host.textContent).toBe('2:120');
   });
@@ -224,12 +224,12 @@ describe('memoEd', () => {
     try {
       let after: (() => unknown) | null = null;
       function Impl({ ed }: { ed: Editor }) {
-        const e = ed as unknown as { selCount: number; cursor: number[]; sel: Set<string> };
+        const e = ed as unknown as { selName: number; cursor: number[]; sel: Set<string> };
         after = () => e.sel.size; // handler：render 之後才讀
-        return createElement('div', null, `${e.selCount}/${e.cursor.length}`);
+        return createElement('div', null, `${e.selName}/${e.cursor.length}`);
       }
-      const M = memoEd(Impl, ['selCount'], 'TestB');
-      mount(createElement(M, { ed: edOf({ selCount: 1, cursor: [0, 0, 1], sel: new Set(['a']) }) }));
+      const M = memoEd(Impl, ['selName'], 'TestB');
+      mount(createElement(M, { ed: edOf({ selName: 1, cursor: [0, 0, 1], sel: new Set(['a']) }) }));
       const msgs = spy.mock.calls.map((c) => String(c[0]));
       expect(msgs.some((m) => m.includes('TestB') && m.includes('ed.cursor'))).toBe(true);
       expect(msgs.some((m) => m.includes('ed.sel '))).toBe(false);
@@ -262,10 +262,10 @@ describe('memoEd', () => {
     let renders = 0;
     function Impl({ ed }: { ed: Editor }) {
       renders++;
-      return createElement('i', null, String((ed as unknown as { selCount: number }).selCount));
+      return createElement('i', null, String((ed as unknown as { selName: number }).selName));
     }
-    const M = memoEd(Impl, ['selCount'], 'TestD');
-    const ed1 = edOf({ selCount: 1 });
+    const M = memoEd(Impl, ['selName'], 'TestD');
+    const ed1 = edOf({ selName: 1 });
     let bump: () => void = () => {};
     function Parent() {
       const [n, setN] = useState(0);

@@ -29,6 +29,8 @@ export interface Probe {
   follow: number[];
   /** 厚度會變的材質。 */
   thin: number[];
+  /** 有沒有薄層貼著（跟著移動有沒有意義；和這一次的 follow 無關）。 */
+  canFollow: boolean;
   /** push：外推、內縮各最多幾格。 */
   out?: Room;
   in?: Room;
@@ -88,7 +90,7 @@ function probePush(s: EditState, req: ProbeReq & { dir: Vec3 }): Probe {
   const st = strideOf(s.vol, a);
   const len = lenOf(s.vol, a);
   const liner = linerLUT(req.liners);
-  const fol = new Set<number>();
+  const can = new Set<number>();
   const thin = new Set<number>();
   let out: Room = { n: PROBE_MAX, stop: null, more: true };
   let inn: Room = { n: Infinity, stop: { why: 'min' } };
@@ -110,10 +112,10 @@ function probePush(s: EditState, req: ProbeReq & { dir: Vec3 }): Probe {
         }
         row.push(s.vol.data[base + k * sg * st]);
       }
-      // 鄰居：跟著的薄層串、串外面那一層
+      // 鄰居：跟著的薄層串、串外面那一層（留在原地＝緊貼的那一層）
       let k = 0;
-      if (req.follow)
-        while (k < row.length && row[k] >= 0 && !empty(row[k]) && row[k] !== mat && liner[row[k]]) fol.add(row[k++]);
+      while (k < row.length && row[k] >= 0 && !empty(row[k]) && row[k] !== mat && liner[row[k]]) can.add(row[k++]);
+      if (!req.follow) k = 0;
       const b = row[k];
       if (b !== undefined && b >= 0 && !empty(b) && b !== mat) thin.add(b);
       if (out.n === 0) return;
@@ -126,7 +128,7 @@ function probePush(s: EditState, req: ProbeReq & { dir: Vec3 }): Probe {
     });
   }
   if (inn.n === Infinity) inn = { n: 0, stop: { why: 'min' } };
-  return { follow: sorted(fol), thin: sorted(thin), out, in: inn };
+  return { follow: req.follow ? sorted(can) : [], thin: sorted(thin), canFollow: can.size > 0, out, in: inn };
 }
 
 /**
@@ -142,7 +144,7 @@ function probeMove(s: EditState, req: ProbeReq): Probe {
   const keys = [...new Set(req.keys)];
   const rooms: Room[] = PROBE_DIRS.map(() => ({ n: PROBE_MOVE_MAX, stop: null, more: true }));
   const b0 = previewBox(s, { kind: 'translate', keys, scope: fullScope(s.vol), d: [1, 0, 0], backfill: 'outer', follow: req.follow, policy: 'adjacent', liners: req.liners });
-  if (!b0) return { follow: [], thin: [], dirs: rooms.map(() => ({ n: 0, stop: null })) };
+  if (!b0) return { follow: [], thin: [], canFollow: false, dirs: rooms.map(() => ({ n: 0, stop: null })) };
   // 前緣往前最多讀 PROBE_MOVE_MAX＋1 格：外框六面都多留這麼多（夾到模型邊界；夾到的那一面才是真的邊界）
   const m = PROBE_MOVE_MAX + 2;
   const box = {
@@ -152,12 +154,18 @@ function probeMove(s: EditState, req: ProbeReq): Probe {
   const vol = cropVolume(s.vol, box);
   const { X, Y, Z, data } = vol;
   const dims = [X, Y, Z];
+  let canFollow = false;
   for (const k of keys) {
     const S = cropMask(s.L, new Set([k]), s.vol, box);
     const first = S.indexOf(1);
     if (first < 0) continue;
     const mat = data[first];
     if (req.follow) shellFlood(vol, S, mat, liner);
+    else if (!canFollow) {
+      // 跟著移動關著：另外 flood 一次，只為了知道有沒有薄層貼著
+      const T = S.slice();
+      canFollow = shellFlood(vol, T, mat, liner) > 0;
+    }
     for (let i = 0; i < S.length; i++) {
       if (!S[i]) continue;
       if (S[i] === 2) fol.add(data[i]);
@@ -205,7 +213,7 @@ function probeMove(s: EditState, req: ProbeReq): Probe {
       });
     }
   }
-  return { follow: sorted(fol), thin: sorted(thin), dirs: rooms };
+  return { follow: sorted(fol), thin: sorted(thin), canFollow: canFollow || fol.size > 0, dirs: rooms };
 }
 
 export function probe(s: EditState, req: ProbeReq): Probe {

@@ -44,7 +44,10 @@ export async function download(data: DownloadData, filename: string, type = 'app
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
     return filename;
   }

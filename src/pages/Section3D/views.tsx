@@ -54,7 +54,7 @@ import { SliceOverlay } from './SliceOverlay';
 import { type SelectMode, selectModeOf } from './editor';
 import { faceName } from './stepWords';
 import { Sprite, SpriteMaterial } from 'three';
-import { type Handle3D, HANDLE_PX, faceDragWords, faceHandles, faceSteps, facesCamera, pickHandle } from './handles3d';
+import { type FaceHandle, type Handle3D, HANDLE_PX, faceDragWords, faceHandles, faceSteps, facesCamera, pickHandle } from './handles3d';
 import { ArrowHelper } from 'three';
 import { progressWords, useProgress } from '../../ui/useProgress';
 
@@ -333,6 +333,7 @@ export function View3D({
   tool = null,
   dimOthers = false,
   handleBox,
+  handles,
   words,
   faceOp,
   onCommit,
@@ -363,6 +364,8 @@ export function View3D({
   dimOthers?: boolean;
   /** 箭頭畫在哪個外框上（plan v17：最後選的那個結構）；省略＝selBBox。 */
   handleBox?: BBox | null;
+  /** 六個箭頭的位置（貼在結構表面上；plan v19 §3.2）。沒給＝外框每一面中央。 */
+  handles?: FaceHandle[] | null;
   /** 箭頭的說明文字（plan v17：「外推 3 格（1.5 nm）」）。 */
   words: { drag: (dir: Vec3, v: number) => string; hover: (dir: Vec3, grow: string, shrink: string) => string };
   /** 箭頭拖 n 格 → Op。 */
@@ -1079,7 +1082,7 @@ export function View3D({
     const hb = handleBox ?? selBBox;
     if (tool !== 'handles' || !hb || mode === 'orig') return;
     const world = (p: Vec3) => new Vector3(p[0], vol.Y - p[1], p[2]);
-    for (const f of faceHandles(hb)) {
+    for (const f of handles ?? faceHandles(hb)) {
       const a = new ArrowHelper(new Vector3(f.dir[0], -f.dir[1], f.dir[2]), world(f.pos), 1, handleColor(f.dir));
       for (const m of [a.line.material, a.cone.material] as (LineBasicMaterial | MeshBasicMaterial)[]) {
         m.depthTest = false;
@@ -1094,7 +1097,7 @@ export function View3D({
       handlesRef.current.push({ h: f, obj: a });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tool, selBBox, handleBox, mode, vol.Y]);
+  }, [tool, selBBox, handleBox, handles, mode, vol.Y]);
   handleTick.current = () => {
     const c = ctxRef.current;
     const host = hostRef.current;

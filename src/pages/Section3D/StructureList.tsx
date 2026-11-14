@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from 'react';
 import { Button, ColorPicker, Input, Tooltip, Typography } from 'antd';
-import { EyeInvisibleOutlined, EyeOutlined, RightOutlined } from '@ant-design/icons';
+import { DoubleLeftOutlined, EyeInvisibleOutlined, EyeOutlined, RightOutlined } from '@ant-design/icons';
 import { type Comp, type Material, isVoid } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
 import { memoEd } from '../../ui/memoEd';
@@ -167,9 +167,14 @@ function StructureListBody({ ed }: { ed: Editor }) {
 const StructureListMemo = memoEd(StructureListBody, ['comps', 'materials', 'sel', 'hidden', 'vol', 'nmPerVoxel', 'selComps', 'selName'], 'StructureList');
 
 /** 左欄。 */
-export function StructureList({ ed, width }: { ed: Editor; width: number }) {
+export function StructureList({ ed, width, onCollapse }: { ed: Editor; width: number; onCollapse?: () => void }) {
   return (
-    <aside className="sider" style={{ width }}>
+    <aside className={'sider' + (onCollapse ? ' can-fold' : '')} style={{ width }}>
+      {onCollapse && (
+        <Tooltip title="收合結構清單" placement="right">
+          <Button type="text" size="small" className="fold" icon={<DoubleLeftOutlined />} onClick={onCollapse} aria-label="收合結構清單" />
+        </Tooltip>
+      )}
       <StructureListMemo ed={ed} />
     </aside>
   );

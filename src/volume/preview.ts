@@ -1,10 +1,10 @@
 // 即時預覽：一步操作只會改到選取外框附近，所以把那一小塊裁下來、在主執行緒用同一組純函式算一次，
 // 幾十毫秒就能畫出結果；Worker 的正式結果（含 relabel）之後再覆蓋。裁下來的範圍內逐體素和正式結果相同（有測試）。
-import { type BBox, type Labeled, type Vec3, type Volume, LINER_MAX, adjacentMasks, growMask, setMaskMaterial, translateMask, unionBBox } from './volume';
+import { type BBox, type Labeled, type Vec3, type Volume, LINER_MAX, adjacentMasks, growMask, newPushTrace, setMaskMaterial, translateMask, unionBBox } from './volume';
 import { type AdjPushOp, type AdjTranslateOp, type EditState, type Op, adjacentDir, isAdjacent } from './ops';
 import { axisIndex } from './scope';
 import { isEmpty, linerLUT, shellFlood, simGrowRow } from './kernel';
-import type { Report } from './kernel';
+import { type Report, newReport } from './kernel';
 
 export interface Preview {
   /** 裁切範圍（含端點，整個陣列的座標）。 */
@@ -75,10 +75,28 @@ export function cropMask(L: Labeled, keys: Set<string>, v: Volume, b: BBox): Uin
  * 平移是外框 ∪ 搬到的地方。超出陣列的部分切掉；選取不存在回傳 null。
  */
 export function previewBox(s: EditState, op: Op): BBox | null {
+  return previewBoxTrial(s, op).box;
+}
+
+/** 決定裁切範圍時順便算出來的結果（跟著移動的推拉；plan v19 §3.1）：裁切範圍內的結果與報告（座標是裁切範圍的）。 */
+export interface BoxTrial {
+  data: Uint8Array;
+  report: Report;
+}
+
+/**
+ * previewBox，外加試算的結果：跟著移動的推拉要實際算一次才知道旁邊哪些薄層排會跟著動、讀到多遠，
+ * 那一次的結果就是這一步的結果，呼叫端（applyOpPrepare、probe）直接拿去用，不必再算第二次。
+ */
+export function previewBoxTrial(s: EditState, op: Op): { box: BBox | null; trial?: BoxTrial } {
   const keys = new Set(op.keys);
   const b = unionBBox(s.L.comps.filter((c) => keys.has(c.key)));
-  if (!b) return null;
+  if (!b) return { box: null };
   if (isAdjacent(op)) return adjacentBox(s, op, b);
+  return { box: plainBox(s, op, b) };
+}
+
+function plainBox(s: EditState, op: Exclude<Op, AdjPushOp | AdjTranslateOp>, b: BBox): BBox | null {
   const l = lo(b);
   const h = hi(b);
   // scope 比結構短：沿 scope 的軸只算 scope 那一段（推面的方向和 scope 同軸時不行：最外側的面要看整根）
@@ -118,10 +136,12 @@ export const ADJ_WINDOW = 64;
 /**
  * 'adjacent'（plan v17 §5.4.4）的裁切範圍：裁切邊界必須不會被誤當成模型邊界，所以讀到哪裡都要包進來。
  * 推拉：沿法線對每一排做一維模擬（simGrowRow），外推多留「模擬讀到最遠的格數＋2」、內縮多留「薄層串長＋2」；
- * 讀出窗外就開到模型邊界。其他兩軸＝選取外框（只有那些排會變）。
+ * 讀出窗外就開到模型邊界。留在原地：其他兩軸＝選取外框（只有那些排會變）。
+ * 跟著移動（plan v19 §3.1）：旁邊相連的薄層排也會動，而且每推一格都可能多收幾排，事先估不出來——
+ * 所以在範圍裡實際算一次（pushTrial），動到的排碰到範圍的側邊、或沿法線讀出範圍，就放大重算。
  * 平移：結構＋整圈薄層（shellFlood）的外框，往前多留 |n|＋2、其他方向 2；薄層碰到試算範圍的邊就放大重試。
  */
-function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBox | null {
+function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): { box: BBox | null; trial?: BoxTrial } {
   const { dir, n } = adjacentDir(op);
   const a = dir[0] ? 0 : dir[1] ? 1 : 2;
   const sg = dir[a] > 0 ? 1 : -1;
@@ -161,12 +181,12 @@ function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBo
           if ((c[k] === bl[k] && bl[k] > 0) || (c[k] === bh[k] && bh[k] < dims[k] - 1)) touch = true;
         }
       }
-      if (sl[0] === Infinity) return null;
+      if (sl[0] === Infinity) return { box: null };
       if (touch && m < 4 * ADJ_WINDOW) continue;
-      if (touch) return clampBox({ x0: 0, y0: 0, z0: 0, x1: dims[0] - 1, y1: dims[1] - 1, z1: dims[2] - 1 }, s.vol);
+      if (touch) return { box: clampBox({ x0: 0, y0: 0, z0: 0, x1: dims[0] - 1, y1: dims[1] - 1, z1: dims[2] - 1 }, s.vol) };
       const ol = sl.map((v, k) => v - 2 - (k === a && sg < 0 ? n : 0)) as Vec3;
       const oh = sh.map((v, k) => v + 2 + (k === a && sg > 0 ? n : 0)) as Vec3;
-      return clampBox(fromLoHi(ol, oh), s.vol);
+      return { box: clampBox(fromLoHi(ol, oh), s.vol) };
     }
   }
   // 推拉：每個結構、每一排從最外側那一格往外模擬
@@ -242,7 +262,60 @@ function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBo
     if (sg > 0) l[a] = Math.max(l[a], inner);
     else h[a] = Math.min(h[a], inner);
   }
-  return clampBox(fromLoHi(l, h), s.vol);
+  if (!op.follow) return { box: clampBox(fromLoHi(l, h), s.vol) };
+  return pushTrial(s, op, l, h, a, sg);
+}
+
+/**
+ * 跟著移動的推拉：在 [l, h]（側邊先多留 SIDE 格）裡實際算一次，看動到的排與讀到的最遠處：
+ * 排碰到範圍的側邊（那一邊不是模型邊界）→ 側邊加倍；沿法線讀出範圍（那一頭不是模型邊界）→ 那一頭加倍。直到都沒碰到。
+ */
+function pushTrial(s: EditState, op: AdjPushOp, l: Vec3, h: Vec3, a: number, sg: number): { box: BBox | null; trial?: BoxTrial } {
+  const dims = [s.vol.X, s.vol.Y, s.vol.Z];
+  const u = a === 0 ? 1 : 0;
+  const w = a === 2 ? 1 : 2;
+  const { dir, n } = adjacentDir(op);
+  const keys = [...new Set(op.keys)];
+  let side = 4;
+  let ext = 0;
+  for (;;) {
+    const bl = l.slice() as Vec3;
+    const bh = h.slice() as Vec3;
+    bl[u] -= side;
+    bh[u] += side;
+    bl[w] -= side;
+    bh[w] += side;
+    if (sg > 0) bh[a] += ext;
+    else bl[a] -= ext;
+    const box = clampBox(fromLoHi(bl, bh), s.vol);
+    if (!box) return { box: null };
+    const vol = cropVolume(s.vol, box);
+    const masks = keys.map((k) => cropMask(s.L, new Set([k]), s.vol, box));
+    const report = newReport();
+    const trace = newPushTrace(sg);
+    const data = adjacentMasks(vol, masks, 'push', dir, n, true, op.liners, report, trace).data;
+    const cl = lo(box);
+    const ch = hi(box);
+    const cd = [vol.X, vol.Y, vol.Z];
+    const sideHit =
+      (trace.ulo === 0 && cl[u] > 0) || (trace.uhi === cd[u] - 1 && ch[u] < dims[u] - 1) || (trace.wlo === 0 && cl[w] > 0) || (trace.whi === cd[w] - 1 && ch[w] < dims[w] - 1);
+    const farHit = sg > 0 ? trace.far >= cd[a] && ch[a] < dims[a] - 1 : trace.far < 0 && cl[a] > 0;
+    if (!sideHit && !farHit) return { box, trial: { data, report } };
+    if (sideHit) side *= 2;
+    if (farHit) ext = Math.max(8, ext * 2);
+  }
+}
+
+/** 把試算的報告併進呼叫端的報告（和 adjacentMasks 直接寫進去的結果相同）。 */
+export function mergeReport(to: Report, from: Report) {
+  to.filled += from.filled;
+  to.pushed += from.pushed;
+  to.removed += from.removed;
+  to.blocked += from.blocked;
+  for (const [k, v] of Object.entries(from.blockedBy)) to.blockedBy[+k] = (to.blockedBy[+k] ?? 0) + v;
+  to.blockedAt.push(...from.blockedAt);
+  to.done = (to.done ?? 0) + (from.done ?? 0);
+  to.stop = from.stop;
 }
 
 /**
@@ -251,7 +324,16 @@ function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): BBo
  * box：呼叫端已經算好的 previewBox（applyOpInPlace 傳進來，同一個 Op 不算第二次；plan v15 §5.1）。
  */
 export function previewOp(s: EditState, orig: Volume, op: Op, cap = Infinity, report?: Report, box0?: BBox | null): Preview | null {
-  const box = box0 === undefined ? previewBox(s, op) : box0;
+  let box = box0;
+  if (box === undefined) {
+    const t = previewBoxTrial(s, op);
+    box = t.box;
+    // 決定範圍時已經算好了（跟著移動的推拉）：直接用
+    if (box && t.trial && boxVoxels(box) <= cap) {
+      if (report) mergeReport(report, t.trial.report);
+      return { box, data: t.trial.data };
+    }
+  }
   if (!box || boxVoxels(box) > cap) return null;
   const vol = cropVolume(s.vol, box);
   const o = cropVolume(orig, box);

@@ -351,14 +351,19 @@ function pushRows(st, id, a, s, follow) {
   const cuts = outer(st, id, a, s);
   if (!follow) return cuts;
   const b = (a + 1) % 3, c = (a + 2) % 3, rowKey = (i) => { const p = coord(i); return p[b] * 4096 + p[c]; };
-  const seen = new Set(cuts.map(rowKey));
-  for (let q = 0; q < cuts.length; q++) {
-    for (const [la, ls] of [[b, 1], [b, -1], [c, 1], [c, -1]]) {
-      const nb = next(cuts[q], la, ls);
-      if (nb < 0) continue;
-      const k = st.sid[nb];
-      if (!k || k === id || !st.structs[k].thin || seen.has(rowKey(nb))) continue;
-      seen.add(rowKey(nb)); cuts.push(nb);
+  // 由外往內一層一層收：一排可以從好幾層走到時取最外側那一層（結果和掃描順序無關）
+  const seeds = cuts.slice().sort((p, q) => s * (coord(q)[a] - coord(p)[a])), seen = new Set(cuts.map(rowKey));
+  for (const seed of seeds) {
+    const stack = [seed];
+    while (stack.length) {
+      const i = stack.pop();
+      for (const [la, ls] of [[b, 1], [b, -1], [c, 1], [c, -1]]) {
+        const nb = next(i, la, ls);
+        if (nb < 0) continue;
+        const k = st.sid[nb];
+        if (!k || k === id || !st.structs[k].thin || seen.has(rowKey(nb))) continue;
+        seen.add(rowKey(nb)); cuts.push(nb); stack.push(nb);
+      }
     }
   }
   return cuts;

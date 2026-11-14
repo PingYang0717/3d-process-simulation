@@ -1,4 +1,5 @@
-// plan v17 的相鄰材質規則：prototype（docs/proto-v17-simple-version.html）的逐格寫法，照搬成對照實作。
+// plan v17 的相鄰材質規則：prototype（docs/proto-v17-simple-version.html）的逐格寫法，照搬成對照實作；
+// 推拉的「旁邊的薄層排也跟著」（pushRows）照 docs/proto-v19-shell-follow-collapse.html。
 // 和 prototype 唯一的不同：結構身分用 mask（每個選到的結構一份）、薄層與「碰到自己」以材質判斷（plan §11、D6）。
 // volume.ts 的 adjacentMasks 是逐排、可以在裁切範圍裡算的版本；kernel17.test.ts 逐體素比對兩者。
 import type { Vec3, Volume } from '../volume';
@@ -64,9 +65,38 @@ export function refAdjacent(vol: Volume, masks: Uint8Array[], kind: 'push' | 'tr
     const b2 = next(b, a, s);
     return b2 >= 0 && st.mat[b2] === m ? null : { why: 'last', mat: m };
   };
+  /**
+   * 這一步要動的每一排的切口（plan v19 §3.1）：結構每一排最外側那一格；跟著移動時再從切口往旁邊（同一層）
+   * 找相連的薄層，那一排也在同一層切開。由外往內一層一層 flood（一排可以從好幾層走到時取最外側）。
+   */
+  const pushRows = (st: St, k: number, self: number, a: number, s: number) => {
+    const cuts = outer(st.own[k], a, s);
+    if (!follow) return cuts;
+    const b = (a + 1) % 3;
+    const c = (a + 2) % 3;
+    const rowKey = (i: number) => coord(i)[b] * 65536 + coord(i)[c];
+    const seeds = cuts.slice().sort((p, q) => s * (coord(q)[a] - coord(p)[a]));
+    const seen = new Set(cuts.map(rowKey));
+    for (const seed of seeds) {
+      const stack = [seed];
+      while (stack.length) {
+        const i = stack.pop()!;
+        for (const [la, ls] of [[b, 1], [b, -1], [c, 1], [c, -1]]) {
+          const nb = next(i, la, ls);
+          if (nb < 0 || seen.has(rowKey(nb))) continue;
+          const m = st.mat[nb];
+          if (empty(m) || m === self || !liner.has(m)) continue;
+          seen.add(rowKey(nb));
+          cuts.push(nb);
+          stack.push(nb);
+        }
+      }
+    }
+    return cuts;
+  };
   const grow1 = (st: St, k: number, self: number, a: number, s: number) => {
-    const plan: [number, number[]][] = [];
-    for (const c of outer(st.own[k], a, s)) {
+    const plan: [number, number, number[]][] = [];
+    for (const c of pushRows(st, k, self, a, s)) {
       const t = next(c, a, s);
       const L = follow && t >= 0 ? lin(st, t, a, s, self) : [];
       const block = canTake(st, L.length ? next(L[L.length - 1], a, s) : t, a, s, self);
@@ -74,12 +104,12 @@ export function refAdjacent(vol: Volume, masks: Uint8Array[], kind: 'push' | 'tr
         lastBlock = block;
         return false;
       }
-      plan.push([t, L]);
+      plan.push([c, t, L]);
     }
-    for (const [t, L] of plan) {
+    for (const [c, t, L] of plan) {
       for (let j = L.length - 1; j >= 0; j--) st.mat[next(L[j], a, s)] = st.mat[L[j]];
-      st.mat[t] = self;
-      st.own[k][t] = 1;
+      st.mat[t] = st.mat[c];
+      if (st.own[k][c]) st.own[k][t] = 1;
     }
     return true;
   };
@@ -96,7 +126,7 @@ export function refAdjacent(vol: Volume, masks: Uint8Array[], kind: 'push' | 'tr
       lastBlock = { why: 'min' };
       return false;
     }
-    for (const c of outer(st.own[k], a, s)) {
+    for (const c of pushRows(st, k, self, a, s)) {
       const o = next(c, a, s);
       const L = follow && o >= 0 ? lin(st, o, a, s, self) : [];
       let to = c;

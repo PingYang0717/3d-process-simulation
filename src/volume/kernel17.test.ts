@@ -192,6 +192,31 @@ describe('kernel17：相鄰材質規則（plan v17 §5.4、§7）', () => {
     expect(rowX(s.vol, 22, GATE_Z)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 1], [FIN, 10], [HFO, 1], [TIN, 1], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 10], [HFO, 1], [TIN, 1], [POLY, 1], [AIR, 4]]);
   });
 
+  it('11. plan v19：fin 右面外推 3（跟著）：蓋在上面的 HfO₂／TiN 也往右伸 3 格，轉角仍包著', () => {
+    const { s, r } = run(base, push([fin1], RIGHT, 3, true));
+    expect(r.done).toBe(3);
+    // fin 頂上那兩排（y = 16 是 HfO₂、y = 15 是 TiN）：原本 HfO₂ x 10–17、TiN x 9–18
+    expect(rowX(s.vol, 16, GATE_Z)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 11], [TIN, 1], [POLY, 7], [TIN, 1], [HFO, 8], [TIN, 1], [POLY, 5], [AIR, 4]]);
+    expect(rowX(s.vol, 15, GATE_Z)).toEqual([[AIR, 4], [POLY, 5], [TIN, 13], [POLY, 7], [TIN, 10], [POLY, 5], [AIR, 4]]);
+    // 再上面一排是 Poly：不動
+    expect(rowX(s.vol, 14, GATE_Z)).toEqual(rowX(vol0, 14, GATE_Z));
+    // fin 頂上每一格仍貼著 HfO₂
+    for (let x = 11; x <= 19; x++) expect(stack(s.vol, x, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
+    // 內縮回來＝原始
+    const back = run(s, push([keyOf(s.L, FIN, 11)], RIGHT, -3, true));
+    expect(diff(back.s.vol.data, vol0.data)).toBe(0);
+  });
+
+  it('12. plan v19：fin 上面外推 2（跟著）：兩側側壁的 HfO₂／TiN 一起長高 2 格；旁邊的 Poly 那一排不動', () => {
+    const { s } = run(base, push([fin1], UP, 2, true));
+    expect(stack(vol0, 10, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 11], [STI, 5], [SI, 6]]);
+    expect(stack(s.vol, 10, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 4], [TIN, 1], [HFO, 13], [STI, 5], [SI, 6]]);
+    expect(stack(s.vol, 9, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 4], [TIN, 14], [STI, 5], [SI, 6]]);
+    expect(stack(s.vol, 8, GATE_Z)).toEqual(stack(vol0, 8, GATE_Z));
+    // 留在原地：旁邊的排不動（被 HfO₂ 擋，一格都不做）
+    expect(run(base, push([fin1], UP, 2, false)).r.done).toBe(0);
+  });
+
   it('外推的裁切範圍沿法線包住會讀到的每一格；平移包住整圈薄層', () => {
     // fin 頂在 y = 17：推 2 格最遠讀到 Poly 第 2 格下面那一格（y = 17 − 1 − 2 − 2）再留 2 格
     const b = previewBox(base, push([fin1], UP, 2, true))!;

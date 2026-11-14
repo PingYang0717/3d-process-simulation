@@ -6,7 +6,7 @@ import { type BBox, type Comp, type Labeled, type Material, type Vec3, type Volu
 import { type EditState, type Op, matNameOf } from '../../volume/ops';
 import type { FractionArray } from '../../volume/vti';
 import { fullScope } from '../../volume/scope';
-import { applyIn, cancelCall, compsIn, deriveIn, exportIn, exportMetaIn, forkIn, isCancelled, loadOrig, newVersion, probeIn, sidOf } from '../../volume/client';
+import { applyIn, cancelCall, compsIn, deriveIn, exportMetaIn, forkIn, isCancelled, loadOrig, newVersion, probeIn, sidOf } from '../../volume/client';
 import { type DiffAxes, type Step, applyStepInPlace, carryStepStats, cropArr, newAxes, stepBytes, stepTouch, unionBox } from '../../volume/patch';
 import { demoComplexVolume } from '../../volume/demoComplex';
 import type { OpReport } from '../../volume/report';
@@ -610,16 +610,6 @@ export function useEditor() {
   /** 薄層標記（自動判定錯的時候的出路）。 */
   const toggleLiner = useEvent((id: number) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, liner: !m.liner } : m))));
 
-  // ---- 匯出：一顆按鈕、一個 .vti，格式和輸入相同（比例陣列＋FieldData 的檔照原檔寫回；否則 UInt8 CellData） ----
-  const exportVti = useEvent(() => {
-    const spacing = meta.spacing ?? [nmPerVoxel, nmPerVoxel, nmPerVoxel];
-    const origin = meta.origin ?? [0, 0, 0];
-    const like = !!(meta.hasRaw && meta.fractions);
-    const mats = materialsRef.current.map((m) => ({ id: m.id, name: m.name, color: m.color }));
-    const b = book.current;
-    return exportIn({ state: b.buf && b.cur ? b.cur : undefined }, { format: 'vti', spacing, origin, arrayName: meta.arrayName && !like ? meta.arrayName : 'material', materials: mats });
-  });
-
   // ---- 十字 ----
   const stepCursor = useEvent((axis: 'x' | 'y' | 'z', delta: number) =>
     setCursor((c) => {
@@ -748,7 +738,6 @@ export function useEditor() {
     renameMaterial,
     setMaterialColor,
     toggleLiner,
-    exportVti,
     origCounts,
     version: sidOf(cur),
   };

@@ -1,10 +1,9 @@
 // M17（plan v17 §3、§4、§7）：簡化版的整條路徑。
-// G1：Poly-Si 2 加高 2 格（SiN 跟著）→ Si fin 1 往左搬 3 格 → 換材質 → 復原最後一步 → 匯出（解回來和畫面上的體素相同）。
+// G1：Poly-Si 2 加高 2 格（SiN 跟著）→ Si fin 1 往左搬 3 格 → 換材質 → 復原最後一步（plan v19 起沒有匯出）。
 // 七條規則：沒有捲軸、沒選取時面板反灰、按鈕上有鍵帽、做不到時按鈕反灰並寫原因、做完說清楚每個鄰居（都寫出幾格）。
 // 另外：版面（三張切面一排、3D 在上）、鍵盤每個鍵、Shift 多選同材質、材質列＝顯示／隱藏、「改了哪些」跟著復原／重做增減。
 // 用法：先 `npm run dev`，再 `node scripts/e2e/m17.cjs [http://localhost:5173] [截圖資料夾]`
 const { chromium } = require('playwright');
-const fs = require('fs');
 
 const url = process.argv[2] || 'http://localhost:5173';
 const shots = process.argv[3] || null;
@@ -23,6 +22,7 @@ const ok = (cond, msg) => {
   await page.reload();
   await page.locator('.pane-3d canvas').first().waitFor({ timeout: 60000 });
   await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 60000 });
+  await page.locator('.slices-bar').click(); // plan v19：2D 切面預設收起，先展開
   const steps = () => page.evaluate(() => window.__ed.hist.length);
   const waitSteps = (n) => page.waitForFunction((k) => window.__ed.hist.length === k && !window.__ed.busy, n, { timeout: 60000 });
   const idle = () => page.waitForFunction(() => !window.__ed.busy, null, { timeout: 60000 });
@@ -78,23 +78,11 @@ const ok = (cond, msg) => {
   ok(/Si fin 1 換成 SiGe epi（現在叫 SiGe epi \d）/.test(note), `G1-3 換材質、名字跟著重新編號：${note}`);
   ok((await page.getByTestId('step-list').locator('.ch').count()) === 3, '「改了哪些」一步一筆（3 筆）');
 
-  // ---- G1-4：復原最後一步、匯出 ----
+  // ---- G1-4：復原最後一步（plan v19：沒有匯出） ----
   await page.locator('.insp-foot a', { hasText: '復原' }).click();
   await page.waitForFunction(() => window.__ed.hist.length === 2);
   ok((await page.getByTestId('step-list').locator('.ch').count()) === 2, '復原後清單少一筆');
-  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.getByRole('button', { name: '匯出' }).click()]);
-  const bytes = fs.readFileSync(await dl.path());
-  const same = await page.evaluate(async (b64) => {
-    const { decodeVti } = await import('/src/volume/vti.ts');
-    const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    const { vol } = await decodeVti(bin.buffer);
-    const cur = window.__ed.cur.vol;
-    if (vol.X !== cur.X || vol.Y !== cur.Y || vol.Z !== cur.Z) return 'dims';
-    let bad = 0;
-    for (let i = 0; i < cur.data.length; i++) if (vol.data[i] !== cur.data[i]) bad++;
-    return bad;
-  }, bytes.toString('base64'));
-  ok(same === 0, `匯出的 .vti 解回來和畫面上的體素相同（${bytes.length.toLocaleString()} 位元組，不同 ${same} 格）`);
+  ok((await page.getByRole('button', { name: '匯出' }).count()) === 0, '沒有匯出按鈕');
 
   // ---- 重做／Ctrl+Z／Ctrl+Y ----
   await page.keyboard.press('Control+y');

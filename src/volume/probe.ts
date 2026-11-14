@@ -1,10 +1,10 @@
 // 試算（plan v17 §5.4.4、§5.5）：面板在動手之前要知道的三件事——誰會跟著、誰的厚度會變、這個方向最多還能做幾格與被誰擋。
 // 不寫回帳簿。推拉：對受影響的每一排做一維模擬（simGrowRow）；內縮看結構沿那一軸的厚度；平移沿每個前緣掃原始陣列。
 // 純函式：Worker 的 probe 請求與測試共用。
-import { type Vec3, type Volume, AIR, VOID } from './volume';
+import { type Vec3, type Volume, AIR, VOID, pushCutCells } from './volume';
 import { type Block, linerLUT, shellFlood, simGrowRow } from './kernel';
-import type { EditState } from './ops';
-import { ADJ_WINDOW, cropMask, cropVolume, previewBox } from './preview';
+import type { AdjPushOp, EditState } from './ops';
+import { ADJ_WINDOW, cropMask, cropVolume, previewBox, previewBoxTrial } from './preview';
 import { fullScope } from './scope';
 import { globalIndex } from './patch';
 
@@ -126,6 +126,41 @@ function probePush(s: EditState, req: ProbeReq & { dir: Vec3 }): Probe {
         out = { n: r.done, stop: r.stop && { ...r.stop, ...(at !== undefined ? { at } : {}) } };
       }
     });
+  }
+  // plan v19 §3.1：旁邊相連的薄層排也跟著動。它們也可能先被擋、也有自己的鄰居，所以實際在裁切範圍裡算一次：
+  // 跟著移動＝外推 PROBE_MAX 格的結果就是「最多幾格」；留在原地只算 1 格，為了知道旁邊有沒有薄層可以跟。
+  const trialOp: AdjPushOp = { kind: 'push', keys: [...new Set(req.keys)], scope: fullScope(s.vol), dir, n: req.follow ? PROBE_MAX : 1, follow: true, backfill: 'outer', policy: 'adjacent', liners: req.liners };
+  const { box, trial } = previewBoxTrial(s, trialOp);
+  if (box && trial) {
+    if (req.follow) {
+      const done = trial.report.done ?? 0;
+      const stop = trial.report.stop ?? null;
+      out = { n: done, stop: stop && stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : stop, ...(done >= PROBE_MAX ? { more: true } : {}) };
+    }
+    const vol = cropVolume(s.vol, box);
+    const cst = strideOf(vol, a);
+    const clen = lenOf(vol, a);
+    const cOf = (i: number) => (a === 0 ? i % vol.X : a === 1 ? ((i - (i % vol.X)) / vol.X) % vol.Y : Math.floor(i / (vol.X * vol.Y)));
+    for (const key of trialOp.keys) {
+      const mask = cropMask(s.L, new Set([key]), s.vol, box);
+      const first = mask.indexOf(1);
+      if (first < 0) continue;
+      const mat = vol.data[first];
+      for (const i of pushCutCells(vol, mask, dir, true, req.liners)) {
+        if (mask[i]) continue;
+        can.add(vol.data[i]);
+        if (!req.follow) continue;
+        // 這一排外面那串薄層也跟著；串外面那一層厚度會變
+        let c = cOf(i) + sg;
+        let j = i + sg * cst;
+        for (; c >= 0 && c < clen; c += sg, j += sg * cst) {
+          const m = vol.data[j];
+          if (empty(m) || m === mat || !liner[m]) break;
+          can.add(m);
+        }
+        if (c >= 0 && c < clen && !empty(vol.data[j]) && vol.data[j] !== mat) thin.add(vol.data[j]);
+      }
+    }
   }
   if (inn.n === Infinity) inn = { n: 0, stop: { why: 'min' } };
   return { follow: req.follow ? sorted(can) : [], thin: sorted(thin), canFollow: can.size > 0, out, in: inn };

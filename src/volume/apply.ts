@@ -4,7 +4,7 @@
 // 結果和 applyOp 逐體素相同（apply.test.ts）。
 import { type BBox, type Comp, type Labeled, type Volume, relabelInPlace } from './volume';
 import { type EditState, type Op, type OpContext, adjacentDir, isAdjacent } from './ops';
-import { previewBox, previewOp } from './preview';
+import { mergeReport, previewBoxTrial, previewOp } from './preview';
 import { type Step, cropArr, diffInBox, globalIndex, pasteArr } from './patch';
 import { type Report, newReport } from './kernel';
 
@@ -45,9 +45,11 @@ export interface AppliedPrep {
  */
 export function applyOpPrepare(s: EditState, op: Op, ctx: OpContext): AppliedPrep {
   const report = newReport();
-  const box = previewBox(s, op);
+  const { box, trial } = previewBoxTrial(s, op);
   if (!box) return { op, report, box: null, R: null, data: null };
-  const p = previewOp(s, ctx.orig, op, Infinity, report, box)!;
+  // 跟著移動的推拉：決定範圍時已經算好了，不算第二次
+  if (trial) mergeReport(report, trial.report);
+  const p = trial ? { box, data: trial.data } : previewOp(s, ctx.orig, op, Infinity, report, box)!;
   // 被擋的格子：裁切範圍的 index → 整個陣列
   report.blockedAt = globalIndex(box, s.vol, report.blockedAt);
   if (report.stop?.at !== undefined) report.stop = { ...report.stop, at: globalIndex(box, s.vol, [report.stop.at])[0] };

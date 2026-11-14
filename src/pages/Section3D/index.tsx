@@ -1,9 +1,8 @@
 // 簡化版的頁面（plan v17 §5.1）：頂端列、左欄結構、中間 3D＋三張唯讀切面（和原版同位置）、右欄動作面板＋「改了哪些」。
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { App, Button, Divider, InputNumber, Modal, Segmented, Space, Spin, Tag, Tooltip, Typography } from 'antd';
-import { AimOutlined, DownloadOutlined, ExpandOutlined, LeftOutlined, RedoOutlined, RightOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
+import { Button, Divider, InputNumber, Modal, Segmented, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { AimOutlined, DoubleLeftOutlined, DoubleRightOutlined, ExpandOutlined, LeftOutlined, RedoOutlined, RightOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
 import { type Axis, type MeshData, type Vec3, sameBBox } from '../../volume/volume';
-import { download } from '../../ui/download';
 import { type Op, type SelectMode, useEditor } from './editor';
 import { BusyBar } from './BusyBar';
 import { type Preview, boxVoxels, previewBox } from '../../volume/preview';
@@ -24,6 +23,7 @@ import { UploadPanel } from './UploadPanel';
 import { ActionPanel } from './ActionPanel';
 import { StepList } from './StepList';
 import { faceName, nmText } from './stepWords';
+import { surfaceHandles } from './handles3d';
 import { PROBE_DIRS } from '../../volume/probe';
 
 const { Text } = Typography;
@@ -96,10 +96,13 @@ function Brand() {
 export default function Section3DPage() {
   const ed = useEditor();
   useLayoutEffect(() => countRender('Section3DPage'));
-  const { message } = App.useApp();
   const leftW = useLiveWidth('leftW', 240);
   const rightW = useLiveWidth('rightW', 350);
   const hover = useLiveValue<string | null>(null);
+  // 左右兩欄與 2D 切面可以收合（plan v19 §3.3、§3.5）；切面預設收起。記在 localStorage。
+  const [leftOpen, setLeftOpen] = usePersisted('leftOpen', true);
+  const [rightOpen, setRightOpen] = usePersisted('rightOpen', true);
+  const [slicesOpen, setSlicesOpen] = usePersisted('slicesOpen', false);
   const [uploadOpen, setUploadOpen] = useState(false);
   // ---- 開啟就是主畫面（plan v18 §3.1）：自動載入簡單範例；3D 引擎同時抓 ----
   const [bootErr, setBootErr] = useState<string | null>(null);
@@ -220,7 +223,7 @@ export default function Section3DPage() {
   useEffect(() => {
     if (mode === 'orig' && !ed.diffCount) setMode('now');
   }, [mode, ed.diffCount]);
-  // 有還沒匯出的改動時，關閉或重新整理前先問一下
+  // 有改動時，關閉或重新整理前先問一下
   const dirty = ed.diffCount > 0;
   useEffect(() => {
     if (!dirty) return;
@@ -251,6 +254,16 @@ export default function Section3DPage() {
 
   // 選取的結構改變時：箭頭的外框（最後選的那一個）
   const handleBox = useStable(ed.handleComp?.bbox ?? null, sameBBox);
+  // 箭頭貼在結構實際的表面上、離十字最近的那一格（plan v19 §3.2）
+  const handlePos = useStable(
+    useMemo(() => {
+      const c = ed.handleComp;
+      const ci = c ? ed.cur.L.comps.indexOf(c) : -1;
+      return c && ci >= 0 ? surfaceHandles(ed.cur.L.labels, ed.vol.X, ed.vol.Y, ci, c.bbox, ed.cursor) : null;
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [ed.cur, ed.handleComp, ed.cursor]),
+    (p, q) => p === q || (!!p && !!q && p.every((f, k) => f.pos.join() === q[k].pos.join())),
+  );
   const selBBox = useStable(ed.selBox, sameBBox);
   const shown = peek ? ed.orig.vol : ed.vol;
   const cursorAt = (a: Axis) => (a === 'x' ? ed.cursor[0] : a === 'y' ? ed.cursor[1] : ed.cursor[2]);
@@ -430,7 +443,7 @@ export default function Section3DPage() {
         <div className="legend" aria-hidden>
           <b>點一下</b>＝選結構
           <br />
-          <b>拖箭頭</b>＝改（放開就完成）
+          <b>拖箭頭</b>＝改（放開就完成；箭頭在十字附近的面上）
           <br />
           <b>拖其他地方</b>＝轉視角
           <br />
@@ -446,6 +459,7 @@ export default function Section3DPage() {
               selComps={peek ? null : ed.selIdx}
               selBBox={peek ? null : selBBox}
               handleBox={peek ? null : handleBox}
+              handles={peek ? null : handlePos}
               words={words}
               scope={ed.scope}
               cursor={ed.cursor}
@@ -505,18 +519,6 @@ export default function Section3DPage() {
     </div>
   );
 
-  const exportVti = async () => {
-    // 內建範例的名字是中文：有些瀏覽器的下載不收非 ASCII 的檔名（存成 download），範例一律叫 example
-    const stem = ed.meta.format === 'demo' ? 'example' : (ed.meta.name ?? 'tcad').replace(/\.(npy|vti)$/i, '');
-    try {
-      const data = await ed.exportVti();
-      const saved = await download(data, `${stem}${ed.diffCount ? '_edited' : ''}.vti`);
-      message.success(`已匯出 ${saved}`);
-    } catch (e) {
-      message.error(`匯出失敗：${(e as Error)?.message ?? e}`);
-    }
-  };
-
   const inspector = (
     <>
       <ActionPanel ed={ed} peek={peek} />
@@ -524,7 +526,7 @@ export default function Section3DPage() {
       <div className={'insp-foot' + (ed.diffCount ? ' changed' : '')}>
         <span className={'dot' + (ed.diffCount ? ' warn' : '')} />
         <span className="grow foot-msg" aria-live="polite">
-          {ed.last?.text ?? (ed.diffCount ? `和原始差 ${ed.diffCount.toLocaleString()} 體素` : '尚未改動，輸出與原始相同')}
+          {ed.last?.text ?? (ed.diffCount ? `和原始差 ${ed.diffCount.toLocaleString()} 體素` : '尚未改動')}
         </span>
         {ed.last?.canUndo && ed.hist.length > 0 && (
           <Typography.Link onClick={ed.undo} disabled={working}>
@@ -553,25 +555,54 @@ export default function Section3DPage() {
         <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)} disabled={!ed.ready && !bootErr} aria-label="上傳 .vti">
           <span className="btn-text">上傳 .vti</span>
         </Button>
-        <Tooltip title={ed.meta.hasRaw && ed.meta.fractions ? '匯出一個 .vti，格式和上傳的檔案相同' : '匯出一個 .vti（材質編號放 CellData）'}>
-          <Button type="primary" icon={<DownloadOutlined />} onClick={exportVti} disabled={working || !ed.ready} aria-label="匯出">
-            <span className="btn-text">匯出</span>
-          </Button>
-        </Tooltip>
       </header>
       {ed.ready ? (
       <div className="body">
-        <WithLive live={leftW}>{(w) => <StructureList ed={ed} width={w} />}</WithLive>
-        <WithLive live={leftW}>{(w) => <Resizer label="左欄寬度" value={w} min={180} max={420} onDrag={(dx) => leftW.set(Math.max(180, Math.min(420, leftW.get() + dx)))} />}</WithLive>
+        {leftOpen ? (
+          <>
+            <WithLive live={leftW}>{(w) => <StructureList ed={ed} width={w} onCollapse={() => setLeftOpen(false)} />}</WithLive>
+            <WithLive live={leftW}>{(w) => <Resizer label="左欄寬度" value={w} min={180} max={420} onDrag={(dx) => leftW.set(Math.max(180, Math.min(420, leftW.get() + dx)))} />}</WithLive>
+          </>
+        ) : (
+          <button type="button" className="rail left" onClick={() => setLeftOpen(true)} title="展開結構清單" aria-label="展開結構清單">
+            <DoubleRightOutlined />
+            <span>結構{ed.sel.size ? `（已選 ${ed.sel.size}）` : ''}</span>
+          </button>
+        )}
         <main className="stage" id="stage">
           <BusyBar ed={ed} />
           <div className={'canvas-area' + (big ? ` enlarged big-${big}` : '')}>
             {pane3d}
-            <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>
+            {!big && (
+              <button type="button" className={'slices-bar' + (slicesOpen ? ' open' : '')} onClick={() => setSlicesOpen(!slicesOpen)} aria-expanded={slicesOpen} title={slicesOpen ? '收合 2D 切面' : '展開 2D 切面'}>
+                <RightOutlined className="chev" />
+                <b>2D 切面</b>
+                <small>XY 正面 · XZ 上視 · YZ 側面（點一下{slicesOpen ? '收合' : '展開'}）</small>
+              </button>
+            )}
+            {(slicesOpen || big) && <div className="slices">{(['z', 'y', 'x'] as Axis[]).map(slice)}</div>}
           </div>
         </main>
-        <WithLive live={rightW}>{(w) => <Resizer label="右欄寬度" value={w} min={300} max={560} onDrag={(dx) => rightW.set(Math.max(300, Math.min(560, rightW.get() - dx)))} />}</WithLive>
-        <WithLive live={rightW}>{(w) => <aside className="inspector simple" style={{ width: w }}>{inspector}</aside>}</WithLive>
+        {rightOpen ? (
+          <>
+            <WithLive live={rightW}>{(w) => <Resizer label="右欄寬度" value={w} min={300} max={560} onDrag={(dx) => rightW.set(Math.max(300, Math.min(560, rightW.get() - dx)))} />}</WithLive>
+            <WithLive live={rightW}>
+              {(w) => (
+                <aside className="inspector simple" style={{ width: w }}>
+                  <Tooltip title="收合動作面板" placement="left">
+                    <Button type="text" size="small" className="fold" icon={<DoubleRightOutlined />} onClick={() => setRightOpen(false)} aria-label="收合動作面板" />
+                  </Tooltip>
+                  {inspector}
+                </aside>
+              )}
+            </WithLive>
+          </>
+        ) : (
+          <button type="button" className="rail right" onClick={() => setRightOpen(true)} title="展開動作面板" aria-label="展開動作面板">
+            <DoubleLeftOutlined />
+            <span>要做什麼 · 改了哪些{ed.hist.length ? `（${ed.hist.length} 步）` : ''}</span>
+          </button>
+        )}
       </div>
       ) : (
         <div className="boot" role={bootErr ? 'alert' : 'status'}>

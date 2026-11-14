@@ -23,7 +23,9 @@ async function run(browser, W, H, withUpload) {
   await page.locator('.pane-3d canvas').first().waitFor({ timeout: 60000 });
   await page.waitForFunction(() => window.__ed && !window.__ed.busy && window.__ed.meta.name === '簡單範例', null, { timeout: 60000 });
   await page.waitForSelector('.mesh-busy', { state: 'detached', timeout: 60000 });
-  ok((await page.locator('.slice-pane').count()) === 3, '開啟就有 3D 與三張切面（沒有點任何東西）');
+  ok((await page.locator('.pane-3d').count()) === 1 && (await page.locator('.slices-bar').count()) === 1, '開啟就有 3D 與 2D 切面的橫條（沒有點任何東西）');
+  await page.locator('.slices-bar').click(); // plan v19：2D 切面預設收起，先展開
+  ok((await page.locator('.slice-pane').count()) === 3, '展開：三張切面');
   ok((await page.locator('.group').count()) >= 7, '左欄有結構');
   ok((await page.locator('.topbar').innerText()).includes('簡單範例'), '頂端列寫「簡單範例」');
   ok(!(await page.getByText('開始編輯 3D 模型').count()) && !(await page.locator('.welcome').count()), '沒有歡迎頁');
@@ -192,7 +194,7 @@ async function runFail(browser) {
   await page.locator('.boot').getByRole('button', { name: /重\s*試/ }).click();
   await page.locator('.pane-3d canvas').first().waitFor({ timeout: 60000 });
   await page.waitForFunction(() => window.__ed && !window.__ed.busy && window.__ed.meta.name === '簡單範例', null, { timeout: 60000 });
-  ok((await page.locator('.slice-pane').count()) === 3, '按「重試」後進主畫面');
+  ok((await page.locator('.pane-3d').count()) === 1 && (await page.locator('.slices-bar').count()) === 1, '按「重試」後進主畫面');
   await page.close();
 }
 

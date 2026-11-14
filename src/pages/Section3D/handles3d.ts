@@ -1,5 +1,6 @@
 // 3D 的箭頭（plan v10 §4.5、v17 §5.2）：純函式，不碰 three.js／DOM，可單獨測試。
-// 面把手 ×6：最後選的結構外框每一面中央，沿法線拖 n 格 → 推拉那一面（或往那邊平移）。
+// 面把手 ×6：貼在最後選的結構每一面實際的表面上、離十字最近的那一格（plan v19 §3.2；以前是外框每一面中央），
+// 沿法線拖 n 格 → 推拉那一面（或往那邊平移）。
 import type { BBox, Vec3 } from '../../volume/volume';
 
 /** 把手在螢幕上的大小（像素，不隨縮放變）與點得到的半徑。 */
@@ -44,6 +45,63 @@ export function faceHandles(b: BBox): FaceHandle[] {
     const a = dir[0] ? 0 : dir[1] ? 1 : 2;
     pos[a] = dir[a] > 0 ? h[a] : l[a];
     return { kind: 'face', dir, pos };
+  });
+}
+
+/**
+ * 六個面把手貼在結構實際的表面上（plan v19 §3.2）：每一面挑「那個方向最外側的格子」裡，面內離 anchor 最近的那一格，
+ * 箭頭放在那一格朝外的面中央。anchor＝十字（點 3D／切面時是點到的那一格，從清單選是結構中央），
+ * 所以箭頭會出現在剛剛點的地方附近，不會跑到很長的結構另一頭、或懸在外框中央的空氣裡。
+ * labels[i] === ci 的格子屬於這個結構；b＝它的外框。由 anchor 往外一圈一圈找，找到後再看到不可能更近為止。
+ */
+export function surfaceHandles(labels: ArrayLike<number>, X: number, Y: number, ci: number, b: BBox, anchor: Vec3): FaceHandle[] {
+  const l = [b.x0, b.y0, b.z0];
+  const h = [b.x1, b.y1, b.z1];
+  const st = [1, X, X * Y];
+  const boxed = faceHandles(b);
+  return SIX.map((dir, k) => {
+    const a = dir[0] ? 0 : dir[1] ? 1 : 2;
+    const sg = dir[a];
+    const u = a === 0 ? 1 : 0;
+    const w = a === 2 ? 1 : 2;
+    const outer = (pu: number, pw: number) => {
+      const base = pu * st[u] + pw * st[w];
+      for (let t = sg > 0 ? h[a] : l[a]; sg > 0 ? t >= l[a] : t <= h[a]; t -= sg) if (labels[base + t * st[a]] === ci) return t;
+      return -1;
+    };
+    const cu = Math.max(l[u], Math.min(h[u], Math.floor(anchor[u])));
+    const cw = Math.max(l[w], Math.min(h[w], Math.floor(anchor[w])));
+    const R = Math.max(cu - l[u], h[u] - cu, cw - l[w], h[w] - cw);
+    let bd = Infinity;
+    let best: Vec3 | null = null;
+    const tryRow = (pu: number, pw: number) => {
+      if (pu < l[u] || pu > h[u] || pw < l[w] || pw > h[w]) return;
+      const d = (pu - cu) ** 2 + (pw - cw) ** 2;
+      if (d >= bd) return;
+      const t = outer(pu, pw);
+      if (t < 0) return;
+      bd = d;
+      const pos: Vec3 = [0, 0, 0];
+      pos[u] = pu + 0.5;
+      pos[w] = pw + 0.5;
+      pos[a] = sg > 0 ? t + 1 : t;
+      best = pos;
+    };
+    for (let r = 0; r <= R && r * r < bd; r++) {
+      if (r === 0) {
+        tryRow(cu, cw);
+        continue;
+      }
+      for (let d = -r; d <= r; d++) {
+        tryRow(cu + d, cw - r);
+        tryRow(cu + d, cw + r);
+        if (d > -r && d < r) {
+          tryRow(cu - r, cw + d);
+          tryRow(cu + r, cw + d);
+        }
+      }
+    }
+    return best ? { kind: 'face' as const, dir, pos: best } : boxed[k];
   });
 }
 

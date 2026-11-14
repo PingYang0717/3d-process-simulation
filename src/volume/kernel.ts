@@ -14,7 +14,9 @@ export const LINER_MAX = 4;
  * at＝擋住的那一格（index，座標是當時算的那個陣列）。
  */
 export interface Block {
-  why: 'edge' | 'self' | 'last' | 'min';
+  /** lock＝被固定的結構擋住（keep＝它這一排最少要留幾格；LOCK_FULL＝完全鎖定）。 */
+  why: 'edge' | 'self' | 'last' | 'min' | 'lock';
+  keep?: number;
   mat?: number;
   at?: number;
 }
@@ -36,6 +38,8 @@ export interface Report {
   done?: number;
   /** 'adjacent'：沒做滿時被誰擋（做滿＝null）。 */
   stop?: Block | null;
+  /** 'adjacent' 內縮：完全鎖定、沒有補回來而留空的材質（plan v21）。 */
+  gaps?: number[];
 }
 export const newReport = (): Report => ({ filled: 0, pushed: 0, removed: 0, blocked: 0, blockedBy: {}, blockedAt: [], skipped: [], fallback: [] });
 

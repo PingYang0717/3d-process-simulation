@@ -53,7 +53,7 @@ const ok = (cond, msg) => {
   await page.locator('.panel .faces button', { hasText: '上' }).click();
   await page.locator('.panel .step input').fill('2');
   await probeReady();
-  ok((await page.locator('.panel .who').innerText()).includes('跟著移動：SiN'), '事先寫出誰會跟著（SiN）');
+  ok(/SiN[^\n]*\n?\s*跟著移動/.test(await page.locator('.panel .who').innerText()), '事先寫出誰會跟著（SiN）');
   ok((await page.locator('.panel .faces .kcap').count()) === 6 && (await page.getByTestId('grow').locator('.kcap').count()) === 1, '按鈕上有鍵帽');
   await page.getByTestId('grow').click();
   await waitSteps(1);
@@ -68,7 +68,7 @@ const ok = (cond, msg) => {
   await page.locator('.dpad button', { hasText: '左' }).click();
   await waitSteps(2);
   note = await foot();
-  ok(/Si fin 1 往左搬 3 格/.test(note) && /跟著移動 3 格/.test(note) && /變薄、另一側變厚 3 格/.test(note), `G1-2 做完的說明：${note}`);
+  ok(/Si fin 1 往左搬 3 格/.test(note) && /跟著移動 3 格/.test(note), `G1-2 做完的說明：${note}`);
 
   // ---- G1-3：換材質 ----
   await page.getByRole('radio', { name: '換材質' }).click();
@@ -95,22 +95,54 @@ const ok = (cond, msg) => {
   // ---- 規則 6、7：做不到要事先看得出來 ----
   await page.getByRole('radio', { name: '推拉一面' }).click();
   await pick('Si fin 2');
-  await page.getByRole('radio', { name: '留在原地' }).click();
   await page.locator('.panel .faces button', { hasText: '上' }).click();
   await page.locator('.panel .step input').fill('1');
-  // 內建範例的 HfO₂ 是 2 格：留在原地可以推 1 格，之後 HfO₂ 只剩 1 格就擋下
-  await page.waitForFunction(() => window.__ed.probe && window.__ed.probe.out && window.__ed.probe.out.n === 1, null, { timeout: 30000 });
-  ok((await page.locator('.panel .who').innerText()).includes('最多可外推 1 格（到 HfO₂'), '事先寫出最多可外推 1 格與原因');
+  // plan v21／v22：右鍵固定。TiN 整個材質完全鎖定 → Si fin 2 上面推不動，寫出被誰擋、可以一鍵解除
+  await page.locator('.group-head', { hasText: 'TiN' }).click({ button: 'right' });
+  ok((await page.getByTestId('lock-menu').innerText()).includes('完全鎖定'), '右鍵出現固定選單');
+  ok((await page.getByTestId('lock-menu').innerText()).includes('選取') === false, '選單裡沒有「選取」');
+  await page.getByTestId('lock-full').click();
+  ok(/已固定：TiN ×\d+（完全鎖定）/.test(await foot()), `固定後底下寫出來：${await foot()}`);
+  ok((await page.getByTestId('lock-panel').innerText()).includes('TiN'), '右欄「固定的結構」列出 TiN');
+  await page.waitForFunction(() => window.__ed.probe && window.__ed.probe.out && window.__ed.probe.out.n === 0, null, { timeout: 30000 });
+  ok(await page.getByTestId('grow').isDisabled(), '外層完全鎖定：外推鈕反灰');
+  const who = await page.locator('.panel .who').innerText();
+  ok(/不能外推：被完全鎖定的 TiN \d+ 擋住/.test(who) && who.includes('解除固定'), `寫出原因與解法：${who.replace(/\n/g, ' ')}`);
+  ok((await steps()) === 2, '固定不算一步');
+  // 改成可被壓薄（右欄的卡片）：又可以推了
+  await page.getByTestId('lock-panel').locator('.seg button', { hasText: '可被壓薄' }).click();
+  // TiN 本身就是 1.0 nm 厚：最少留 1.0 nm 還是推不動，調成 0.5 nm 才讓得出一格
+  await page.getByTestId('lock-panel').locator('.keep button').first().click();
+  ok((await page.getByTestId('lock-panel').innerText()).includes('0.5 nm'), '右欄可以調最少保留的厚度');
+  await page.waitForFunction(() => window.__ed.probe && window.__ed.probe.out && window.__ed.probe.out.n > 0, null, { timeout: 30000 });
+  ok(/最多可外推 \d+/.test(await page.locator('.panel .who').innerText()), '改成可被壓薄：寫出最多可外推幾格');
   const s0 = await steps();
   await page.getByTestId('grow').click();
   await waitSteps(s0 + 1);
-  await page.waitForFunction(() => window.__ed.probe && window.__ed.probe.out && window.__ed.probe.out.n === 0, null, { timeout: 30000 });
-  ok(await page.getByTestId('grow').isDisabled(), '留在原地推 fin 上面：外推鈕反灰');
-  const who = await page.locator('.panel .who').innerText();
-  ok(/不能外推：HfO₂ \d+ 只剩 1 格（先把 HfO₂ \d+ 往外推，或改用跟著移動）/.test(who), `寫出原因與解法：${who}`);
-  await page.getByRole('radio', { name: '跟著移動' }).click();
-  await page.waitForFunction(() => window.__ed.probe && window.__ed.probe.out && window.__ed.probe.out.n > 0, null, { timeout: 30000 });
-  ok((await page.locator('.panel .who').innerText()).includes('最多可外推'), '跟著移動時寫出最多可外推幾格');
+  ok(/TiN 變薄 1 格/.test(await foot()), `固定的 TiN 被壓薄：${await foot()}`);
+  // 選到固定的結構：只剩一張卡片，沒有箭頭
+  await page.locator('.group-head', { hasText: 'TiN' }).locator('.group-caret').click();
+  await pick('TiN 1');
+  ok((await page.getByTestId('lockbar').innerText()).includes('已固定'), '選到固定的結構：面板寫已固定');
+  ok((await page.evaluate(() => window.__handles().length)) === 0, '固定的結構沒有箭頭');
+  await page.getByTestId('unlock-all').click();
+  ok((await page.getByTestId('lock-panel').innerText()).includes('還沒有固定的結構'), '全部解除');
+  // 內縮到整個消失：先問
+  await pick('SiN 1');
+  await page.locator('.panel .faces button', { hasText: '上' }).click();
+  await page.locator('.panel .step input').fill('20');
+  await page.waitForFunction(() => window.__ed.probe && window.__ed.probe.vanishAt > 0, null, { timeout: 30000 });
+  const s1 = await steps();
+  await page.getByTestId('shrink').click();
+  ok((await page.getByTestId('vanish-ask').innerText()).includes('SiN 1 整個消失'), '內縮到消失：先問');
+  await page.getByTestId('ask-safe').click();
+  await waitSteps(s1 + 1);
+  ok((await page.evaluate(() => window.__ed.comps.some((c) => c.label === 'SiN 1'))), '選「只縮到還保留」：SiN 1 還在');
+  await page.locator('.insp-foot a', { hasText: '復原' }).click();
+  await page.waitForFunction((k) => window.__ed.hist.length === k && !window.__ed.busy, s1);
+  await pick('Si fin 2');
+  await page.locator('.panel .step input').fill('1');
+  await page.locator('.pane-3d .pane-head').click();
 
   // ---- 鍵盤 ----
   for (const [key, face] of [['ArrowDown', '下'], ['ArrowLeft', '左'], ['ArrowRight', '右'], ['PageDown', '前'], ['PageUp', '後'], ['ArrowUp', '上']]) {

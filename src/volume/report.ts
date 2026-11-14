@@ -23,6 +23,8 @@ export interface OpReport {
   /** 'adjacent'：每種鄰居怎麼了（材質編號），與這一步改了幾個體素（Worker 隨 apply 一起回，O(補丁)）。 */
   effects?: Effects;
   changed?: number;
+  /** 'adjacent' 內縮：完全鎖定、沒有補回來而留空的材質。 */
+  gaps?: number[];
 }
 
 /** 這一步之後鄰居怎麼了：跟著移動、變薄、變厚、一側變薄另一側變厚（plan v17 §5.5）。 */
@@ -34,29 +36,27 @@ export interface Effects {
 }
 
 /**
- * 由補丁算鄰居的變化（plan v17 §5.5）：補丁範圍內改前 ≠ 改後的格子，改前不是選取的材質、也不是跟著的薄層 → 那個材質變薄；
- * 改後同理 → 變厚；兩邊都有＝一側變薄、另一側變厚。follow＝這一步跟著移動的薄層材質（跟著移動關著時傳空集合）。
+ * 由補丁算鄰居的變化（plan v17 §5.5、v21）：補丁範圍內每種材質（選取的材質、空的不算）少了幾格、多了幾格。
+ * 有少也有多＝跟著移動（位置換了）；只有少＝變薄（被壓薄的固定結構）；只有多＝變厚（補回來的固定結構）。
  */
-export function stepEffects(before: Uint8Array, after: Uint8Array, self: Set<number>, follow: Set<number>): { effects: Effects; changed: number } {
-  const lost = new Set<number>();
-  const gained = new Set<number>();
-  const fol = new Set<number>();
+export function stepEffects(before: Uint8Array, after: Uint8Array, self: Set<number>): { effects: Effects; changed: number } {
+  const lost = new Float64Array(256);
+  const gained = new Float64Array(256);
   let changed = 0;
-  const skip = (m: number) => m === 0 || m === 254 || self.has(m);
   for (let i = 0; i < before.length; i++) {
     const b = before[i];
     const a = after[i];
     if (a === b) continue;
     changed++;
-    if (!skip(b)) (follow.has(b) ? fol : lost).add(b);
-    if (!skip(a)) (follow.has(a) ? fol : gained).add(a);
+    lost[b]++;
+    gained[a]++;
   }
-  const both = [...lost].filter((m) => gained.has(m));
-  const sort = (xs: Iterable<number>) => [...xs].sort((p, q) => p - q);
-  return {
-    effects: { follow: sort(fol), lost: sort([...lost].filter((m) => !gained.has(m))), gained: sort([...gained].filter((m) => !lost.has(m))), both: sort(both) },
-    changed,
-  };
+  const effects: Effects = { follow: [], lost: [], gained: [], both: [] };
+  for (let m = 1; m < 256; m++) {
+    if (m === 254 || self.has(m) || (!lost[m] && !gained[m])) continue;
+    (lost[m] && gained[m] ? effects.follow : lost[m] ? effects.lost : effects.gained).push(m);
+  }
+  return { effects, changed };
 }
 /** 回主執行緒的被擋格子上限（切面標紅用；slices 的每片被擋數在截斷前算完，所以「看這些片」仍然完整）。 */
 export const BLOCKED_CAP = 50_000;
@@ -81,5 +81,6 @@ export function summarize(r: Report, op: Op, dims: Pick<Volume, 'X' | 'Y'>): OpR
     cells: Int32Array.from(r.blockedAt.length > BLOCKED_CAP ? r.blockedAt.slice(0, BLOCKED_CAP) : r.blockedAt),
     skipped: [...r.skipped].sort((p, q) => p - q),
     ...(r.done !== undefined ? { done: r.done, stop: r.stop ?? null } : {}),
+    ...(r.gaps?.length ? { gaps: r.gaps } : {}),
   };
 }

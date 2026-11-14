@@ -333,9 +333,11 @@ export function View3D({
   tool = null,
   dimOthers = false,
   handleBox,
+  lockBoxes,
   handles,
   words,
   faceOp,
+  onContext,
   onCommit,
   preview,
   onPreview,
@@ -362,6 +364,8 @@ export function View3D({
   tool?: 'handles' | null;
   /** 其他結構半透明、選取實色。 */
   dimOthers?: boolean;
+  /** 固定的結構的外框：畫成深色線框（plan v21）。 */
+  lockBoxes?: BBox[];
   /** 箭頭畫在哪個外框上（plan v17：最後選的那個結構）；省略＝selBBox。 */
   handleBox?: BBox | null;
   /** 六個箭頭的位置（貼在結構表面上；plan v19 §3.2）。沒給＝外框每一面中央。 */
@@ -376,6 +380,8 @@ export function View3D({
   /** 拖拉中每改一格就要一次預覽；null = 收掉。 */
   onPreview: (op: Op | null) => boolean;
   onPick: (voxel: number | null, mode: SelectMode) => void;
+  /** 右鍵點一下（沒拖）在某個結構上：voxel＝點到的那一格。 */
+  onContext?: (voxel: number, x: number, y: number) => void;
   onHover: (text: string | null) => void;
   floatRef: RefObject<HTMLDivElement>;
   handle: MutableRefObject<View3DHandle | null>;
@@ -1052,6 +1058,30 @@ export function View3D({
       .catch(() => {}); // 過期的版本：等新的 state 再畫
   }, [state, selComps, scope, selBBox, selKeys, dimOthers, mode, materials]);
 
+  // 固定的結構：每個一個深色線框
+  const lockGroup = useRef<Group | null>(null);
+  useEffect(() => {
+    const c = ctxRef.current;
+    if (!c) return;
+    if (!lockGroup.current) {
+      lockGroup.current = new Group();
+      c.scene.add(lockGroup.current);
+    }
+    const g = lockGroup.current;
+    for (const o of [...g.children] as LineSegments[]) {
+      g.remove(o);
+      o.geometry.dispose();
+      (o.material as LineBasicMaterial).dispose();
+    }
+    for (const b of lockBoxes ?? []) {
+      const box = new LineSegments(boxEdges(b), new LineBasicMaterial({ color: 0x1e293b, transparent: true, opacity: 0.75 }));
+      box.position.set((b.x0 + b.x1 + 1) / 2, vol.Y - (b.y0 + b.y1 + 1) / 2, (b.z0 + b.z1 + 1) / 2);
+      g.add(box);
+    }
+    kick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockBoxes, vol.Y]);
+
   // 把手（plan v10 §4.5）：面把手＝選取外框六面中央的箭頭；角把手＝剖面四個角的小菱形（範圍中點那一片）。
   // 永遠畫在最上面、固定螢幕大小（每一幀在 handleTick 縮放）；背對相機的面把手不畫。
   useEffect(() => {
@@ -1313,6 +1343,7 @@ export function View3D({
   }, [meshing, busy]);
 
   const hoverAt = useRef(0);
+  const rightRef = useRef<{ x: number; y: number } | null>(null);
 
   /** 點選：同一處短時間內再點＝沿射線選下一個；點背景延後清選取（雙擊回全貌不該順便清掉）。 */
   const pick = (e: { clientX: number; clientY: number; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) => {
@@ -1525,6 +1556,17 @@ export function View3D({
         if (!hdRef.current) clearHover();
       }}
       onContextMenu={(e) => e.preventDefault()}
+      onPointerDownCapture={(e) => {
+        rightRef.current = e.button === 2 ? { x: e.clientX, y: e.clientY } : null;
+      }}
+      onPointerUpCapture={(e) => {
+        const r = rightRef.current;
+        rightRef.current = null;
+        // 右鍵點一下（沒拖＝不是平移視角）：在點到的結構上開選單
+        if (!r || e.button !== 2 || !onContext || Math.hypot(e.clientX - r.x, e.clientY - r.y) > 4) return;
+        const h = hit(e.clientX, e.clientY);
+        if (h) onContext(h.p, e.clientX, e.clientY);
+      }}
     >
       <svg
         ref={gizmoRef}
@@ -1587,6 +1629,7 @@ export function SliceView({
   diff,
   preview,
   onPick,
+  onContext,
   onStep,
   onHover,
   box,
@@ -1606,6 +1649,8 @@ export function SliceView({
   /** 即時預覽蓋在切面上（index 只在它根據的陣列還是這份時才傳）。 */
   preview?: Preview | null;
   onPick: (p: Vec3, mode: SelectMode) => void;
+  /** 右鍵在某一格上。 */
+  onContext?: (p: Vec3, x: number, y: number) => void;
   onStep: (delta: number) => void;
   onHover?: (p: Vec3 | null) => void;
 }) {
@@ -1669,6 +1714,11 @@ export function SliceView({
           if (e.button !== 0) return;
           const p = uvOf(e);
           if (p) onPick(p, selectModeOf(e));
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          const p = uvOf(e);
+          if (p) onContext?.(p, e.clientX, e.clientY);
         }}
         onPointerMove={(e) => onHover?.(uvOf(e))}
         onPointerLeave={() => onHover?.(null)}

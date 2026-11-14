@@ -1,7 +1,7 @@
 // Worker 的本體（plan v9 §4.2、v17）：原始（owner 'base'，永遠不寫）與目前（'cur'）兩本帳簿的體素、結構編號、diff、體積帳各只有一份，
 // 每一步原地貼補丁（不整個陣列影印）。
 // 純模組（沒有 self.onmessage），worker.ts 接訊息；測試與 bench 直接呼叫 handle()。
-import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, VOID, greedyMesh, labelComponents, linerTable } from './volume';
+import { type BBox, type Comp, type MeshData, type RawComp, type Volume, DIFF_BIT, VOID, greedyMesh, labelComponents } from './volume';
 import { type Scope, clipBox } from './scope';
 import { type Op, isAdjacent } from './ops';
 import { type Probe, type ProbeReq, probe } from './probe';
@@ -41,8 +41,7 @@ export type LayerFilter = { comps: number[]; scope: Scope; box: BBox } | { mat: 
 
 export interface Requests {
   /** 載入原始：存起來並標記結構；之前的狀態全部丟掉。回傳原始的體積帳（主執行緒不再自己數）。 */
-  /** liners：薄層材質（plan v17 §5.4.2，載入時判定一次）。 */
-  load: { req: { sid: number; vol: Volume }; res: { labels: Int32Array; raw: RawComp[]; counts: Float64Array; liners: number[] } };
+  load: { req: { sid: number; vol: Volume }; res: { labels: Int32Array; raw: RawComp[]; counts: Float64Array } };
   /** 開一本新帳簿：複製 src 目前的內容給 owner（這是整個流程裡唯一的整陣列複製）。sid 省略＝沿用 src 的版本號。 */
   fork: { req: { owner: string; src: string; sid?: number }; res: null };
   /** 保險：主執行緒的內容補送過來（只在 head 對不上時）。comps：拖拉預覽用（plan v15 §10，Worker 存 compsOf）。 */
@@ -357,7 +356,7 @@ function* applyGen({ owner, from, to, comps, op, matNames, keyCounter }: Request
     // plan v17 §5.5：鄰居怎麼了由這一步的補丁算（O(補丁)）
     const keys = new Set(op.keys);
     const self = new Set(comps.filter((c) => keys.has(c.key)).map((c) => c.mat));
-    const fx = r.step.data ? stepEffects(r.step.data.before, r.step.data.after, self, new Set(op.follow ? op.liners : [])) : { effects: { follow: [], lost: [], gained: [], both: [] }, changed: 0 };
+    const fx = r.step.data ? stepEffects(r.step.data.before, r.step.data.after, self) : { effects: { follow: [], lost: [], gained: [], both: [] }, changed: 0 };
     report.effects = fx.effects;
     report.changed = fx.changed;
   }
@@ -473,14 +472,13 @@ export const handlers: { [K in Kind]: Handler<K> } = {
     compsOf.clear();
     const { labels, raw } = labelComponents(vol);
     const { counts, voidAxes } = countAllAndVoid(vol);
-    const liners = linerTable(vol);
     books.set(BASE_OWNER, { data: vol.data, labels, diff: null, diffCount: 0, counts, axes: newAxes(dims), voidAxes, touch: null });
     heads.set(BASE_OWNER, sid);
     origSid = sid;
     // 主執行緒要一份原始的 labels（一次）
     const out = labels.slice();
     const c = counts.slice();
-    return [{ labels: out, raw, counts: c, liners }, [out.buffer, c.buffer]];
+    return [{ labels: out, raw, counts: c }, [out.buffer, c.buffer]];
   },
   fork: ({ owner, src, sid }) => {
     if (owner === BASE_OWNER) throw new Error('原始不能被覆蓋');

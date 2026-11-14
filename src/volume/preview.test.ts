@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MATERIALS, demoVolume, initialLabeled, linerTable } from './volume';
+import { MATERIALS, demoVolume, initialLabeled } from './volume';
 import { type EditState, type Op, applyOp, matNameOf } from './ops';
 import { boxVoxels, cropVolume, previewBox, previewOp } from './preview';
 
@@ -13,7 +13,7 @@ describe('即時預覽（裁切後在主執行緒算）', () => {
   const poly = base.L.comps.filter((c) => c.mat === 6);
   const fin = base.L.comps.find((c) => c.mat === 3)!;
   const full = { axis: 'z' as const, lo: 0, hi: vol.Z - 1 };
-  const liners = linerTable(vol);
+  const liners: number[] = [];
   const cases: [string, Op][] = [
     ['相鄰材質規則：poly 上面外推 3（SiN 跟著）', { kind: 'push', keys: [poly[0].key], scope: full, dir: [0, -1, 0], n: 3, follow: true, backfill: 'outer', policy: 'adjacent', liners }],
     ['相鄰材質規則：fin 上面內縮 2（襯層跟著退）', { kind: 'push', keys: [fin.key], scope: full, dir: [0, -1, 0], n: -2, follow: true, backfill: 'outer', policy: 'adjacent', liners }],
@@ -44,7 +44,8 @@ describe('即時預覽（裁切後在主執行緒算）', () => {
       }
       expect(changedInside).toBeGreaterThan(0);
       // 裁切範圍遠小於整個陣列
-      expect(boxVoxels(box)).toBeLessThan(vol.data.length / 4);
+      // （相鄰材質規則沒固定任何結構時，外面的全部跟著動，範圍本來就大）
+      if (!('policy' in op && op.policy === 'adjacent')) expect(boxVoxels(box)).toBeLessThan(vol.data.length / 4);
     });
 
   it('超過上限就不預覽', () => {

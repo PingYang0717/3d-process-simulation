@@ -1,6 +1,6 @@
 // plan v17 §5.5：每種句型。
 import { describe, expect, it } from 'vitest';
-import { blockText, blockedText, faceName, fixText, limitText, materialParts, namesOf, stepParts } from './stepWords';
+import { blockText, blockedText, faceName, limitText, materialParts, namesOf, stepParts } from './stepWords';
 
 const NAMES: Record<number, string> = { 3: 'Si fin', 4: 'HfO₂', 5: 'TiN', 6: 'Poly-Si', 7: 'SiN', 2: 'STI SiO₂' };
 const mn = (id: number) => NAMES[id] ?? `材質 ${id}`;
@@ -35,21 +35,27 @@ describe('stepWords', () => {
 
   it('沒做滿：再加一句原因（有結構名字用名字）', () => {
     const p = stepParts({ kind: 'push', who: 'Si fin 1', face: '上', n: 8, done: 5, nmPerVoxel: 0.5, follow: true, effects: { follow: [4, 5], lost: [6], gained: [], both: [] }, stop: { why: 'last', mat: 6 }, stopWho: 'Poly-Si 1' }, mn);
-    expect(p[p.length - 1]).toBe('只做了 5 格：Poly-Si 1 只剩 1 格');
+    expect(p[p.length - 1]).toBe('只做了 5 格：Poly-Si 1 在模型邊界只剩 1 格');
+    const q = stepParts({ kind: 'push', who: 'Si fin 1', face: '上', n: 8, done: 5, nmPerVoxel: 0.5, stop: { why: 'lock', mat: 6, keep: 2 }, stopWho: 'Poly-Si 1' }, mn);
+    expect(q[q.length - 1]).toBe('只做了 5 格：Poly-Si 1 已經壓到它的最少厚度');
   });
 
   it('一格都沒做：不進清單，寫「擋下來了」', () => {
     expect(stepParts({ kind: 'push', who: 'x', face: '上', n: 1, done: 0, nmPerVoxel: 1, follow: false }, mn)).toEqual([]);
-    expect(blockedText({ why: 'last', mat: 4 }, mn)).toBe('擋下來了：HfO₂ 只剩 1 格');
+    expect(blockedText({ why: 'lock', mat: 5, keep: 255 }, mn, 'TiN 1')).toBe('擋下來了：被完全鎖定的 TiN 1 擋住');
     expect(blockedText({ why: 'edge' }, mn)).toBe('擋下來了：已經到模型邊界');
   });
 
   it('事先告知：最多到哪裡、怎麼解', () => {
-    expect(limitText({ why: 'last', mat: 6 }, mn, 'Poly-Si 1')).toBe('到 Poly-Si 1 剩 1 格為止');
+    expect(limitText({ why: 'lock', mat: 6, keep: 2 }, mn, 'Poly-Si 1')).toBe('到 Poly-Si 1 壓到最少厚度為止');
+    expect(limitText({ why: 'lock', mat: 6, keep: 255 }, mn, 'Poly-Si 1')).toBe('到完全鎖定的 Poly-Si 1 為止');
     expect(limitText({ why: 'edge' }, mn)).toBe('到模型邊界為止');
-    expect(fixText({ why: 'last', mat: 4 }, mn, 'HfO₂ 1', false)).toBe('先把 HfO₂ 1 往外推，或改用跟著移動');
-    expect(fixText({ why: 'last', mat: 6 }, mn, 'Poly-Si 1', true)).toBe('先把 Poly-Si 1 往外推');
-    expect(blockText({ why: 'min' }, mn)).toBe('已經縮到最小');
+    expect(blockText({ why: 'min' }, mn)).toBe('已經沒有東西可以縮');
+  });
+
+  it('留空與消失：各加一句；消失之後不再寫「只做了幾格」', () => {
+    const p = stepParts({ kind: 'push', who: 'SiN 1', face: '上', n: -5, done: -3, nmPerVoxel: 0.5, gaps: [4], gone: 'SiN 1', stop: { why: 'min' } }, mn);
+    expect(p).toEqual(['SiN 1 上面內縮 3 格（1.5 nm）', 'HfO₂ 完全鎖定、沒有跟著：中間留空', '⚠ SiN 1 整個消失']);
   });
 
   it('換材質：名字跟著材質重新編號', () => {

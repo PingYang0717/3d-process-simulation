@@ -29,32 +29,27 @@ export function namesOf(comps: { label: string; mat: number }[], matName: (id: n
 /** 被擋的那一格是誰：有結構名字（who）就用名字，否則用材質名。 */
 const blockWho = (b: Block, matName: (id: number) => string, who?: string) => who ?? (b.mat !== undefined ? matName(b.mat) : '');
 
+/** 完全鎖定（volume.ts 的 LOCK_FULL）。 */
+const FULL = 255;
+
 /** 「做不到」的原因（擋下來的那一刻）。 */
 export function blockText(b: Block | null, matName: (id: number) => string, who?: string) {
   if (!b) return '';
   if (b.why === 'edge') return '已經到模型邊界';
-  if (b.why === 'self') return '會碰到同材質的結構';
-  if (b.why === 'min') return '已經縮到最小';
-  return `${blockWho(b, matName, who)} 只剩 1 格`;
+  if (b.why === 'self') return '會碰到自己';
+  if (b.why === 'min') return '已經沒有東西可以縮';
+  if (b.why === 'lock') return b.keep === FULL ? `被完全鎖定的 ${blockWho(b, matName, who)} 擋住` : `${blockWho(b, matName, who)} 已經壓到它的最少厚度`;
+  return `${blockWho(b, matName, who)} 在模型邊界只剩 1 格`;
 }
 
 /** 「最多可以做到哪裡」的說明（面板事先告知用）。 */
 export function limitText(b: Block | null, matName: (id: number) => string, who?: string) {
   if (!b) return '';
   if (b.why === 'edge') return '到模型邊界為止';
-  if (b.why === 'self') return '到碰到同材質的結構為止';
-  if (b.why === 'min') return '到只剩 1 格厚為止';
-  return `到 ${blockWho(b, matName, who)} 剩 1 格為止`;
-}
-
-/** 被擋時的解法（面板反灰時寫在原因後面）。 */
-export function fixText(b: Block | null, matName: (id: number) => string, who?: string, follow?: boolean) {
-  if (!b) return '';
-  if (b.why === 'last') {
-    const name = blockWho(b, matName, who);
-    return follow === false ? `先把 ${name} 往外推，或改用跟著移動` : `先把 ${name} 往外推`;
-  }
-  return '';
+  if (b.why === 'self') return '到碰到自己為止';
+  if (b.why === 'min') return '到縮完為止';
+  if (b.why === 'lock') return b.keep === FULL ? `到完全鎖定的 ${blockWho(b, matName, who)} 為止` : `到 ${blockWho(b, matName, who)} 壓到最少厚度為止`;
+  return `到 ${blockWho(b, matName, who)} 在模型邊界剩 1 格為止`;
 }
 
 export const nmText = (n: number, nmPerVoxel: number) => `${(Math.abs(n) * nmPerVoxel).toFixed(1)} nm`;
@@ -70,8 +65,13 @@ export interface StepInfo {
   /** 實際做了幾格。 */
   done: number;
   nmPerVoxel: number;
-  follow: boolean;
+  /** 舊版欄位，不再使用。 */
+  follow?: boolean;
   effects?: Effects;
+  /** 完全鎖定、沒有跟著而留空的材質。 */
+  gaps?: number[];
+  /** 這一步之後整個消失的結構（名字）。 */
+  gone?: string;
   stop?: Block | null;
   /** 擋住的那個結構的名字（有的話）。 */
   stopWho?: string;
@@ -87,12 +87,14 @@ export function stepParts(s: StepInfo, matName: (id: number) => string): string[
   const names = (ms: number[]) => ms.map(matName).join('、');
   const e = s.effects;
   if (e) {
-    if (s.follow && e.follow.length) parts.push(`${names(e.follow)} 跟著移動 ${k} 格`);
+    if (e.follow.length) parts.push(`${names(e.follow)} 跟著移動 ${k} 格`);
     if (e.lost.length) parts.push(`${names(e.lost)} 變薄 ${k} 格`);
     if (e.gained.length) parts.push(`${names(e.gained)} 變厚 ${k} 格`);
     if (e.both.length) parts.push(`${names(e.both)} 一側變薄、另一側變厚 ${k} 格`);
   }
-  if (k < Math.abs(s.n) && s.stop) parts.push(`只做了 ${k} 格：${blockText(s.stop, matName, s.stopWho)}`);
+  if (s.gaps?.length) parts.push(`${names(s.gaps)} 完全鎖定、沒有跟著：中間留空`);
+  if (s.gone) parts.push(`⚠ ${s.gone} 整個消失`);
+  if (k < Math.abs(s.n) && s.stop && !(s.gone && s.stop.why === 'min')) parts.push(`只做了 ${k} 格：${blockText(s.stop, matName, s.stopWho)}`);
   return parts;
 }
 

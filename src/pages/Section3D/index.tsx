@@ -21,6 +21,7 @@ import { Resizer } from '../../ui/Resizer';
 import { StructureList } from './StructureList';
 import { UploadPanel } from './UploadPanel';
 import { ActionPanel } from './ActionPanel';
+import { type CtxTarget, LockMenu, LockPanel } from './LockUi';
 import { StepList } from './StepList';
 import { faceName, nmText } from './stepWords';
 import { surfaceHandles } from './handles3d';
@@ -78,6 +79,7 @@ const LIVE_PREVIEW_CAP = 400_000;
 const COMMIT_PREVIEW_CAP = 400_000;
 type PV = Preview & { base: number; committed: boolean; mesh?: MeshData };
 const NO_HIDDEN = new Set<number>();
+const NO_BOXES: import("../../volume/volume").BBox[] = [];
 
 function Brand() {
   return (
@@ -277,6 +279,21 @@ export default function Section3DPage() {
     ed.setCursor(p);
     ed.pickVoxel((p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0], m);
   });
+  // 右鍵選單（固定／解除固定）：在多選的其中一個上按＝整批一起；不改變選取
+  const [ctx, setCtx] = useState<CtxTarget | null>(null);
+  const openCtx = useEvent((keys: string[], x: number, y: number) => {
+    if (peek || ed.busy) return;
+    const ks = keys.length === 1 && ed.sel.size > 1 && ed.sel.has(keys[0]) ? [...ed.sel] : keys;
+    setCtx({ keys: ks, x, y });
+  });
+  const closeCtx = useEvent(() => setCtx(null));
+  const ctxAtVoxel = useEvent((i: number, x: number, y: number) => {
+    const l = ed.L.labels[i];
+    const c = l >= 0 ? ed.L.comps[l] : undefined;
+    if (c && c.mat !== 0) openCtx([c.key], x, y);
+  });
+  const ctxInSlice = useEvent((p: [number, number, number], x: number, y: number) => ctxAtVoxel((p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0], x, y));
+  const lockBoxes = useMemo(() => ed.locks.flatMap(([k]) => (ed.compByKey.get(k) ? [ed.compByKey.get(k)!.bbox] : [])), [ed.locks, ed.compByKey]);
   const stepAxis = useEvent((a: Axis, d: number) => ed.stepCursor(a, d));
   const stepFns = useMemo<Record<Axis, (d: number) => void>>(() => ({ x: (d) => stepAxis('x', d), y: (d) => stepAxis('y', d), z: (d) => stepAxis('z', d) }), [stepAxis]);
   /** 箭頭的說明：推拉＝「上面外推 3 格（1.5 nm）」；平移＝「往上搬 3 格（1.5 nm）」。 */
@@ -374,6 +391,7 @@ export default function Section3DPage() {
               cursor={ed.cursor}
               scope={ed.sel.size ? ed.scope : null}
               preview={p && p.base === sidOf(ed.cur) && mode === 'now' ? p : null}
+              onContext={ctxInSlice}
               selBox={peek ? null : selBBox}
               onPick={pickInSlice}
               onStep={stepFns[axis]}
@@ -412,6 +430,7 @@ export default function Section3DPage() {
                 diff={null}
                 preview={p && p.base === sidOf(ed.cur) && mode === 'now' ? p : null}
                 onPick={pickInSlice}
+                onContext={ctxInSlice}
                 onStep={stepFns[axis]}
               />
             )}
@@ -448,6 +467,8 @@ export default function Section3DPage() {
           <b>拖其他地方</b>＝轉視角
           <br />
           <b>Shift＋點</b>＝多選同材質
+          <br />
+          <b>右鍵</b>＝固定／解除固定
         </div>
         <WithLivePv live={livePv} pv={pv}>
           {(p) => (
@@ -459,15 +480,16 @@ export default function Section3DPage() {
               selComps={peek ? null : ed.selIdx}
               selBBox={peek ? null : selBBox}
               handleBox={peek ? null : handleBox}
+              lockBoxes={peek ? NO_BOXES : lockBoxes}
               handles={peek ? null : handlePos}
               words={words}
               scope={ed.scope}
               cursor={ed.cursor}
               mode={mode}
-              tool={peek || !ed.sel.size || ed.tool === 'mat' ? null : 'handles'}
+              tool={peek || !ed.editKeys.length || ed.tool === 'mat' || ed.ask ? null : 'handles'}
               dimOthers={ed.sel.size > 0 && !peek}
               faceOp={ed.faceOp}
-              onCommit={ed.commit}
+              onCommit={ed.commitAsk}
               preview={p}
               onPreview={(op) => {
                 if (op) return makePreview(op, LIVE_PREVIEW_CAP, false);
@@ -475,6 +497,7 @@ export default function Section3DPage() {
                 return false;
               }}
               onPick={(v, m) => ed.pickVoxel(v, m)}
+              onContext={ctxAtVoxel}
               onHover={hover.set}
               floatRef={tagRef}
               handle={view}
@@ -519,9 +542,27 @@ export default function Section3DPage() {
     </div>
   );
 
+  /** 會讓結構整個消失的一步：先問（plan v20 §3）。 */
+  const askCard = ed.ask && (
+    <div className="confirm" role="alertdialog" data-testid="vanish-ask">
+      <b>⚠ 這一步會讓 {ed.ask.who} 整個消失</b>
+      <p>內縮之後一格都不剩（之後還是可以用「復原」救回來）。</p>
+      <div className="acts">
+        <Button type="primary" disabled={!ed.ask.safe} onClick={() => ed.answerAsk('safe')} data-testid="ask-safe">
+          {ed.ask.safe && ed.ask.safe.kind === 'push' ? `只內縮 ${-ed.ask.safe.n} 格（保留 ${ed.ask.who}）` : '不能再少了'}
+        </Button>
+        <Button danger onClick={() => ed.answerAsk('force')} data-testid="ask-force">
+          照做，讓 {ed.ask.who} 消失
+        </Button>
+        <Button onClick={() => ed.answerAsk('cancel')}>取消</Button>
+      </div>
+    </div>
+  );
+
   const inspector = (
     <>
-      <ActionPanel ed={ed} peek={peek} />
+      <ActionPanel ed={ed} peek={peek} onCtx={openCtx} />
+      <LockPanel ed={ed} onCtx={openCtx} />
       <StepList ed={ed} />
       <div className={'insp-foot' + (ed.diffCount ? ' changed' : '')}>
         <span className={'dot' + (ed.diffCount ? ' warn' : '')} />
@@ -539,6 +580,8 @@ export default function Section3DPage() {
 
   return (
     <div className="app">
+      {ctx && <LockMenu ed={ed} target={ctx} onClose={closeCtx} />}
+      {askCard}
       <header className="topbar">
         <Brand />
         {ed.ready && (
@@ -560,7 +603,7 @@ export default function Section3DPage() {
       <div className="body">
         {leftOpen ? (
           <>
-            <WithLive live={leftW}>{(w) => <StructureList ed={ed} width={w} onCollapse={() => setLeftOpen(false)} />}</WithLive>
+            <WithLive live={leftW}>{(w) => <StructureList ed={ed} width={w} onCollapse={() => setLeftOpen(false)} onCtx={openCtx} />}</WithLive>
             <WithLive live={leftW}>{(w) => <Resizer label="左欄寬度" value={w} min={180} max={420} onDrag={(dx) => leftW.set(Math.max(180, Math.min(420, leftW.get() + dx)))} />}</WithLive>
           </>
         ) : (

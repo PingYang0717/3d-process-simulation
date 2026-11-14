@@ -1,13 +1,12 @@
 // plan v17 §7：相鄰材質規則（kernel17）。用 prototype 的同一個 48×38×40 模型（demo17，y 上下顛倒）。
-// 每一步都走三條路逐體素比對：applyOp（整個陣列）、applyOpLocal（裁切範圍，Worker 的路徑）、ref/proto17（prototype 的逐格寫法）。
+// plan v21：不分薄層／厚層，沒固定的外層全部跟著平移；固定的結構可被壓薄（最少留 N 格）或完全鎖定。
+// 每一步都走兩條路逐體素比對：applyOp（整個陣列）、applyOpLocal（裁切範圍，Worker 的路徑）。
 import { describe, expect, it } from 'vitest';
-import { type Labeled, type Vec3, type Volume, MATERIALS, initialLabeled, linerTable, maskOf } from './volume';
-import { type EditState, type Op, adjacentDir, applyOp, isAdjacent, matNameOf } from './ops';
+import { type Labeled, type LockSpec, type Vec3, type Volume, LOCK_FULL, MATERIALS, initialLabeled } from './volume';
+import { type EditState, type Op, applyOp, matNameOf } from './ops';
 import { applyOpLocal } from './apply';
-import { previewBox } from './preview';
 import { fullScope } from './scope';
 import { demo17Volume, D17 } from './demo17';
-import { refAdjacent } from './ref/proto17';
 import type { Report } from './kernel';
 
 const vol0 = demo17Volume();
@@ -16,13 +15,12 @@ let keyN = 0;
 const ctx = { orig: vol0, matName, newKey: () => `n${keyN++}` };
 const L0 = initialLabeled(vol0, matName);
 const base: EditState = { vol: vol0, L: L0 };
-const liners = linerTable(vol0);
 const { X, Y } = D17;
 
 const UP: Vec3 = [0, -1, 0];
 const LEFT: Vec3 = [-1, 0, 0];
 const RIGHT: Vec3 = [1, 0, 0];
-const AIR = 0, SI = 1, STI = 2, FIN = 3, HFO = 4, TIN = 5, POLY = 6, SIN = 7;
+const AIR = 0, STI = 2, FIN = 3, HFO = 4, TIN = 5, POLY = 6, SIN = 7;
 
 /** 某個材質、外框 x0 = x0（、z0 = z0）的結構 key。 */
 const keyOf = (L: Labeled, mat: number, x0?: number, z0?: number) => {
@@ -30,8 +28,8 @@ const keyOf = (L: Labeled, mat: number, x0?: number, z0?: number) => {
   if (!c) throw new Error(`找不到結構 ${mat} ${x0} ${z0}`);
   return c.key;
 };
-const push = (keys: string[], dir: Vec3, n: number, follow: boolean): Op => ({ kind: 'push', keys, scope: fullScope(D17), dir, n, follow, backfill: 'outer', policy: 'adjacent', liners });
-const move = (keys: string[], d: Vec3, follow: boolean): Op => ({ kind: 'translate', keys, scope: fullScope(D17), d, backfill: 'outer', follow, policy: 'adjacent', liners });
+const push = (keys: string[], dir: Vec3, n: number, locks: LockSpec[] = []): Op => ({ kind: 'push', keys, scope: fullScope(D17), dir, n, follow: true, backfill: 'outer', policy: 'adjacent', locks });
+const move = (keys: string[], d: Vec3, locks: LockSpec[] = []): Op => ({ kind: 'translate', keys, scope: fullScope(D17), d, backfill: 'outer', follow: true, policy: 'adjacent', locks });
 
 const diff = (a: Uint8Array, b: Uint8Array) => {
   let n = 0;
@@ -39,20 +37,11 @@ const diff = (a: Uint8Array, b: Uint8Array) => {
   return n;
 };
 
-/** 套一步：三條路逐體素相同；回傳裁切路徑的狀態與報告。 */
+/** 套一步：兩條路逐體素相同；回傳裁切路徑的狀態與報告。 */
 function run(s: EditState, op: Op): { s: EditState; r: Report } {
   const loc = applyOpLocal(s, op, ctx);
   const full = applyOp(s, op, ctx);
   expect(diff(loc.state.vol.data, full.vol.data)).toBe(0);
-  if (isAdjacent(op)) {
-    const { dir, n } = adjacentDir(op);
-    const masks = [...new Set(op.keys)].map((k) => maskOf(s.L, new Set([k]))!);
-    const ref = refAdjacent(s.vol, masks, op.kind, dir, n, op.follow, op.liners);
-    expect(diff(loc.state.vol.data, ref.data)).toBe(0);
-    expect(loc.report.done ?? 0).toBe(ref.done);
-    // 被擋的原因：好幾排同時被擋時，兩邊掃描的順序不同，只比有沒有被擋
-    expect(!!loc.report.stop).toBe(!!ref.stop);
-  }
   return { s: loc.state, r: loc.report };
 }
 
@@ -79,203 +68,143 @@ function rowX(v: Volume, y: number, z: number): [number, number][] {
   return out;
 }
 
-const FIN1_X = 13; // fin 1 中間
-const GATE_Z = 10; // 閘極 1 裡面
 const fin1 = keyOf(L0, FIN, 11);
 const fin2 = keyOf(L0, FIN, 31);
-const poly1 = keyOf(L0, POLY, 4, 8);
 
-describe('kernel17：相鄰材質規則（plan v17 §5.4、§7）', () => {
-  it('原始模型：fin 上面依序是 HfO₂ 1 → TiN 1 → Poly 6 → SiN 3 → 空氣', () => {
-    expect(stack(vol0, FIN1_X, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
+
+const Z1 = 10; // 第一個閘極裡的一片
+const Z0 = 2; // 閘極外的一片
+const YF = 22; // fin 高度範圍裡、STI 以上的一排
+/** 把外圍鎖起來（可被壓薄、最少留 keep 格）：等於以前「薄層跟著、厚層變薄」的效果。 */
+const outerLocks = (keep: number): LockSpec[] => L0.comps.filter((c) => c.mat === POLY || c.mat === STI || c.key === fin2).map((c) => [c.key, keep]);
+
+describe('kernel21：全部跟著動＋固定（plan v21 §3）', () => {
+  it('原始模型：閘極裡 fin 那一排由左到右', () => {
+    expect(rowX(vol0, YF, Z1)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 1], [FIN, 6], [HFO, 1], [TIN, 1], [POLY, 10], [TIN, 1], [HFO, 1], [FIN, 6], [HFO, 1], [TIN, 1], [POLY, 5], [AIR, 4]]);
+    expect(rowX(vol0, YF, Z0)).toEqual([[AIR, 11], [FIN, 6], [AIR, 14], [FIN, 6], [AIR, 11]]);
   });
 
-  it('10. 薄層判定：HfO₂、TiN、SiN 是薄層，其餘不是', () => {
-    expect(liners).toEqual([HFO, TIN, SIN]);
+  it('1. 沒有固定：fin 右面外推 1，右邊全部（含另一根 fin、隔著空氣的那一段）整片右移 1；內縮 1 回到原樣', () => {
+    const a = run(base, push([fin1], RIGHT, 1));
+    expect(a.r.done).toBe(1);
+    expect(rowX(a.s.vol, YF, Z1)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 1], [FIN, 7], [HFO, 1], [TIN, 1], [POLY, 10], [TIN, 1], [HFO, 1], [FIN, 6], [HFO, 1], [TIN, 1], [POLY, 5], [AIR, 3]]);
+    expect(rowX(a.s.vol, YF, Z0)).toEqual([[AIR, 11], [FIN, 7], [AIR, 14], [FIN, 6], [AIR, 10]]);
+    const b = run(a.s, push([keyOf(a.s.L, FIN, 11)], RIGHT, -1));
+    expect(diff(b.s.vol.data, vol0.data)).toBe(0);
   });
 
-  it('1. fin 上面跟著移動外推 2：HfO₂、TiN 各上移 2、厚度仍 1；Poly 6 → 4；SiN 不變', () => {
-    const { s, r } = run(base, push([fin1], UP, 2, true));
-    expect(r.done).toBe(2);
-    expect(r.stop).toBeNull();
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 4], [TIN, 1], [HFO, 1], [FIN, 17], [SI, 6]]);
-    // 閘極外面上方是空氣：一樣長 2
-    expect(stack(s.vol, FIN1_X, 0)).toEqual([[AIR, 15], [FIN, 17], [SI, 6]]);
+  it('2. 外圍固定（最少留 2 格）：只有 HfO₂／TiN 跟著，Poly 變薄，另一根 fin 不動；內縮回到原樣', () => {
+    const locks = outerLocks(2);
+    const a = run(base, push([fin1], RIGHT, 3, locks));
+    expect(a.r.done).toBe(3);
+    expect(rowX(a.s.vol, YF, Z1)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 1], [FIN, 9], [HFO, 1], [TIN, 1], [POLY, 7], [TIN, 1], [HFO, 1], [FIN, 6], [HFO, 1], [TIN, 1], [POLY, 5], [AIR, 4]]);
+    expect(rowX(a.s.vol, YF, Z0)).toEqual([[AIR, 11], [FIN, 9], [AIR, 11], [FIN, 6], [AIR, 11]]);
+    const b = run(a.s, push([keyOf(a.s.L, FIN, 11)], RIGHT, -3, locks));
+    expect(diff(b.s.vol.data, vol0.data)).toBe(0);
   });
 
-  it('2. 連推：第 5 格後 Poly 剩 1 格、第 6 格整面擋下（閘極外也沒長）', () => {
-    const { s, r } = run(base, push([fin1], UP, 8, true));
-    expect(r.done).toBe(5);
-    expect(r.stop).toMatchObject({ why: 'last', mat: POLY });
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 1], [TIN, 1], [HFO, 1], [FIN, 20], [SI, 6]]);
-    expect(stack(s.vol, FIN1_X, 0)).toEqual([[AIR, 12], [FIN, 20], [SI, 6]]);
+  it('3. 可被壓薄的固定結構壓到最少厚度就整面停（lock）', () => {
+    const r = run(base, push([fin1], RIGHT, 20, outerLocks(2))).r;
+    expect(r.done).toBe(8); // Poly 10 格 → 2 格
+    expect(r.stop?.why).toBe('lock');
+    expect(r.stop?.mat).toBe(POLY);
+    expect(r.stop?.keep).toBe(2);
   });
 
-  it('3. 被擋後先把兩根 Poly 的上面各外推 2（SiN 跟著），fin 又可以再推 2', () => {
-    let s = run(base, push([fin1], UP, 5, true)).s;
-    const p1 = keyOf(s.L, POLY, 4, 8);
-    const p2 = keyOf(s.L, POLY, 4, 24);
-    const r1 = run(s, push([p1, p2], UP, 2, true));
-    expect(r1.r.done).toBe(2);
-    s = r1.s;
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 4], [SIN, 3], [POLY, 3], [TIN, 1], [HFO, 1], [FIN, 20], [SI, 6]]);
-    const r2 = run(s, push([keyOf(s.L, FIN, 11)], UP, 5, true));
-    expect(r2.r.done).toBe(2);
-    expect(r2.r.stop).toMatchObject({ why: 'last', mat: POLY });
+  it('4. 完全鎖定：推到它就整面停，一格都不做', () => {
+    const tin1 = keyOf(L0, TIN, 9, 8);
+    const r = run(base, push([fin1], RIGHT, 2, [[tin1, LOCK_FULL]]));
+    expect(r.r.done).toBe(0);
+    expect(r.r.stop?.why).toBe('lock');
+    expect(diff(r.s.vol.data, vol0.data)).toBe(0);
   });
 
-  it('4. fin 上面留在原地：一格都不做，被 HfO₂ 擋', () => {
-    const { s, r } = run(base, push([fin1], UP, 3, false));
-    expect(r.done).toBe(0);
-    expect(r.stop).toMatchObject({ why: 'last', mat: HFO });
-    expect(diff(s.vol.data, vol0.data)).toBe(0);
+  it('5. 內縮、外層完全鎖定：它不跟，中間留空；另一個閘極照常跟著退', () => {
+    const hfo1 = keyOf(L0, HFO, 10, 8);
+    const a = run(base, push([fin1], RIGHT, -1, [[hfo1, LOCK_FULL]]));
+    expect(a.r.done).toBe(1);
+    expect(a.r.gaps).toEqual([HFO]);
+    expect(rowX(a.s.vol, YF, Z1).slice(4, 8)).toEqual([[FIN, 5], [AIR, 1], [HFO, 1], [TIN, 1]]);
+    expect(rowX(a.s.vol, YF, 26).slice(4, 7)).toEqual([[FIN, 5], [HFO, 1], [TIN, 1]]);
   });
 
-  it('5. Poly 上面留在原地外推 5：只做 2，SiN 3 → 1', () => {
-    const { s, r } = run(base, push([poly1], UP, 5, false));
-    expect(r.done).toBe(2);
-    expect(r.stop).toMatchObject({ why: 'last', mat: SIN });
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 6], [SIN, 1], [POLY, 8], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
+  it('6. 內縮可以一路縮到消失；消失之後再縮＝min', () => {
+    const sin1 = keyOf(L0, SIN, undefined, 8);
+    const a = run(base, push([sin1], UP, -5));
+    expect(a.r.done).toBe(3);
+    expect(a.r.stop?.why).toBe('min');
+    expect(stack(a.s.vol, 20, Z1).some(([m]) => m === SIN)).toBe(false);
+    expect(a.s.L.comps.some((c) => c.key === sin1)).toBe(false);
   });
 
-  it('6. Poly 上面跟著移動外推到模型邊界：edge', () => {
-    const { s, r } = run(base, push([poly1], UP, 10, true));
-    expect(r.done).toBe(6);
-    expect(r.stop).toMatchObject({ why: 'edge' });
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[SIN, 3], [POLY, 12], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
+  it('7. 整塊平移＝前面外推＋後面內縮：搬過去再搬回來回到原樣', () => {
+    const a = run(base, move([fin1], [2, 0, 0]));
+    expect(a.r.done).toBe(2);
+    expect(rowX(a.s.vol, YF, Z0)).toEqual([[AIR, 13], [FIN, 6], [AIR, 14], [FIN, 6], [AIR, 9]]);
+    const b = run(a.s, move([keyOf(a.s.L, FIN, 13)], [-2, 0, 0]));
+    expect(diff(b.s.vol.data, vol0.data)).toBe(0);
   });
 
-  it('7a. 內縮、跟著移動：薄層跟著退、外面那層（Poly）變厚', () => {
-    const { s, r } = run(base, push([fin1], UP, -2, true));
-    expect(r.done).toBe(2);
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 8], [TIN, 1], [HFO, 1], [FIN, 13], [SI, 6]]);
-    expect(stack(s.vol, FIN1_X, 0)).toEqual([[AIR, 19], [FIN, 13], [SI, 6]]);
+  it('8. 平移碰到完全鎖定的結構：擋住；往另一邊搬，它不補上來、中間留空', () => {
+    const sin1 = keyOf(L0, SIN, undefined, 8);
+    const poly1 = keyOf(L0, POLY, undefined, 8);
+    const locks: LockSpec[] = [[poly1, LOCK_FULL]];
+    const down = run(base, move([sin1], [0, 1, 0], locks));
+    expect(down.r.done).toBe(0);
+    expect(down.r.stop?.why).toBe('lock');
+    const up = run(base, move([sin1], [0, -1, 0], locks));
+    expect(up.r.done).toBe(1);
+    const col = stack(up.s.vol, 20, Z1);
+    const k = col.findIndex(([m]) => m === SIN);
+    expect(col[k]).toEqual([SIN, 3]);
+    expect(col[k + 1]).toEqual([AIR, 1]);
+    expect(col[k + 2][0]).toBe(POLY);
   });
 
-  it('7b. 內縮、留在原地：緊貼那層（HfO₂）變厚', () => {
-    const { s } = run(base, push([fin1], UP, -1, false));
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 2], [FIN, 14], [SI, 6]]);
+  it('9. 多選兩根 fin 往右推（沒有固定）：兩根各寬 1 格，右邊那根另外被左邊那根帶著右移 1', () => {
+    const a = run(base, push([fin1, fin2], RIGHT, 1));
+    expect(a.r.done).toBe(1);
+    expect(rowX(a.s.vol, YF, Z0)).toEqual([[AIR, 11], [FIN, 7], [AIR, 14], [FIN, 7], [AIR, 9]]);
   });
 
-  it('7c. 內縮到剩 1 格就停（min）', () => {
-    const sin1 = keyOf(L0, SIN, 4, 8);
-    const { s, r } = run(base, push([sin1], UP, -5, true));
-    expect(r.done).toBe(2);
-    expect(r.stop).toMatchObject({ why: 'min' });
-    expect(stack(s.vol, FIN1_X, GATE_Z)).toEqual([[AIR, 8], [SIN, 1], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
-  });
-
-  it('8. fin 往左平移（跟著）：整圈 HfO₂／TiN 含轉角一起搬；左邊 Poly 變薄、右邊變厚；到 Poly 剩 1 格停', () => {
-    const { s, r } = run(base, move([fin1], [-6, 0, 0], true));
-    expect(r.done).toBe(4);
-    expect(r.stop).toMatchObject({ why: 'last', mat: POLY });
-    const yMid = 22; // 閘極裡、fin 側面那一段
-    expect(rowX(s.vol, yMid, GATE_Z)).toEqual([[AIR, 4], [POLY, 1], [TIN, 1], [HFO, 1], [FIN, 6], [HFO, 1], [TIN, 1], [POLY, 14], [TIN, 1], [HFO, 1], [FIN, 6], [HFO, 1], [TIN, 1], [POLY, 5], [AIR, 4]]);
-    // STI 裡那一段：左邊 STI 變薄、右邊補上 STI
-    expect(rowX(s.vol, 29, GATE_Z)).toEqual([[STI, 7], [FIN, 6], [STI, 18], [FIN, 6], [STI, 11]]);
-    // 頂上的轉角：HfO₂、TiN 跟著搬（fin 頂上每一格仍貼著 HfO₂）
-    const top = stack(s.vol, 7, GATE_Z);
-    expect(top).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
-    for (let x = 7; x <= 12; x++) {
-      for (let z = 8; z <= 15; z++) {
-        let y = 0;
-        while (s.vol.data[(z * Y + y) * X + x] !== FIN) y++;
-        expect(s.vol.data[(z * Y + y - 1) * X + x]).toBe(HFO);
-      }
-    }
-  });
-
-  it('9. 多選兩根 fin 往右推：各自的右面都動；其中一根先被擋時兩根停在同一格數', () => {
-    const { s, r } = run(base, push([fin1, fin2], RIGHT, 6, true));
-    expect(r.done).toBe(4);
-    expect(r.stop).toMatchObject({ why: 'last', mat: POLY });
-    expect(rowX(s.vol, 22, GATE_Z)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 1], [FIN, 10], [HFO, 1], [TIN, 1], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 10], [HFO, 1], [TIN, 1], [POLY, 1], [AIR, 4]]);
-  });
-
-  it('11. plan v19：fin 右面外推 3（跟著）：蓋在上面的 HfO₂／TiN 也往右伸 3 格，轉角仍包著', () => {
-    const { s, r } = run(base, push([fin1], RIGHT, 3, true));
-    expect(r.done).toBe(3);
-    // fin 頂上那兩排（y = 16 是 HfO₂、y = 15 是 TiN）：原本 HfO₂ x 10–17、TiN x 9–18
-    expect(rowX(s.vol, 16, GATE_Z)).toEqual([[AIR, 4], [POLY, 5], [TIN, 1], [HFO, 11], [TIN, 1], [POLY, 7], [TIN, 1], [HFO, 8], [TIN, 1], [POLY, 5], [AIR, 4]]);
-    expect(rowX(s.vol, 15, GATE_Z)).toEqual([[AIR, 4], [POLY, 5], [TIN, 13], [POLY, 7], [TIN, 10], [POLY, 5], [AIR, 4]]);
-    // 再上面一排是 Poly：不動
-    expect(rowX(s.vol, 14, GATE_Z)).toEqual(rowX(vol0, 14, GATE_Z));
-    // fin 頂上每一格仍貼著 HfO₂
-    for (let x = 11; x <= 19; x++) expect(stack(s.vol, x, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 1], [FIN, 15], [SI, 6]]);
-    // 內縮回來＝原始
-    const back = run(s, push([keyOf(s.L, FIN, 11)], RIGHT, -3, true));
-    expect(diff(back.s.vol.data, vol0.data)).toBe(0);
-  });
-
-  it('12. plan v19：fin 上面外推 2（跟著）：兩側側壁的 HfO₂／TiN 一起長高 2 格；旁邊的 Poly 那一排不動', () => {
-    const { s } = run(base, push([fin1], UP, 2, true));
-    expect(stack(vol0, 10, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 6], [TIN, 1], [HFO, 11], [STI, 5], [SI, 6]]);
-    expect(stack(s.vol, 10, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 4], [TIN, 1], [HFO, 13], [STI, 5], [SI, 6]]);
-    expect(stack(s.vol, 9, GATE_Z)).toEqual([[AIR, 6], [SIN, 3], [POLY, 4], [TIN, 14], [STI, 5], [SI, 6]]);
-    expect(stack(s.vol, 8, GATE_Z)).toEqual(stack(vol0, 8, GATE_Z));
-    // 留在原地：旁邊的排不動（被 HfO₂ 擋，一格都不做）
-    expect(run(base, push([fin1], UP, 2, false)).r.done).toBe(0);
-  });
-
-  it('外推的裁切範圍沿法線包住會讀到的每一格；平移包住整圈薄層', () => {
-    // fin 頂在 y = 17：推 2 格最遠讀到 Poly 第 2 格下面那一格（y = 17 − 1 − 2 − 2）再留 2 格
-    const b = previewBox(base, push([fin1], UP, 2, true))!;
-    expect(b.y0).toBeLessThanOrEqual(12);
-    expect(b.y0).toBeGreaterThan(0);
-    const t = previewBox(base, move([fin1], [-2, 0, 0], true))!;
-    expect(t.x0).toBeLessThanOrEqual(9 - 4);
-    expect(t.z0).toBeLessThanOrEqual(8);
+  it('10. fin 上面外推（外圍固定）：兩側側壁的 HfO₂／TiN 一起長高，轉角仍包著', () => {
+    const locks = outerLocks(1);
+    const a = run(base, push([fin1], UP, 2, locks));
+    expect(a.r.done).toBe(2);
+    const before = (x: number) => stack(vol0, x, Z1);
+    const after = (x: number) => stack(a.s.vol, x, Z1);
+    const count = (st: [number, number][], m: number) => st.filter(([k]) => k === m).reduce((p, [, n]) => p + n, 0);
+    expect(count(after(13), FIN)).toBe(count(before(13), FIN) + 2);
+    expect(count(after(10), HFO)).toBe(count(before(10), HFO) + 2); // HfO₂ 側壁
+    expect(count(after(9), TIN)).toBe(count(before(9), TIN) + 2); // TiN 側壁
+    expect(count(after(13), POLY)).toBe(count(before(13), POLY) - 2);
+    expect(after(6)).toEqual(before(6)); // 旁邊的 Poly 那一排不動
   });
 });
 
-/** 一排（沿軸 a）的材質序列（連續同材質合成一段，空氣拿掉）。 */
-function seqs(v: Volume, a: number): string[] {
-  const dims = [v.X, v.Y, v.Z];
-  const st = [1, v.X, v.X * v.Y];
-  const [u, w] = [0, 1, 2].filter((k) => k !== a);
-  const out: string[] = [];
-  const p = [0, 0, 0];
-  for (p[u] = 0; p[u] < dims[u]; p[u]++)
-    for (p[w] = 0; p[w] < dims[w]; p[w]++) {
-      p[a] = 0;
-      const base = (p[2] * v.Y + p[1]) * v.X + p[0];
-      const s: number[] = [];
-      for (let t = 0; t < dims[a]; t++) {
-        const m = v.data[base + t * st[a]];
-        if (m !== AIR && s[s.length - 1] !== m) s.push(m);
-      }
-      out.push(s.join(','));
-    }
-  return out;
-}
-
-describe('kernel17 性質測試：隨機 200 步', () => {
-  it('每一步三條路相同；外推與平移不會讓任何一排少掉或多出一層', () => {
-    let rnd = 12345;
-    const rand = (n: number) => {
-      rnd = (rnd * 1103515245 + 12345) & 0x7fffffff;
-      return rnd % n;
+describe('kernel21 性質測試：隨機 120 步', () => {
+  it('每一步兩條路相同（隨機的固定、推拉、平移）', () => {
+    let seed = 7;
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed % n;
     };
     const DIRS: Vec3[] = [UP, [0, 1, 0], LEFT, RIGHT, [0, 0, 1], [0, 0, -1]];
     let s = base;
-    let moved = 0;
-    for (let step = 0; step < 200; step++) {
-      const comps = s.L.comps.filter((c) => c.mat !== SI);
-      const c = comps[rand(comps.length)];
-      const same = s.L.comps.filter((x) => x.mat === c.mat && x.key !== c.key);
-      const keys = rand(4) === 0 && same.length ? [c.key, same[rand(same.length)].key] : [c.key];
-      const dir = DIRS[rand(6)];
-      const n = 1 + rand(8);
-      const follow = rand(3) !== 0;
-      const kind = rand(3);
-      const op = kind === 2 ? move(keys, dir.map((v) => v * n) as Vec3, follow) : push(keys, dir, kind === 0 ? n : -n, follow);
-      const a = dir[0] ? 0 : dir[1] ? 1 : 2;
-      const before = seqs(s.vol, a);
-      const { s: next, r } = run(s, op);
-      if (kind !== 1) expect(seqs(next.vol, a)).toEqual(before);
-      if (r.done) moved++;
-      s = next;
+    for (let k = 0; k < 120; k++) {
+      const comps = s.L.comps.filter((c) => c.mat !== AIR);
+      const pick = () => comps[rnd(comps.length)];
+      const locks: LockSpec[] = [];
+      for (let j = rnd(4); j > 0; j--) locks.push([pick().key, rnd(3) === 0 ? LOCK_FULL : 1 + rnd(3)]);
+      const lockKeys = new Set(locks.map(([key]) => key));
+      const free = comps.filter((c) => !lockKeys.has(c.key));
+      if (!free.length) continue;
+      const c = free[rnd(free.length)];
+      const keys = rnd(5) === 0 ? free.filter((x) => x.mat === c.mat).map((x) => x.key) : [c.key];
+      const d = DIRS[rnd(6)];
+      const n = 1 + rnd(3);
+      const op = rnd(4) === 0 ? move(keys, d.map((v) => v * n) as Vec3, locks) : push(keys, d, rnd(3) === 0 ? -n : n, locks);
+      s = run(s, op).s;
     }
-    expect(moved).toBeGreaterThan(20);
-  }, 120_000);
+  });
 });

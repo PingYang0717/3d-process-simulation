@@ -27,6 +27,7 @@ export function SliceZoom({
   preview,
   selBox,
   onPick,
+  onContext,
   onStep,
 }: {
   vol: Volume;
@@ -41,6 +42,8 @@ export function SliceZoom({
   /** 選取的外框（「對準選取」用；沒選＝null）。 */
   selBox: BBox | null;
   onPick: (p: Vec3, mode: SelectMode) => void;
+  /** 右鍵點一下（沒拖）在某一格上。 */
+  onContext?: (p: Vec3, x: number, y: number) => void;
   onStep: (delta: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -179,9 +182,10 @@ export function SliceZoom({
         press.current = null;
         e.currentTarget.style.cursor = '';
         // 左鍵沒拖＝點一下：選結構、十字移過去
-        if (!pr || pr.moved || pr.button !== 0) return;
+        if (!pr || pr.moved || (pr.button !== 0 && pr.button !== 2)) return;
         const p = voxelAt(e.clientX, e.clientY);
-        if (p) onPick(p, selectModeOf(e));
+        if (p && pr.button === 2) onContext?.(p, e.clientX, e.clientY);
+        else if (p) onPick(p, selectModeOf(e));
       }}
       onPointerCancel={(e) => {
         press.current = null;

@@ -2,8 +2,8 @@
 // 每一步送 Worker（只在外框裡算），回來後主執行緒原地貼補丁；復原／重做存補丁（50 步或 256 MB）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from 'antd';
-import { type BBox, type Comp, type Labeled, type Material, type Vec3, type Volume, MATERIALS, coordOf, demoVolume, idx, materialsFor, nameComponents, unionBBox } from '../../volume/volume';
-import { type EditState, type Op, matNameOf } from '../../volume/ops';
+import { type BBox, type Comp, type Labeled, type LockSpec, type Material, type Vec3, type Volume, LOCK_FULL, MATERIALS, coordOf, demoVolume, idx, materialsFor, nameComponents, unionBBox } from '../../volume/volume';
+import { type EditState, type Op, isAdjacent, matNameOf } from '../../volume/ops';
 import type { FractionArray } from '../../volume/vti';
 import { fullScope } from '../../volume/scope';
 import { applyIn, cancelCall, compsIn, deriveIn, exportMetaIn, forkIn, isCancelled, loadOrig, newVersion, probeIn, sidOf } from '../../volume/client';
@@ -13,7 +13,7 @@ import type { OpReport } from '../../volume/report';
 import type { Probe } from '../../volume/probe';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { useEvent } from '../../ui/useEvent';
-import { type FaceName, FACES, OPPOSITE, blockedText, faceName, faceOf, materialParts, namesOf, stepParts } from './stepWords';
+import { type FaceName, FACES, OPPOSITE, blockedText, faceName, faceOf, materialParts, namesOf, nmText, stepParts } from './stepWords';
 
 export { type EditState, type Op, applyOp, matNameOf } from '../../volume/ops';
 
@@ -142,8 +142,12 @@ export function useEditor() {
   const [face, setFace] = usePersisted<FaceName>('v17face', '上', (v): v is FaceName => FACES.some((f) => f.name === v));
   const [stepN, setStepNRaw] = usePersisted('v17n', 1, (v): v is number => typeof v === 'number' && v >= 1 && v <= STEP_MAX);
   const setStepN = (n: number) => setStepNRaw(Math.max(1, Math.min(STEP_MAX, Math.round(n) || 1)));
-  /** 相鄰材質：跟著移動（true）／留在原地（false）。 */
-  const [follow, setFollow] = usePersisted('v17follow', true);
+  /** 固定的結構（plan v21 §2）：key → 被推到時這一排最少留幾格（LOCK_FULL＝完全鎖定）。固定不算一步，不進復原。 */
+  const [lockMap, setLockMap] = useState<Map<string, number>>(() => new Map());
+  /** 新固定的結構預設最少留幾格（上一次用的值）。 */
+  const [lastKeep, setLastKeep] = useState(2);
+  /** 會讓選到的結構整個消失的一步：先問（safe＝縮到還保留它的那一步；null＝沒有）。 */
+  const [ask, setAsk] = useState<{ op: Op; safe: Op | null; who: string } | null>(null);
   const [nmPerVoxel, setNmPerVoxel] = usePersisted('nmPerVoxel', 0.5, (v): v is number => typeof v === 'number' && v > 0);
   /** 最近一步的報告。 */
   const [report, setReport] = useState<OpReport | null>(null);
@@ -165,9 +169,11 @@ export function useEditor() {
 
   const matName = useMemo(() => matNameOf(materials), [materials]);
   const matNames = useMemo(() => Object.fromEntries(materials.map((m) => [m.id, m.name])), [materials]);
-  /** 薄層材質（plan v17 §5.4.2）：載入時判定、清單上可以手動切換。 */
-  const liners = useMemo(() => materials.filter((m) => m.liner).map((m) => m.id), [materials]);
   const compByKey = useMemo(() => new Map(L.comps.map((c) => [c.key, c])), [L]);
+  /** 目前還在的固定結構（已經不存在的 key 不送）。 */
+  const locks = useMemo<LockSpec[]>(() => [...lockMap].filter(([k]) => compByKey.has(k)), [lockMap, compByKey]);
+  /** 選到的裡面可以編輯的（沒固定的）。 */
+  const editKeys = useMemo(() => [...sel].filter((k) => !lockMap.has(k)), [sel, lockMap]);
   const selComps = useMemo(() => L.comps.filter((c) => sel.has(c.key)), [L, sel]);
   const selIdx = useMemo(() => L.comps.flatMap((c, i) => (sel.has(c.key) ? [i] : [])), [L, sel]);
   const selBox: BBox | null = useMemo(() => unionBBox(selComps), [selComps]);
@@ -263,7 +269,8 @@ export function useEditor() {
     if (!done) return { parts: null, text: blockedText(r.stop, matName, stopWho) };
     const dir = op.kind === 'push' ? op.dir : op.d;
     const n = op.kind === 'push' ? op.n : Math.abs(op.d[0] + op.d[1] + op.d[2]);
-    const parts = stepParts({ kind: op.kind, who, face: faceName(dir), n, done, nmPerVoxel, follow: !!op.follow, effects: r.effects, stop: r.stop, stopWho }, matName);
+    const goneComps = after ? comps.filter((c) => !after.some((x) => x.key === c.key)) : [];
+    const parts = stepParts({ kind: op.kind, who, face: faceName(dir), n, done, nmPerVoxel, effects: r.effects, stop: r.stop, stopWho, gaps: r.gaps, gone: goneComps.length ? namesOf(goneComps, matName) : undefined }, matName);
     return { parts, text: parts.join(' · ') };
   };
 
@@ -488,16 +495,16 @@ export function useEditor() {
   // ---- 動作（plan v17 §5.3）：都作用在整個結構、相鄰材質規則 ----
   const pushOp = useCallback(
     (f: FaceName, n: number): Op | null =>
-      !sel.size || !n ? null : { kind: 'push', keys: [...sel], scope, dir: faceOf(f).d, n, follow, backfill: 'outer', policy: 'adjacent', liners },
-    [sel, scope, follow, liners],
+      !editKeys.length || !n ? null : { kind: 'push', keys: editKeys, scope, dir: faceOf(f).d, n, follow: true, backfill: 'outer', policy: 'adjacent', locks },
+    [editKeys, scope, locks],
   );
   const moveOp = useCallback(
     (f: FaceName, n: number): Op | null => {
-      if (!sel.size || !n) return null;
+      if (!editKeys.length || !n) return null;
       const d = faceOf(n > 0 ? f : OPPOSITE[f]).d.map((v) => v * Math.abs(n)) as Vec3;
-      return { kind: 'translate', keys: [...sel], scope, d, backfill: 'outer', follow, policy: 'adjacent', liners };
+      return { kind: 'translate', keys: editKeys, scope, d, backfill: 'outer', follow: true, policy: 'adjacent', locks };
     },
-    [sel, scope, follow, liners],
+    [editKeys, scope, locks],
   );
   /** 3D 箭頭拖 n 格 → Op（推拉＝外推／內縮那一面；平移＝往箭頭方向搬）。 */
   const faceOp = useCallback(
@@ -506,24 +513,34 @@ export function useEditor() {
   );
   const push = useEvent((f: FaceName, n: number) => {
     const op = pushOp(f, n);
-    if (op) commit(op);
+    if (op) commitAsk(op);
   });
   const move = useEvent((f: FaceName, n: number) => {
     const op = moveOp(f, n);
-    if (op) commit(op);
+    if (op) commitAsk(op);
   });
-  /** 換材質：換到檔案裡原本沒有的材質時，新材質沿用來源材質的薄層設定（plan v17 §5.4.2）。 */
+  /** 換材質（固定的結構不換）。 */
   const setMaterial = useEvent((m: number) => {
-    if (!sel.size) return;
-    const src = materialsRef.current.find((x) => x.id === selMat);
-    const dst = materialsRef.current.find((x) => x.id === m);
-    if (dst && src && !L.comps.some((c) => c.mat === m) && !!dst.liner !== !!src.liner) setMaterials((ms) => ms.map((x) => (x.id === m ? { ...x, liner: !!src.liner } : x)));
-    commit({ kind: 'material', keys: [...sel], scope, m });
+    if (!editKeys.length) return;
+    commit({ kind: 'material', keys: editKeys, scope, m });
+  });
+  /** 固定／解除固定：keep＝最少留幾格（LOCK_FULL＝完全鎖定）、null＝解除。 */
+  const setLock = useEvent((keys: string[], keep: number | null) => {
+    const comps = keys.map((k) => compByKey.get(k)).filter((c): c is Comp => !!c);
+    if (!comps.length) return;
+    setLockMap((m) => {
+      const next = new Map(m);
+      for (const c of comps) keep === null ? next.delete(c.key) : next.set(c.key, keep);
+      return next;
+    });
+    if (keep !== null) setLastKeep(keep);
+    const who = namesOf(comps, matName);
+    setLast({ text: keep === null ? `已解除固定：${who}` : `已固定：${who}（${keep >= LOCK_FULL ? '完全鎖定' : `固定位置，可被壓薄，最少留 ${nmText(keep, nmPerVoxel)}`}）`, canUndo: false, at: Date.now() });
   });
 
   // ---- 試算（plan v17 §5.4.4）：同時最多一個在飛、永遠送最新的 ----
   const [probe, setProbe] = useState<{ sig: string; p: Probe } | null>(null);
-  const probeSig = ready && sel.size && tool !== 'mat' ? `${sidOf(cur)}|${[...sel].sort().join(',')}|${tool}|${tool === 'push' ? face : ''}|${follow}|${liners.join(',')}` : '';
+  const probeSig = ready && editKeys.length && tool !== 'mat' ? `${sidOf(cur)}|${[...editKeys].sort().join(',')}|${tool}|${tool === 'push' ? face : ''}|${locks.map((l) => l.join(':')).join(',')}` : '';
   const probeFly = useRef<{ inflight: boolean; pending: (() => void) | null }>({ inflight: false, pending: null });
   useEffect(() => {
     if (!probeSig) return;
@@ -532,7 +549,7 @@ export function useEditor() {
       if (!s) return;
       probeFly.current.inflight = true;
       const sig = probeSig;
-      probeIn(s, { keys: [...sel], kind: tool === 'move' ? 'translate' : 'push', dir: faceOf(face).d, follow, liners })
+      probeIn(s, { keys: editKeys, kind: tool === 'move' ? 'translate' : 'push', dir: faceOf(face).d, locks })
         .then((p) => setProbe({ sig, p }))
         .catch(() => {})
         .finally(() => {
@@ -547,6 +564,24 @@ export function useEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [probeSig]);
   const probeNow = probe && probe.sig === probeSig ? probe.p : null;
+  /** 送出一步；內縮到選到的結構會整個消失時先問（試算還沒回來就直接做，做完的說明會寫出誰消失了，可以復原）。 */
+  const commitAsk = useEvent((op: Op) => {
+    const v = probeNow?.vanishAt;
+    if (op.kind === 'push' && isAdjacent(op) && op.n < 0 && v && faceName(op.dir) === face && -op.n >= v) {
+      const keys = new Set(op.keys);
+      setAsk({ op, safe: v > 1 ? { ...op, n: -(v - 1) } : null, who: namesOf(L.comps.filter((c) => keys.has(c.key)), matName) });
+      return;
+    }
+    commit(op);
+  });
+  const answerAsk = useEvent((a: 'safe' | 'force' | 'cancel') => {
+    const q = ask;
+    setAsk(null);
+    if (!q) return;
+    if (a === 'safe' && q.safe) commit(q.safe);
+    else if (a === 'force') commit(q.op);
+    else setLast({ text: '已取消，沒有改動', canUndo: false, at: Date.now() });
+  });
 
   // ---- 載入與材質 ----
   const loadVolume = useCallback(async (v: Volume, m: Meta, mats?: Material[]) => {
@@ -555,7 +590,6 @@ export function useEditor() {
     running.current = true;
     try {
       const r = await loadOrig(v);
-      const linerSet = new Set(r.liners);
       let table = materialsFor(r.raw.map((x) => x.mat));
       if (mats) {
         table = table.map((t) => mats.find((x) => x.id === t.id) ?? t);
@@ -563,7 +597,6 @@ export function useEditor() {
         for (const x of mats) if (!table.some((t) => t.id === x.id)) table.push(x);
         table.sort((a, b) => a.id - b.id);
       }
-      table = table.map((t) => ({ ...t, liner: linerSet.has(t.id) }));
       setMaterials(table);
       setMeta(m);
       const comps = nameComponents(r.raw, matNameOf(table));
@@ -578,10 +611,11 @@ export function useEditor() {
       setHidden(new Set());
       setReport(null);
       setProbe(null);
+      setLockMap(new Map());
+      setAsk(null);
       setCursor([v.X >> 1, v.Y >> 1, v.Z >> 1]);
       if (m.spacing) setNmPerVoxel(m.unit === 'um' ? m.spacing[0] * 1000 : m.spacing[0]);
-      const names = table.filter((t) => t.liner).map((t) => t.name);
-      setLast({ text: names.length ? `已載入。薄層：${names.join('、')}（判斷錯了可以在左邊清單切換）` : '已載入。沒有判定為薄層的材質', canUndo: false, at: Date.now() });
+      setLast({ text: '已載入。推拉時沒固定的外層會全部跟著移動；不想動的結構按右鍵固定', canUndo: false, at: Date.now() });
     } finally {
       setBusy(null);
       running.current = false;
@@ -607,8 +641,6 @@ export function useEditor() {
     setBook({ cur: b.cur && fixS(b.cur), hist: b.hist.map(fixH), future: b.future.map(fixH) });
   });
   const setMaterialColor = useEvent((id: number, color: string) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, color } : m))));
-  /** 薄層標記（自動判定錯的時候的出路）。 */
-  const toggleLiner = useEvent((id: number) => setMaterials((ms) => ms.map((m) => (m.id === id ? { ...m, liner: !m.liner } : m))));
 
   // ---- 十字 ----
   const stepCursor = useEvent((axis: 'x' | 'y' | 'z', delta: number) =>
@@ -673,7 +705,14 @@ export function useEditor() {
     ready,
     materials,
     matName,
-    liners,
+    locks,
+    lockMap,
+    lastKeep,
+    setLock,
+    editKeys,
+    ask,
+    answerAsk,
+    commitAsk,
     meta,
     orig,
     cur,
@@ -719,8 +758,6 @@ export function useEditor() {
     setFace,
     stepN,
     setStepN,
-    follow,
-    setFollow,
     nmPerVoxel,
     setNmPerVoxel,
     scope,
@@ -737,7 +774,6 @@ export function useEditor() {
     demo,
     renameMaterial,
     setMaterialColor,
-    toggleLiner,
     origCounts,
     version: sidOf(cur),
   };

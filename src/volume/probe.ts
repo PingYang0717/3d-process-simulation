@@ -1,10 +1,9 @@
-// 試算（plan v17 §5.4.4、§5.5）：面板在動手之前要知道的三件事——誰會跟著、誰的厚度會變、這個方向最多還能做幾格與被誰擋。
-// 不寫回帳簿。推拉：對受影響的每一排做一維模擬（simGrowRow）；內縮看結構沿那一軸的厚度；平移沿每個前緣掃原始陣列。
-// 純函式：Worker 的 probe 請求與測試共用。
-import { type Vec3, type Volume, AIR, VOID, pushCutCells } from './volume';
-import { type Block, linerLUT, shellFlood, simGrowRow } from './kernel';
-import type { AdjPushOp, EditState } from './ops';
-import { ADJ_WINDOW, cropMask, cropVolume, previewBox, previewBoxTrial } from './preview';
+// 試算（plan v17 §5.5、v21）：面板在動手之前要知道的事——這一步會帶動誰、會推到哪個固定的結構、這個方向最多還能做幾格與被誰擋。
+// 不寫回帳簿。實際在裁切範圍裡算一次（和正式套用同一段程式）。純函式：Worker 的 probe 請求與測試共用。
+import { type LockSpec, type Vec3, type Volume, AIR, VOID, lockTable, pushCutCells } from './volume';
+import type { Block } from './kernel';
+import type { AdjPushOp, AdjTranslateOp, EditState } from './ops';
+import { cropLock, cropMask, cropVolume, previewBoxTrial } from './preview';
 import { fullScope } from './scope';
 import { globalIndex } from './patch';
 
@@ -20,20 +19,23 @@ export interface ProbeReq {
   kind: 'push' | 'translate';
   /** push：哪一面（法線）。translate 不看（六個方向一次算）。 */
   dir?: Vec3;
-  follow: boolean;
-  liners: number[];
+  /** 固定的結構。 */
+  locks?: LockSpec[];
+  /** 舊版欄位，不再影響結果。 */
+  follow?: boolean;
+  liners?: number[];
 }
 
 export interface Probe {
-  /** 會跟著移動的材質（跟著移動開著才有）。 */
-  follow: number[];
-  /** 厚度會變的材質。 */
-  thin: number[];
-  /** 有沒有薄層貼著（跟著移動有沒有意義；和這一次的 follow 無關）。 */
-  canFollow: boolean;
-  /** push：外推、內縮各最多幾格。 */
+  /** push：這一步會跟著移動的結構（key）。 */
+  follow: string[];
+  /** push：這一步會推到的固定結構（key）：可被壓薄的會變薄，完全鎖定的會擋住。 */
+  hit: string[];
+  /** push：外推最多幾格；內縮＝縮到還不會有選到的結構整個消失為止。 */
   out?: Room;
   in?: Room;
+  /** push：內縮滿這麼多格，選到的結構（其中一個）會整個消失。 */
+  vanishAt?: number;
   /** translate：六個方向（PROBE_DIRS 的順序）各最多幾格。 */
   dirs?: Room[];
 }
@@ -53,7 +55,6 @@ export const PROBE_MAX = 60;
 export const PROBE_MOVE_MAX = 20;
 
 const empty = (m: number) => m === AIR || m === VOID;
-const sorted = (s: Set<number>) => [...s].sort((a, b) => a - b);
 
 /**
  * 一個結構在 (a, sg) 方向每一排最外側那一格：fn(base, c)，base＝那一格的 index，c＝沿 a 的座標。
@@ -82,188 +83,97 @@ export function forEachFace(s: EditState, ci: number, a: number, sg: number, fn:
 const strideOf = (v: Volume, a: number) => (a === 0 ? 1 : a === 1 ? v.X : v.X * v.Y);
 const lenOf = (v: Volume, a: number) => (a === 0 ? v.X : a === 1 ? v.Y : v.Z);
 
-/** 推拉一面：外推（一維模擬，所有排取最小）、內縮（結構沿這一軸的厚度 − 1）、鄰居。 */
+/** 選到的每個結構內縮幾格會整個消失（每一排一步拿掉一格：最厚的那一排有幾格）。取最小的。 */
+function vanishSteps(s: EditState, keys: string[], a: number): number {
+  const { X, Y } = s.vol;
+  const st = strideOf(s.vol, a);
+  let min = Infinity;
+  for (const key of keys) {
+    const ci = s.L.comps.findIndex((c) => c.key === key);
+    if (ci < 0) continue;
+    const cb = s.L.comps[ci].bbox;
+    const cl = [cb.x0, cb.y0, cb.z0];
+    const ch = [cb.x1, cb.y1, cb.z1];
+    const [u, v] = [0, 1, 2].filter((k) => k !== a);
+    const p = [0, 0, 0];
+    let max = 0;
+    for (p[u] = cl[u]; p[u] <= ch[u]; p[u]++)
+      for (p[v] = cl[v]; p[v] <= ch[v]; p[v]++) {
+        p[a] = cl[a];
+        const base = (p[2] * Y + p[1]) * X + p[0];
+        let n = 0;
+        for (let t = 0; t <= ch[a] - cl[a]; t++) if (s.L.labels[base + t * st] === ci) n++;
+        if (n > max) max = n;
+      }
+    if (max && max < min) min = max;
+  }
+  return min;
+}
+
+const roomOf = (s: EditState, box: { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }, done: number, stop: Block | null | undefined, max: number): Room => ({
+  n: done,
+  stop: stop && stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : (stop ?? null),
+  ...(done >= max ? { more: true } : {}),
+});
+
+/**
+ * 推拉一面（plan v21 §3）：外推最多幾格＝實際在裁切範圍裡算 PROBE_MAX 格；內縮＝縮到還不會有結構消失為止；
+ * 這一步會帶動誰＝第一格會動的每一排往外一路走，沒固定的結構＝跟著移動，盡頭是固定的結構（中間沒有空氣可以吸收）＝會被推到。
+ */
 function probePush(s: EditState, req: ProbeReq & { dir: Vec3 }): Probe {
   const dir = req.dir;
   const a = dir[0] ? 0 : dir[1] ? 1 : 2;
   const sg = dir[a] > 0 ? 1 : -1;
   const st = strideOf(s.vol, a);
   const len = lenOf(s.vol, a);
-  const liner = linerLUT(req.liners);
-  const can = new Set<number>();
-  const thin = new Set<number>();
-  let out: Room = { n: PROBE_MAX, stop: null, more: true };
-  let inn: Room = { n: Infinity, stop: { why: 'min' } };
-  const row: number[] = [];
-  for (const key of new Set(req.keys)) {
-    const ci = s.L.comps.findIndex((c) => c.key === key);
-    if (ci < 0) continue;
-    const comp = s.L.comps[ci];
-    const mat = comp.mat;
-    const ext = a === 0 ? comp.bbox.x1 - comp.bbox.x0 : a === 1 ? comp.bbox.y1 - comp.bbox.y0 : comp.bbox.z1 - comp.bbox.z0;
-    if (ext < inn.n) inn = { n: ext, stop: { why: 'min' } };
-    forEachFace(s, ci, a, sg, (base, c) => {
-      row.length = 0;
-      for (let k = 1; k <= PROBE_MAX + ADJ_WINDOW; k++) {
-        const t = c + k * sg;
-        if (t < 0 || t >= len) {
-          row.push(-1);
-          break;
-        }
-        row.push(s.vol.data[base + k * sg * st]);
-      }
-      // 鄰居：跟著的薄層串、串外面那一層（留在原地＝緊貼的那一層）
-      let k = 0;
-      while (k < row.length && row[k] >= 0 && !empty(row[k]) && row[k] !== mat && liner[row[k]]) can.add(row[k++]);
-      if (!req.follow) k = 0;
-      const b = row[k];
-      if (b !== undefined && b >= 0 && !empty(b) && b !== mat) thin.add(b);
-      if (out.n === 0) return;
-      const r = simGrowRow(row, out.n, mat, req.follow, liner);
-      if (r.done < out.n) {
-        // 擋住的那一格：row 的第 k 格＝最外側那一格往外 k + 1 格（推了 done 格之後，那一格的內容是原始的那一格往外 done 格的位置）
-        const at = r.stop?.at !== undefined ? base + (r.stop.at + 1) * sg * st : undefined;
-        out = { n: r.done, stop: r.stop && { ...r.stop, ...(at !== undefined ? { at } : {}) } };
-      }
-    });
-  }
-  // plan v19 §3.1：旁邊相連的薄層排也跟著動。它們也可能先被擋、也有自己的鄰居，所以實際在裁切範圍裡算一次：
-  // 跟著移動＝外推 PROBE_MAX 格的結果就是「最多幾格」；留在原地只算 1 格，為了知道旁邊有沒有薄層可以跟。
-  const trialOp: AdjPushOp = { kind: 'push', keys: [...new Set(req.keys)], scope: fullScope(s.vol), dir, n: req.follow ? PROBE_MAX : 1, follow: true, backfill: 'outer', policy: 'adjacent', liners: req.liners };
+  const keys = [...new Set(req.keys)];
+  const follow = new Set<number>();
+  const hit = new Set<number>();
+  let out: Room = { n: 0, stop: null };
+  const trialOp: AdjPushOp = { kind: 'push', keys, scope: fullScope(s.vol), dir, n: PROBE_MAX, follow: true, backfill: 'outer', policy: 'adjacent', locks: req.locks };
   const { box, trial } = previewBoxTrial(s, trialOp);
   if (box && trial) {
-    if (req.follow) {
-      const done = trial.report.done ?? 0;
-      const stop = trial.report.stop ?? null;
-      out = { n: done, stop: stop && stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : stop, ...(done >= PROBE_MAX ? { more: true } : {}) };
-    }
+    out = roomOf(s, box, trial.report.done ?? 0, trial.report.stop, PROBE_MAX);
+    const table = lockTable(s.L, req.locks);
     const vol = cropVolume(s.vol, box);
-    const cst = strideOf(vol, a);
-    const clen = lenOf(vol, a);
-    const cOf = (i: number) => (a === 0 ? i % vol.X : a === 1 ? ((i - (i % vol.X)) / vol.X) % vol.Y : Math.floor(i / (vol.X * vol.Y)));
-    for (const key of trialOp.keys) {
+    const lock = cropLock(s.L, table, s.vol, box);
+    const { X, Y } = s.vol;
+    const cOf = (i: number) => (a === 0 ? i % X : a === 1 ? ((i - (i % X)) / X) % Y : Math.floor(i / (X * Y)));
+    for (const key of keys) {
+      const self = s.L.comps.findIndex((c) => c.key === key);
       const mask = cropMask(s.L, new Set([key]), s.vol, box);
-      const first = mask.indexOf(1);
-      if (first < 0) continue;
-      const mat = vol.data[first];
-      for (const i of pushCutCells(vol, mask, dir, true, req.liners)) {
-        if (mask[i]) continue;
-        can.add(vol.data[i]);
-        if (!req.follow) continue;
-        // 這一排外面那串薄層也跟著；串外面那一層厚度會變
-        let c = cOf(i) + sg;
-        let j = i + sg * cst;
-        for (; c >= 0 && c < clen; c += sg, j += sg * cst) {
-          const m = vol.data[j];
-          if (empty(m) || m === mat || !liner[m]) break;
-          can.add(m);
+      for (const g of globalIndex(box, s.vol, pushCutCells(vol, mask, dir, lock))) {
+        if (s.L.labels[g] !== self && s.L.labels[g] >= 0) follow.add(s.L.labels[g]);
+        let air = false;
+        let j = g + sg * st;
+        for (let c = cOf(g) + sg; c >= 0 && c < len; c += sg, j += sg * st) {
+          const l = s.L.labels[j];
+          if (l === self) break;
+          if (l >= 0 && table[l]) {
+            if (!air) hit.add(l);
+            break;
+          }
+          if (empty(s.vol.data[j])) air = true;
+          else if (l >= 0) follow.add(l);
         }
-        if (c >= 0 && c < clen && !empty(vol.data[j]) && vol.data[j] !== mat) thin.add(vol.data[j]);
       }
     }
   }
-  if (inn.n === Infinity) inn = { n: 0, stop: { why: 'min' } };
-  return { follow: req.follow ? sorted(can) : [], thin: sorted(thin), canFollow: can.size > 0, out, in: inn };
+  const v = vanishSteps(s, keys, a);
+  const keyOf = (set: Set<number>) => [...set].sort((p, q) => p - q).map((l) => s.L.comps[l].key);
+  return { follow: keyOf(follow), hit: keyOf(hit), out, in: { n: v === Infinity ? 0 : v - 1, stop: { why: 'min' } }, ...(v === Infinity ? {} : { vanishAt: v }) };
 }
 
-/**
- * 整塊平移：鄰居（整圈薄層＝跟著；集合外六鄰接＝厚度會變）與六個方向各最多幾格。
- * 搬的集合是剛體：推了 k 格之後，集合每一個前緣格子前面那一格，就是原始陣列裡往前 k 格的那一格（前面還沒被吃到），
- * 所以每個前緣沿方向掃一次原始陣列就知道第幾格會被擋（O(前緣 × 上限)），不必真的一格一格搬。
- * 同一排前面還有集合的格子（中間夾著別的材質）：那一段會跟著一起往前移，只看第一格。
- */
+/** 整塊平移：六個方向各實際算 PROBE_MOVE_MAX 格，看最多能搬幾格、被誰擋。 */
 function probeMove(s: EditState, req: ProbeReq): Probe {
-  const liner = linerLUT(req.liners);
-  const fol = new Set<number>();
-  const thin = new Set<number>();
   const keys = [...new Set(req.keys)];
-  const rooms: Room[] = PROBE_DIRS.map(() => ({ n: PROBE_MOVE_MAX, stop: null, more: true }));
-  const b0 = previewBox(s, { kind: 'translate', keys, scope: fullScope(s.vol), d: [1, 0, 0], backfill: 'outer', follow: req.follow, policy: 'adjacent', liners: req.liners });
-  if (!b0) return { follow: [], thin: [], canFollow: false, dirs: rooms.map(() => ({ n: 0, stop: null })) };
-  // 前緣往前最多讀 PROBE_MOVE_MAX＋1 格：外框六面都多留這麼多（夾到模型邊界；夾到的那一面才是真的邊界）
-  const m = PROBE_MOVE_MAX + 2;
-  const box = {
-    x0: Math.max(0, b0.x0 - m), y0: Math.max(0, b0.y0 - m), z0: Math.max(0, b0.z0 - m),
-    x1: Math.min(s.vol.X - 1, b0.x1 + m), y1: Math.min(s.vol.Y - 1, b0.y1 + m), z1: Math.min(s.vol.Z - 1, b0.z1 + m),
-  };
-  const vol = cropVolume(s.vol, box);
-  const { X, Y, Z, data } = vol;
-  const dims = [X, Y, Z];
-  let canFollow = false;
-  for (const k of keys) {
-    const S = cropMask(s.L, new Set([k]), s.vol, box);
-    const first = S.indexOf(1);
-    if (first < 0) continue;
-    const mat = data[first];
-    if (req.follow) shellFlood(vol, S, mat, liner);
-    else if (!canFollow) {
-      // 跟著移動關著：另外 flood 一次，只為了知道有沒有薄層貼著
-      const T = S.slice();
-      canFollow = shellFlood(vol, T, mat, liner) > 0;
-    }
-    // 鄰居：集合裡的薄層＝跟著；集合外六鄰接、不是空的也不是同材質＝厚度會變
-    for (let i = 0; i < S.length; i++) {
-      if (!S[i]) continue;
-      if (S[i] === 2) fol.add(data[i]);
-      const x = i % X;
-      const y = ((i - x) / X) % Y;
-      const z = (i - x - y * X) / (X * Y);
-      const nb = [x > 0 ? i - 1 : -1, x < X - 1 ? i + 1 : -1, y > 0 ? i - X : -1, y < Y - 1 ? i + X : -1, z > 0 ? i - X * Y : -1, z < Z - 1 ? i + X * Y : -1];
-      for (const j of nb) if (j >= 0 && !S[j] && !empty(data[j]) && data[j] !== mat) thin.add(data[j]);
-    }
-    // 六個方向：每個軸每一排走一次，收集合的連續段；每段的兩端各是一個前緣（O(裁切範圍)，不必對每個前緣再掃整排）
-    PROBE_DIRS.forEach((d, di) => {
-      const a = d[0] ? 0 : d[1] ? 1 : 2;
-      const sg = d[a];
-      const st = a === 0 ? 1 : a === 1 ? X : X * Y;
-      const len = dims[a];
-      const [u, v] = [0, 1, 2].filter((k) => k !== a);
-      const p = [0, 0, 0];
-      const runs: number[] = [];
-      for (p[u] = 0; p[u] < dims[u]; p[u]++)
-        for (p[v] = 0; p[v] < dims[v]; p[v]++) {
-          if (rooms[di].n === 0) return;
-          p[a] = 0;
-          const base = (p[2] * Y + p[1]) * X + p[0];
-          runs.length = 0;
-          for (let t = 0; t < len; t++)
-            if (S[base + t * st] && (t === 0 || !S[base + (t - 1) * st])) {
-              let e = t;
-              while (e + 1 < len && S[base + (e + 1) * st]) e++;
-              runs.push(t, e);
-              t = e;
-            }
-          if (!runs.length) continue;
-          const nr = runs.length / 2;
-          for (let r = 0; r < nr; r++) {
-            // 前緣：往 sg 走出這一段的第一格；同一排前面還有別段（中間夾著別的材質）＝那一段跟著移，只看第一格
-            const t0 = sg > 0 ? runs[2 * r + 1] + 1 : runs[2 * r] - 1;
-            const ahead = sg > 0 ? r < nr - 1 : r > 0;
-            const room = rooms[di];
-            const lim = ahead ? 1 : room.n;
-            for (let q = 0; q < lim; q++) {
-              const t = t0 + q * sg;
-              let stop: Block | null = null;
-              if (t < 0 || t >= len) stop = { why: 'edge' };
-              else {
-                const mt = data[base + t * st];
-                if (empty(mt)) continue;
-                if (mt === mat) stop = { why: 'self', mat: mt, at: base + t * st };
-                else {
-                  const t2 = t + sg;
-                  if (t2 < 0 || t2 >= len || data[base + t2 * st] !== mt) stop = { why: 'last', mat: mt, at: base + t * st };
-                }
-              }
-              if (stop) {
-                if (q < room.n) rooms[di] = { n: q, stop: stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : stop };
-                break;
-              }
-            }
-          }
-        }
-    });
-  }
-  return { follow: sorted(fol), thin: sorted(thin), canFollow: canFollow || fol.size > 0, dirs: rooms };
+  const dirs = PROBE_DIRS.map((d): Room => {
+    const op: AdjTranslateOp = { kind: 'translate', keys, scope: fullScope(s.vol), d: d.map((v) => v * PROBE_MOVE_MAX) as Vec3, backfill: 'outer', follow: true, policy: 'adjacent', locks: req.locks };
+    const { box, trial } = previewBoxTrial(s, op);
+    if (!box || !trial) return { n: 0, stop: null };
+    return roomOf(s, box, trial.report.done ?? 0, trial.report.stop, PROBE_MOVE_MAX);
+  });
+  return { follow: [], hit: [], dirs };
 }
 
 export function probe(s: EditState, req: ProbeReq): Probe {

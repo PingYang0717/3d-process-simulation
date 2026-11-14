@@ -1,16 +1,17 @@
 // 操作（Op）與重播：純函式，主執行緒與 Worker 共用，可單獨測試。
 // plan v17：只剩推拉一面（push）、整塊平移（translate）、換材質（material）；UI 產生的推拉與平移一律帶 policy 'adjacent'。
 import { newReport } from './kernel';
-import { type Backfill, type Labeled, type Material, type Vec3, type Volume, adjacentMasks, growMask, maskOf, relabel, setMaskMaterial, translateMask } from './volume';
+import { type Backfill, type Labeled, type LockSpec, type Material, type Vec3, type Volume, adjacentMasks, growMask, lockOf, maskOf, relabel, setMaskMaterial, translateMask } from './volume';
 import type { Scope } from './scope';
 
 /** 推面碰到厚的別的材質：block＝擋住、overwrite＝蓋過去（省略＝overwrite）。plan v17 的 UI 不產生這兩種。 */
 export type Policy = 'block' | 'overwrite';
 /**
- * plan v17 §5.4：相鄰材質規則（一步只改緊貼那一層的厚度、至少留 1 格、整面一起擋）。
- * liners＝這一步當時的薄層材質編號（留作紀錄，重算時不依賴外部狀態）。
+ * 相鄰材質規則（plan v17 §5.4；v21 起不分薄層／厚層）：沒固定的外層全部跟著平移，整面一起擋。
+ * locks＝這一步當時固定的結構（留在 Op 裡，重算時不依賴外部狀態）。
+ * liners、follow 是舊版留下來的欄位，不再影響結果。
  */
-export type Adjacent = { policy: 'adjacent'; liners: number[] };
+export type Adjacent = { policy: 'adjacent'; liners?: number[]; locks?: LockSpec[] };
 
 export type PushOp = { kind: 'push'; keys: string[]; scope: Scope; dir: Vec3; n: number; follow: boolean; backfill: Backfill; policy?: Policy };
 /** follow：外面的薄襯層（殼）一起搬；省略＝不帶。 */
@@ -65,7 +66,7 @@ export function applyOp(s: EditState, op: Op, ctx: OpContext): EditState {
     const { dir, n } = adjacentDir(op);
     const masks = [...new Set(op.keys)].map((k) => maskOf(s.L, new Set([k]))).filter((m): m is Uint8Array => !!m);
     const r = newReport();
-    vol = adjacentMasks(s.vol, masks, op.kind, dir, n, op.follow, op.liners, r);
+    vol = adjacentMasks(s.vol, masks, op.kind, dir, n, lockOf(s.L, op.locks), r);
     if (op.kind === 'translate') shift = dir.map((v) => v * (r.done ?? 0)) as Vec3;
     return { vol, L: relabel(s.vol, s.L, mask, shift, vol, ctx.matName, ctx.newKey) };
   }

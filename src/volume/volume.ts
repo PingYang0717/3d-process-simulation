@@ -2,7 +2,7 @@
 // index = (z·Y + y)·X + x，對應 numpy C order 的 shape (Z, Y, X)。
 
 import { type Scope, axisIndex, scopeBox } from './scope';
-import { type Block, type Report, LINER_MAX, addCell, fillAt, linerLUT, moveCells, removeCell, shellFlood, shellOf } from './kernel';
+import { type Block, type Report, LINER_MAX, addCell, fillAt, moveCells, removeCell, shellOf } from './kernel';
 
 export { LINER_MAX, fillAt };
 import { BOTH, MeshBuilder, emitFaces } from './meshBuilder';
@@ -449,20 +449,12 @@ function forEachRow(v: Volume, a: number, fn: (base: number) => Block | null | v
   return null;
 }
 
-/** 一排上 mask 在 s 方向最外側那一格的座標（沿 a）；沒有回傳 -1。 */
-function outerAt(m: Uint8Array, base: number, st: number, len: number, s: number) {
-  if (s > 0) {
-    for (let t = len - 1; t >= 0; t--) if (m[base + t * st]) return t;
-  } else for (let t = 0; t < len; t++) if (m[base + t * st]) return t;
-  return -1;
-}
-
 const emptyMat = (m: number) => m === AIR || m === VOID;
 
 /**
  * 推拉時各排的「切口」（plan v19 §3.1）。排的編號 r = pw × Du + pu（u、w＝另外兩個軸，由小到大）。
  * cut＝結構自己每一排在 s 方向最外側那一格的座標（沒有＝-1），一步一步跟著更新，不必每一步重掃整個陣列；
- * opp＝反方向最外側（只有內縮用來算厚度）；all／order＝這一步實際要動的排（結構的排＋旁邊跟著的薄層排）。
+ * all／order＝這一步實際要動的排（結構的排＋旁邊跟著動的排）。
  */
 interface PushRows {
   su: number;
@@ -470,23 +462,50 @@ interface PushRows {
   Du: number;
   Dw: number;
   cut: Int32Array;
-  opp: Int32Array | null;
   all: Int32Array;
   order: number[];
   seeds: number[];
 }
 
-/** adjacentMasks 的讀取紀錄（裁切範圍用）：動到的排在另外兩軸的範圍、沿推的方向最遠讀到哪一格（可以出界）。 */
+/** adjacentMasks 的紀錄（裁切範圍用）：動到的排在另外兩軸的範圍。 */
 export interface PushTrace {
   ulo: number;
   uhi: number;
   wlo: number;
   whi: number;
-  far: number;
 }
-export const newPushTrace = (s: number): PushTrace => ({ ulo: Infinity, uhi: -Infinity, wlo: Infinity, whi: -Infinity, far: s > 0 ? -Infinity : Infinity });
+export const newPushTrace = (): PushTrace => ({ ulo: Infinity, uhi: -Infinity, wlo: Infinity, whi: -Infinity });
 
-function pushRowsOf(v: Volume, m: Uint8Array, a: number, s: number, withOpp: boolean): PushRows {
+/** 固定（plan v21 §2）：lock 陣列每一格 0＝沒固定；1–254＝可被壓薄、這一排最少留幾格；LOCK_FULL＝完全鎖定。 */
+export const LOCK_FULL = 255;
+/** 一個固定的結構：[key, 最少留幾格（LOCK_FULL＝完全鎖定）]。 */
+export type LockSpec = [key: string, keep: number];
+const lockValue = (keep: number) => (keep >= LOCK_FULL ? LOCK_FULL : Math.max(1, Math.min(LOCK_FULL - 1, Math.round(keep))));
+
+/** 整個陣列的 lock（對照版本與測試用；正式路徑在裁切範圍裡做，見 preview.ts 的 cropLock）。 */
+export function lockOf(L: Labeled, locks: LockSpec[] | undefined): Uint8Array | null {
+  if (!locks?.length) return null;
+  const table = lockTable(L, locks);
+  const out = new Uint8Array(L.labels.length);
+  for (let i = 0; i < out.length; i++) {
+    const l = L.labels[i];
+    if (l >= 0) out[i] = table[l];
+  }
+  return out;
+}
+/** 每個結構（comps 的 index）的 lock 值。 */
+export function lockTable(L: Labeled, locks: LockSpec[] | undefined): Uint8Array {
+  const table = new Uint8Array(L.comps.length);
+  if (!locks?.length) return table;
+  const by = new Map(locks);
+  L.comps.forEach((c, i) => {
+    const k = by.get(c.key);
+    if (k !== undefined) table[i] = lockValue(k);
+  });
+  return table;
+}
+
+function pushRowsOf(v: Volume, tag: Uint16Array, id: number, a: number, s: number): PushRows {
   const u = a === 0 ? 1 : 0;
   const w = a === 2 ? 1 : 2;
   const su = axisStride(v, u);
@@ -496,38 +515,55 @@ function pushRowsOf(v: Volume, m: Uint8Array, a: number, s: number, withOpp: boo
   const st = axisStride(v, a);
   const len = axisLength(v, a);
   const cut = new Int32Array(Du * Dw);
-  const opp = withOpp ? new Int32Array(Du * Dw) : null;
   for (let pw = 0, r = 0; pw < Dw; pw++)
     for (let pu = 0; pu < Du; pu++, r++) {
       const base = pu * su + pw * sw;
-      cut[r] = outerAt(m, base, st, len, s);
-      if (opp) opp[r] = cut[r] < 0 ? -1 : outerAt(m, base, st, len, -s);
+      let c = -1;
+      if (s > 0) {
+        for (let t = len - 1; t >= 0; t--) if (tag[base + t * st] === id) { c = t; break; }
+      } else for (let t = 0; t < len; t++) if (tag[base + t * st] === id) { c = t; break; }
+      cut[r] = c;
     }
-  return { su, sw, Du, Dw, cut, opp, all: new Int32Array(Du * Dw), order: [], seeds: [] };
+  return { su, sw, Du, Dw, cut, all: new Int32Array(Du * Dw), order: [], seeds: [] };
 }
 
 /**
- * 這一步要動的每一排（plan v19 §3.1）：結構的排＝最外側那一格；跟著移動時，從切口往旁邊（同一層）找相連的薄層，
- * 那一排也在同一層切開——包在外面的薄層整圈一起動（側壁推出去時蓋在上面的那一段、轉角也跟著）。
- * 往旁邊碰到空的、不是薄層、或和結構同材質的就停。一排可以從好幾個切口走到時取最外側的那一層
+ * 這一步要動的每一排（plan v21 §3）：結構的排＝最外側那一格。外面會跟著動的材質（F＝這幾排往外一路碰到的、
+ * 沒固定的材質）如果也包到旁邊，就從切口往旁邊（同一層）沿著 F 找過去，那些排也在同一層切開——
+ * 包在外面的整圈一起動，轉角不會斷開。固定的格子、空的、結構自己都不算。一排可以從好幾個切口走到時取最外側的那一層
  * （由外往內一層一層 flood），結果和掃描順序無關。回傳結構的排有幾排（order 的前幾個）。
  */
-function pushCuts(v: Volume, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, pr: PushRows, trace?: PushTrace): number {
+function pushCuts(v: Volume, tag: Uint16Array, id: number, lock: Uint8Array, a: number, s: number, pr: PushRows, F: Uint8Array, trace?: PushTrace): number {
   const { data } = v;
   const { su, sw, Du, Dw, cut, all, order, seeds } = pr;
   const st = axisStride(v, a);
+  const len = axisLength(v, a);
   all.set(cut);
   order.length = 0;
+  F.fill(0);
+  let anyF = false;
   let uniform = true;
   let first = -1;
   for (let r = 0; r < cut.length; r++) {
-    if (cut[r] < 0) continue;
-    if (first < 0) first = cut[r];
-    else if (cut[r] !== first) uniform = false;
+    const c = cut[r];
+    if (c < 0) continue;
+    if (first < 0) first = c;
+    else if (c !== first) uniform = false;
     order.push(r);
+    const pu = r % Du;
+    const base = pu * su + ((r - pu) / Du) * sw;
+    for (let q = c + s; q >= 0 && q < len; q += s) {
+      const i = base + q * st;
+      if (tag[i] === id || lock[i]) break;
+      const mm = data[i];
+      if (!emptyMat(mm) && !F[mm]) {
+        F[mm] = 1;
+        anyF = true;
+      }
+    }
   }
   const nStruct = order.length;
-  if (follow && nStruct) {
+  if (anyF && nStruct) {
     seeds.length = 0;
     for (let k = 0; k < nStruct; k++) seeds.push(order[k]);
     if (!uniform) seeds.sort((p, q) => s * (cut[q] - cut[p]) || p - q);
@@ -535,8 +571,9 @@ function pushCuts(v: Volume, a: number, s: number, selfMat: number, follow: bool
     const visit = (nr: number, L: number) => {
       if (all[nr] >= 0) return;
       const pu = nr % Du;
-      const mm = data[pu * su + ((nr - pu) / Du) * sw + L * st];
-      if (emptyMat(mm) || mm === selfMat || !liner[mm]) return;
+      const i = pu * su + ((nr - pu) / Du) * sw + L * st;
+      const mm = data[i];
+      if (emptyMat(mm) || !F[mm] || lock[i] || tag[i] === id) return;
       all[nr] = L;
       order.push(nr);
       stack.push(nr);
@@ -567,14 +604,14 @@ function pushCuts(v: Volume, a: number, s: number, selfMat: number, follow: bool
   return nStruct;
 }
 
-/** 第一格會動到的每一排的切口（index；結構的排在前、旁邊跟著的薄層排在後）。試算列鄰居用。 */
-export function pushCutCells(vol: Volume, mask: Uint8Array, dir: Vec3, follow: boolean, liners: number[]): number[] {
+/** 第一格會動到的每一排的切口（index；結構的排在前、旁邊跟著動的排在後）。試算列鄰居用。 */
+export function pushCutCells(vol: Volume, mask: Uint8Array, dir: Vec3, lock: Uint8Array | null): number[] {
   const a = dir[0] ? 0 : dir[1] ? 1 : 2;
   const s = dir[a] > 0 ? 1 : -1;
-  const first = mask.indexOf(1);
-  if (first < 0) return [];
-  const pr = pushRowsOf(vol, mask, a, s, false);
-  pushCuts(vol, a, s, vol.data[first], follow, linerLUT(liners), pr);
+  const tag = new Uint16Array(mask.length);
+  for (let i = 0; i < mask.length; i++) if (mask[i]) tag[i] = 1;
+  const pr = pushRowsOf(vol, tag, 1, a, s);
+  pushCuts(vol, tag, 1, lock ?? new Uint8Array(mask.length), a, s, pr, new Uint8Array(256));
   const st = axisStride(vol, a);
   return pr.order.map((r) => {
     const pu = r % pr.Du;
@@ -583,57 +620,70 @@ export function pushCutCells(vol: Volume, mask: Uint8Array, dir: Vec3, follow: b
 }
 
 /**
- * 外推一格（整面一起）：先掃過每一排做 canTake，有一排被擋就整面不動、回傳原因；全部可以才寫入：
- * 跟著移動時貼著的薄層整串往外移一格（蓋掉 b），切口往外那一格變成切口那一格的材質（結構的排＝結構）。v.data 與 m 原地改。
+ * 外推一格（整面一起；plan v21 §3）：每一排從切口往外，一路到模型邊界、結構自己或固定的格子為止都是「跟著動的」
+ * （中間的空氣也算）。位移由這一串最外面那一格空氣吸收；沒有空氣才輪到盡頭：
+ * 模型邊界＝最外面那個材質少一格（這一排至少要留 1 格）；固定的＝它讓出一格（這一排不能少於它的最少厚度，完全鎖定＝擋住）；
+ * 結構自己＝擋住。先掃過每一排，有一排被擋就整面不動、回傳原因；全部可以才寫入。data／tag／lock 原地改。
  */
-function grow1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, pr: PushRows, plan: number[], report?: Report, trace?: PushTrace): Block | null {
+function grow1(v: Volume, tag: Uint16Array, id: number, lock: Uint8Array, a: number, s: number, pr: PushRows, plan: number[], F: Uint8Array, report?: Report, trace?: PushTrace): Block | null {
   const { data } = v;
   const st = axisStride(v, a);
   const len = axisLength(v, a);
-  const nStruct = pushCuts(v, a, s, selfMat, follow, liner, pr, trace);
+  const nStruct = pushCuts(v, tag, id, lock, a, s, pr, F, trace);
   const { su, sw, Du, all, order, cut } = pr;
-  const far = (q: number) => {
-    if (trace && (s > 0 ? q > trace.far : q < trace.far)) trace.far = q;
-  };
   plan.length = 0;
   for (const r of order) {
     const pu = r % Du;
     const base = pu * su + ((r - pu) / Du) * sw;
     const c = all[r];
     const tc = c + s;
-    far(tc);
     if (tc < 0 || tc >= len) return { why: 'edge' };
-    let k = 0;
-    if (follow)
-      for (;;) {
-        const q = tc + k * s;
-        if (q < 0 || q >= len) break;
-        const mm = data[base + q * st];
-        if (emptyMat(mm) || mm === selfMat || !liner[mm]) break;
-        k++;
-      }
-    const bc = tc + k * s;
-    far(bc);
-    if (bc < 0 || bc >= len) return { why: 'edge' };
-    const b = base + bc * st;
-    const mb = data[b];
-    if (!emptyMat(mb)) {
-      if (mb === selfMat) return { why: 'self', mat: mb, at: b };
-      const b2c = bc + s;
-      far(b2c);
-      if (b2c < 0 || b2c >= len || data[base + b2c * st] !== mb) return { why: 'last', mat: mb, at: b };
+    let q = tc;
+    let air = -1;
+    for (; q >= 0 && q < len; q += s) {
+      const i = base + q * st;
+      if (tag[i] === id || lock[i]) break;
+      if (emptyMat(data[i])) air = q;
     }
-    plan.push(base + tc * st, k);
+    let W: number;
+    let unlock = 0;
+    if (air >= 0) W = air;
+    else if (q < 0 || q >= len) {
+      // 一路到模型邊界都沒有空氣：最外面那一格掉出模型，那個材質在這一排至少要留 1 格
+      const last = q - s;
+      const li = base + last * st;
+      if (last === tc || data[li - s * st] !== data[li]) return { why: 'last', mat: data[li], at: li };
+      W = last;
+    } else {
+      const i = base + q * st;
+      if (tag[i] === id) return { why: 'self', mat: data[i], at: i };
+      const keep = lock[i];
+      if (keep === LOCK_FULL) return { why: 'lock', mat: data[i], at: i, keep };
+      let run = 1;
+      for (let p = q + s; run <= keep && p >= 0 && p < len; p += s) {
+        const j = base + p * st;
+        if (!lock[j] || data[j] !== data[i]) break;
+        run++;
+      }
+      if (run - 1 < keep) return { why: 'lock', mat: data[i], at: i, keep };
+      W = q;
+      unlock = 1;
+    }
+    plan.push(base + tc * st, base + W * st, unlock);
   }
   const d = s * st;
-  for (let p = 0; p < plan.length; p += 2) {
+  for (let p = 0; p < plan.length; p += 3) {
     const t = plan[p];
-    const k = plan[p + 1];
-    for (let j = k; j > 0; j--) data[t + j * d] = data[t + (j - 1) * d];
+    const wi = plan[p + 1];
+    for (let j = wi; j !== t; j -= d) {
+      data[j] = data[j - d];
+      tag[j] = tag[j - d];
+    }
     data[t] = data[t - d];
-    if (m[t - d]) m[t] = 1;
+    tag[t] = tag[t - d];
+    if (plan[p + 2]) lock[wi] = 0;
     if (report) {
-      if (k) report.pushed++;
+      if (wi !== t) report.pushed++;
       else report.filled++;
     }
   }
@@ -641,50 +691,64 @@ function grow1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, 
   return null;
 }
 
+/** shrink1：這個結構已經一格都不剩。 */
+const GONE: Block = { why: 'min' };
+
 /**
- * 內縮一格：每一排切口那一格拿掉；跟著移動時外面那串薄層整串往內移一格，最外面空出來的那一格填它外面緊鄰的材質
- * （出界就維持原樣；沒有薄層又出界＝空氣）。結構在這個方向只剩 1 格厚時擋下（min）。
+ * 內縮一格（plan v21 §3）：每一排拿掉切口那一格，外面跟著動的那一串整串往內移一格。串的盡頭空出來的那一格：
+ * 串裡有空氣＝最外面那一格空氣多一格（只有它裡面的往內移，和外推互為反向）；模型邊界＝最外面那個材質補一格（沒有串＝空氣）；
+ * 可被壓薄的固定結構＝它補回來；
+ * 完全鎖定的＝留空（report.gaps 記下材質）。可以一路縮到消失（上層決定要不要先問）；已經消失＝回傳 GONE。
  */
-function shrink1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, pr: PushRows, report?: Report, trace?: PushTrace): Block | null {
+function shrink1(v: Volume, tag: Uint16Array, id: number, lock: Uint8Array, a: number, s: number, pr: PushRows, F: Uint8Array, report?: Report, trace?: PushTrace): Block | null {
   const { data } = v;
   const st = axisStride(v, a);
   const len = axisLength(v, a);
+  const nStruct = pushCuts(v, tag, id, lock, a, s, pr, F, trace);
+  if (!nStruct) return GONE;
   const { su, sw, Du, all, order, cut } = pr;
-  const opp = pr.opp!;
-  let lo = len;
-  let hi = -1;
-  for (let r = 0; r < cut.length; r++) {
-    if (cut[r] < 0) continue;
-    const c0 = Math.min(cut[r], opp[r]);
-    const c1 = Math.max(cut[r], opp[r]);
-    if (c0 < lo) lo = c0;
-    if (c1 > hi) hi = c1;
-  }
-  if (hi < 0 || hi - lo < 1) return { why: 'min' };
-  const nStruct = pushCuts(v, a, s, selfMat, follow, liner, pr, trace);
   for (const r of order) {
     const pu = r % Du;
     const base = pu * su + ((r - pu) / Du) * sw;
     const c = all[r];
-    const ci = base + c * st;
-    let to = ci;
-    let toc = c;
-    let k = 0;
-    if (follow)
-      for (let q = c + s; q >= 0 && q < len; q += s) {
-        const j = base + q * st;
-        const mm = data[j];
-        if (emptyMat(mm) || mm === selfMat || !liner[mm]) break;
-        data[to] = mm;
-        to = j;
-        toc = q;
-        k++;
+    // 先看這一串到哪裡、最外面那一格空氣在哪裡
+    let q = c + s;
+    let air = -1;
+    for (; q >= 0 && q < len; q += s) {
+      const j = base + q * st;
+      if (tag[j] === id || lock[j]) break;
+      if (emptyMat(data[j])) air = q;
+    }
+    // 有空氣＝外推時是它吸收的，內縮就還給它：只有切口到那一格空氣之間的往內移一格（和外推互為反向）
+    const end = air >= 0 ? air + s : q;
+    let to = base + c * st;
+    for (let t = c + s; t !== end; t += s) {
+      const j = base + t * st;
+      data[to] = data[j];
+      tag[to] = tag[j];
+      to = j;
+    }
+    const k = (end - c - s) / s;
+    if (air >= 0) {
+      // to＝那一格空的：內容不動（空氣還是空洞照舊），等於它多了一格
+      tag[to] = 0;
+    } else if (q < 0 || q >= len) {
+      if (!k) {
+        data[to] = AIR;
+        tag[to] = 0;
       }
-    const bc = toc + s;
-    if (trace && (s > 0 ? bc > trace.far : bc < trace.far)) trace.far = bc;
-    if (bc >= 0 && bc < len) data[to] = data[base + bc * st];
-    else if (!k) data[to] = AIR;
-    if (m[ci]) m[ci] = 0;
+    } else {
+      const j = base + q * st;
+      if (lock[j] && lock[j] !== LOCK_FULL) {
+        data[to] = data[j];
+        tag[to] = 0;
+        lock[to] = lock[j];
+      } else {
+        if (lock[j] && report) (report.gaps ??= []).includes(data[j]) || report.gaps!.push(data[j]);
+        data[to] = AIR;
+        tag[to] = 0;
+      }
+    }
     if (report) report.removed++;
   }
   // 結構的排：新的最外側＝往內第一個還在的格子（這一排拿光了＝-1）
@@ -692,80 +756,19 @@ function shrink1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number
     const r = order[k];
     const pu = r % Du;
     const base = pu * su + ((r - pu) / Du) * sw;
-    let c = cut[r];
-    if (c === opp[r]) c = -1;
-    else {
-      c -= s;
-      while (!m[base + c * st]) c -= s;
-    }
-    cut[r] = c;
+    let c = cut[r] - s;
+    while (c >= 0 && c < len && tag[base + c * st] !== id) c -= s;
+    cut[r] = c >= 0 && c < len ? c : -1;
   }
   return null;
 }
 
 /**
- * 整塊搬一格（方向 s，沿軸 a）：要搬的集合＝結構（跟著移動時加上 shellFlood 收到的整圈薄層）。
- * 集合裡每一格往前一格不在集合裡就做 canTake，任何一格被擋整步不做；可以的話整個集合往前搬一格，
- * 空出來的每一格填「往後走到集合外的第一格」的材質（出界填空氣）。m（只有結構）跟著搬。
- */
-function move1(v: Volume, m: Uint8Array, a: number, s: number, selfMat: number, follow: boolean, liner: Uint8Array, S: Uint8Array, row: Uint8Array, report?: Report): Block | null {
-  const { data } = v;
-  const st = axisStride(v, a);
-  const len = axisLength(v, a);
-  S.set(m);
-  if (follow) shellFlood(v, S, selfMat, liner);
-  const blk = forEachRow(v, a, (base) => {
-    for (let t = 0; t < len; t++) {
-      const i = base + t * st;
-      if (!S[i]) continue;
-      const tc = t + s;
-      if (tc < 0 || tc >= len) return { why: 'edge' };
-      const ti = base + tc * st;
-      if (S[ti]) continue;
-      // canTake 沿 a 往前：出界已處理；空的可以；同材質擋；否則再往前一格要同材質
-      const mt = data[ti];
-      if (emptyMat(mt)) continue;
-      if (mt === selfMat) return { why: 'self', mat: mt, at: ti };
-      const t2 = tc + s;
-      if (t2 < 0 || t2 >= len || data[base + t2 * st] !== mt) return { why: 'last', mat: mt, at: ti };
-    }
-  });
-  if (blk) return blk;
-  forEachRow(v, a, (base) => {
-    let any = false;
-    for (let t = 0; t < len; t++) if (S[base + t * st]) { any = true; break; }
-    if (!any) return;
-    for (let t = 0; t < len; t++) row[t] = data[base + t * st];
-    // 由後往前走：prev＝目前為止最近的集合外那一格（後面出界＝空氣）
-    let prev = AIR;
-    for (let t = s > 0 ? 0 : len - 1; t >= 0 && t < len; t += s) {
-      const i = base + t * st;
-      if (S[i]) data[i] = prev;
-      else prev = row[t];
-    }
-    for (let t = 0; t < len; t++) {
-      const i = base + t * st;
-      if (!S[i]) continue;
-      data[i + s * st] = row[t];
-      if (report) report.pushed++;
-    }
-    // 結構的 mask 跟著搬（由前往後寫，不會蓋到還沒讀的）
-    for (let t = s > 0 ? len - 1 : 0; t >= 0 && t < len; t -= s) {
-      const i = base + t * st;
-      if (m[i]) {
-        m[i] = 0;
-        m[i + s * st] = 1;
-      }
-    }
-  });
-  return null;
-}
-
-/**
- * 相鄰材質規則的推拉一面／整塊平移（plan v17 §5.4.4）：一格一格做，每一格對每個 mask（每個選到的結構）依序做；
+ * 相鄰材質規則的推拉一面／整塊平移（plan v17 §5.4.4、v21 §3）：一格一格做，每一格對每個 mask（每個選到的結構）依序做；
  * 全部做得到這一格才算完成，否則丟掉這一格、停在已經做完的格數（report.done、report.stop）。
- * kind 'push'：dir＝哪一面（法線），n > 0 外推、n < 0 內縮。kind 'translate'：dir＝搬的方向（單位向量），n＝格數。
- * masks 原地改成做完之後每個結構的格子。回傳新的陣列（vol 不動）。
+ * kind 'push'：dir＝哪一面（法線），n > 0 外推、n < 0 內縮。kind 'translate'：dir＝搬的方向（單位向量），n＝格數；
+ * 整塊搬一格＝前面那一面外推一格＋後面那一面內縮一格。
+ * lock＝固定的格子（見 LOCK_FULL；null＝沒有）。masks 原地改成做完之後每個結構的格子。回傳新的陣列（vol、lock 不動）。
  */
 export function adjacentMasks(
   vol: Volume,
@@ -773,52 +776,80 @@ export function adjacentMasks(
   kind: 'push' | 'translate',
   dir: Vec3,
   n: number,
-  follow: boolean,
-  liners: number[],
+  lock0: Uint8Array | null,
   report?: Report,
   trace?: PushTrace,
 ): Volume {
   const { X, Y, Z } = vol;
-  const liner = linerLUT(liners);
+  const N = vol.data.length;
   const a = dir[0] ? 0 : dir[1] ? 1 : 2;
   const s = Math.sign(dir[0] + dir[1] + dir[2]) || 1;
   const steps = Math.abs(n);
   const cur: Volume = { X, Y, Z, data: new Uint8Array(vol.data) };
-  const live = masks.filter((m) => m.some((x) => x));
-  const mats = live.map((m) => {
-    const i = m.indexOf(1);
-    return cur.data[i];
+  // 每個選到的結構一個編號（跟著資料一起移動：多選時一個結構被另一個帶動，位置才不會對不上）
+  let tag = new Uint16Array(N);
+  const ids: number[] = [];
+  masks.forEach((m, k) => {
+    let any = false;
+    for (let i = 0; i < N; i++)
+      if (m[i]) {
+        tag[i] = k + 1;
+        any = true;
+      }
+    if (any) ids.push(k + 1);
   });
-  const multi = live.length > 1;
-  const tryV: Volume = multi ? { X, Y, Z, data: new Uint8Array(cur.data.length) } : cur;
-  const tryM = multi ? live.map((m) => new Uint8Array(m.length)) : live;
-  const S = kind === 'translate' ? new Uint8Array(cur.data.length) : new Uint8Array(0);
-  const row = new Uint8Array(Math.max(X, Y, Z));
+  let lock = lock0 ? new Uint8Array(lock0) : new Uint8Array(N);
+  const multi = ids.length > 1;
+  let tryV: Volume = multi ? { X, Y, Z, data: new Uint8Array(N) } : cur;
+  let tryTag = multi ? new Uint16Array(N) : tag;
+  let tryLock = multi ? new Uint8Array(N) : lock;
   const plan: number[] = [];
-  // 每個結構各排的切口：算一次、之後每一步跟著更新（多選在複本上試時，被擋的那一步之後就不再用）
-  const rows = kind === 'push' ? live.map((m) => pushRowsOf(cur, m, a, s, n < 0)) : [];
+  const F = new Uint8Array(256);
+  // 單選的推拉：各排的切口算一次、之後每一步跟著更新；多選與平移每一步重算
+  const cached = kind === 'push' && !multi && ids.length ? pushRowsOf(cur, tag, ids[0], a, s) : null;
+  const alive = ids.map(() => true);
   let done = 0;
   let stop: Block | null = null;
-  for (; done < steps && live.length; done++) {
+  for (; done < steps && ids.length; done++) {
     if (multi) {
       tryV.data.set(cur.data);
-      live.forEach((m, k) => tryM[k].set(m));
+      tryTag.set(tag);
+      tryLock.set(lock);
     }
     let blk: Block | null = null;
-    for (let k = 0; k < live.length && !blk; k++) {
-      if (kind === 'translate') blk = move1(tryV, tryM[k], a, s, mats[k], follow, liner, S, row, report);
-      else if (n > 0) blk = grow1(tryV, tryM[k], a, s, mats[k], follow, liner, rows[k], plan, report, trace);
-      else blk = shrink1(tryV, tryM[k], a, s, mats[k], follow, liner, rows[k], report, trace);
+    let any = false;
+    for (let k = 0; k < ids.length && !blk; k++) {
+      if (!alive[k]) continue;
+      const id = ids[k];
+      let r: Block | null;
+      if (kind === 'translate') {
+        r = grow1(tryV, tryTag, id, tryLock, a, s, pushRowsOf(tryV, tryTag, id, a, s), plan, F, report, trace);
+        if (!r) shrink1(tryV, tryTag, id, tryLock, a, -s, pushRowsOf(tryV, tryTag, id, a, -s), F, undefined, trace);
+      } else {
+        const pr = cached ?? pushRowsOf(tryV, tryTag, id, a, s);
+        r = n > 0 ? grow1(tryV, tryTag, id, tryLock, a, s, pr, plan, F, report, trace) : shrink1(tryV, tryTag, id, tryLock, a, s, pr, F, report, trace);
+      }
+      if (r === GONE) alive[k] = false;
+      else if (r) blk = r;
+      else any = true;
     }
+    if (!blk && !any) blk = { why: 'min' };
     if (blk) {
       stop = blk;
       break;
     }
     if (multi) {
-      cur.data.set(tryV.data);
-      live.forEach((m, k) => m.set(tryM[k]));
+      // 試的那一份變成正式的（交換，不必再複製一次）
+      const d = cur.data;
+      cur.data = tryV.data;
+      tryV.data = d;
+      [tag, tryTag] = [tryTag, tag];
+      [lock, tryLock] = [tryLock, lock];
     }
   }
+  masks.forEach((m, k) => {
+    for (let i = 0; i < N; i++) m[i] = tag[i] === k + 1 ? 1 : 0;
+  });
   if (report) {
     report.done = (report.done ?? 0) + done;
     report.stop = stop;

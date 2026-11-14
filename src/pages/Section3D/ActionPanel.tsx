@@ -1,11 +1,12 @@
-// 右欄上半（plan v17 §5.1、§5.3、§5.5）：三個動作、哪一面、兩顆動作鈕、每次 n 格、相鄰材質開關與小圖、試算的三行、材質清單。
+// 右欄上半（plan v17 §5.1、§5.3、§5.5；v21）：三個動作、哪一面、兩顆動作鈕、每次 n 格、這一步會帶動誰（可以直接固定）、試算的說明、材質清單。
 import { useEffect, useState } from 'react';
 import { Button, InputNumber, Tooltip, Typography } from 'antd';
-import { isVoid } from '../../volume/volume';
+import { type Comp, LOCK_FULL, isVoid } from '../../volume/volume';
 import type { Block } from '../../volume/kernel';
 import { Swatch } from '../../ui/Swatch';
 import { type Editor, STEP_MAX, type Tool } from './editor';
-import { FACES, type FaceName, blockText, faceOf, fixText, limitText, nmText } from './stepWords';
+import { FACES, type FaceName, blockText, faceOf, limitText, namesOf, nmText } from './stepWords';
+import { LockIcon, type OpenCtx } from './LockUi';
 import { PROBE_DIRS, type Room } from '../../volume/probe';
 
 const { Text } = Typography;
@@ -22,30 +23,12 @@ function Kbd({ children }: { children: string }) {
   return <kbd className="kcap">{children}</kbd>;
 }
 
-/** 相鄰材質的小圖：跟著移動＝薄層整層上移、外面那層變薄；留在原地＝緊貼那層變薄。 */
-function NbIcon({ follow }: { follow: boolean }) {
-  return (
-    <svg width="96" height="40" viewBox="0 0 104 46" aria-hidden>
-      {follow ? (
-        <>
-          <rect x="6" y="2" width="92" height="6" fill="#eef0f3" />
-          <rect x="6" y="8" width="92" height="12" fill="#c9b6e8" />
-        </>
-      ) : (
-        <>
-          <rect x="6" y="2" width="92" height="14" fill="#eef0f3" />
-          <rect x="6" y="16" width="92" height="4" fill="#c9b6e8" />
-        </>
-      )}
-      <rect x="6" y="20" width="92" height="24" fill="#e8604c" />
-      <path d="M52 40V26m-5 5 5-6 5 6" stroke="#fff" strokeWidth="2" fill="none" />
-    </svg>
-  );
-}
-
-export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
+export function ActionPanel({ ed, peek, onCtx }: { ed: Editor; peek: boolean; onCtx: OpenCtx }) {
   const sel = ed.selComps.length > 0;
   const off = !sel || peek;
+  /** 選到的裡面已固定的；全部都固定＝不能編輯。 */
+  const lockedSel = ed.selComps.filter((c) => ed.lockMap.has(c.key));
+  const allLocked = sel && lockedSel.length === ed.selComps.length;
   const same = ed.selMat === null ? 0 : ed.comps.filter((c) => c.mat === ed.selMat).length;
   const n = ed.stepN;
   const p = ed.probe;
@@ -55,30 +38,38 @@ export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
   const outN = room(p?.out);
   const inN = room(p?.in);
   const working = !!ed.busy;
-  const canFollow = p ? p.canFollow : true;
-  const names = (ms: number[]) => ms.map(ed.matName).join('、');
   // 試算超過 300 ms 還沒回來：寫「計算中…」（plan v17 §9；結果回來之前按鈕照常可按，真正套用時 Worker 仍會擋）
-  const waiting = sel && !peek && ed.tool !== 'mat' && !p;
+  const waiting = sel && !allLocked && !peek && ed.tool !== 'mat' && !p;
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     setSlow(false);
     if (!waiting) return;
     const t = setTimeout(() => setSlow(true), 300);
     return () => clearTimeout(t);
-  }, [waiting, ed.version, ed.face, ed.follow, ed.tool]);
+  }, [waiting, ed.version, ed.face, ed.tool]);
 
-  const lines: string[] = [];
-  if (p && sel && ed.tool !== 'mat') {
-    if (ed.follow && p.follow.length) lines.push(`跟著移動：${names(p.follow)}`);
-    if (p.thin.length) lines.push(`厚度會變：${names(p.thin)}`);
-    if (ed.tool === 'push' && p.out) {
-      const o = p.out;
-      lines.push(o.n ? `最多可外推 ${o.n}${o.more ? '＋' : ''} 格${o.stop ? `（${limitText(o.stop, ed.matName, who(o.stop))}）` : ''}` : `不能外推：${why(o.stop)}${fixText(o.stop, ed.matName, who(o.stop), ed.follow) ? `（${fixText(o.stop, ed.matName, who(o.stop), ed.follow)}）` : ''}`);
-    }
+  // 這一步會帶動誰：同材質的合成一行（「TiN ×9」），寫出它會怎樣，旁邊可以直接固定／解除（右鍵也可以）
+  const rows: { comps: Comp[]; hit: boolean; keep?: number }[] = [];
+  if (p && sel && ed.tool === 'push')
+    for (const [keys, hit] of [[p.follow, false], [p.hit, true]] as [string[], boolean][])
+      for (const k of keys) {
+        const c = ed.compByKey.get(k);
+        if (!c) continue;
+        const keep = ed.lockMap.get(k);
+        const row = rows.find((r) => r.hit === hit && r.comps[0].mat === c.mat && r.keep === keep);
+        if (row) row.comps.push(c);
+        else rows.push({ comps: [c], hit, keep });
+      }
+  const followKeys = rows.filter((r) => !r.hit).flatMap((r) => r.comps.map((c) => c.key));
+  const lines: { text: string; warn?: boolean; unlock?: string }[] = [];
+  if (p && sel && ed.tool === 'push' && p.out) {
+    const o = p.out;
+    const blocker = o.stop?.why === 'lock' && o.stop.at !== undefined && ed.L.labels[o.stop.at] >= 0 ? ed.L.comps[ed.L.labels[o.stop.at]]?.key : undefined;
+    lines.push(o.n ? { text: `最多可外推 ${o.n}${o.more ? '＋' : ''} 格${o.stop ? `（${limitText(o.stop, ed.matName, who(o.stop))}）` : ''}`, unlock: blocker } : { text: `不能外推：${why(o.stop)}`, warn: true, unlock: blocker });
+    if (p.vanishAt) lines.push({ text: p.in?.n ? `最多可內縮 ${p.in.n} 格（再多 ${ed.selName} 就會整個消失，會先問你）` : `再內縮 ${ed.selName} 就會整個消失（會先問你）`, warn: true });
   }
-
   return (
-    <div className={'panel' + (off ? ' off' : '')} data-testid="action-panel">
+    <div className={'panel' + (off ? ' off' : '') + (allLocked && !peek ? ' locked' : '')} data-testid="action-panel">
       <div className="sec-title">
         要做什麼{sel && <small>：{ed.selName}</small>}
         {sel && ed.selComps.length < same && (
@@ -89,6 +80,19 @@ export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
       </div>
       {!sel && <div className="empty">先在 3D、切面或左邊的清單點一個結構</div>}
       {peek && sel && <div className="empty">正在看「改前」：切回「改後」才能改</div>}
+      {sel && !peek && lockedSel.length > 0 && (
+        <div className={'lockbar' + (allLocked ? '' : ' mini')} data-testid="lockbar">
+          {allLocked && (
+            <div className="ttl">
+              <LockIcon on size={15} /> {ed.selName} 已固定
+            </div>
+          )}
+          <p>{allLocked ? '固定的結構不能編輯。要改它請先解除固定；固定方式可以在下面「固定的結構」調整。' : `選到的裡面有 ${lockedSel.length} 個已固定，這一步不會動它們。`}</p>
+          <Button size="small" onClick={() => ed.setLock(lockedSel.map((c) => c.key), null)} data-testid="unlock-sel">
+            解除固定
+          </Button>
+        </div>
+      )}
       <div className="tools" role="radiogroup" aria-label="要做什麼">
         {TOOLS.map((t) => (
           <button key={t.k} type="button" role="radio" aria-checked={ed.tool === t.k} className={ed.tool === t.k ? 'on' : ''} onClick={() => ed.setTool(t.k)} disabled={off}>
@@ -112,7 +116,7 @@ export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
           </div>
           <div className="row two">
             <Tooltip title={!off && inN === 0 ? why(p?.in?.stop) : ''}>
-              <Button block disabled={off || working || inN === 0} onClick={() => ed.push(ed.face, -n)} data-testid="shrink">
+              <Button block disabled={off || working || (inN === 0 && !p?.vanishAt)} onClick={() => ed.push(ed.face, -n)} data-testid="shrink">
                 {ed.face}面內縮 {n} 格<Kbd>－</Kbd>
               </Button>
             </Tooltip>
@@ -152,20 +156,53 @@ export function ActionPanel({ ed, peek }: { ed: Editor; peek: boolean }) {
             <InputNumber size="small" min={1} max={STEP_MAX} value={n} precision={0} onChange={(v) => v !== null && ed.setStepN(v)} disabled={off} style={{ width: 64 }} aria-label="每次幾格" />
             格 ＝ {nmText(n, ed.nmPerVoxel)}
           </div>
-          <div className="row">
-            <div className="lbl">相鄰材質</div>
-            <div className="nb" role="radiogroup" aria-label="相鄰材質">
-              {[true, false].map((f) => (
-                <button key={String(f)} type="button" role="radio" aria-checked={ed.follow === f} className={ed.follow === f && (canFollow || !f) ? 'on' : ''} disabled={off || (f && !canFollow)} onClick={() => ed.setFollow(f)}>
-                  {f ? '跟著移動' : '留在原地'}
-                  <NbIcon follow={f} />
-                </button>
-              ))}
+          {ed.tool === 'push' && (
+            <div className="row">
+              <div className="lbl">這一步會帶動誰（沒固定的全部跟著移動；不想動的按右鍵固定）</div>
+              <div className="who" aria-live="polite" data-testid="who">
+                {waiting && slow ? (
+                  <div>計算中…</div>
+                ) : (
+                  <>
+                    {followKeys.length > 1 && (
+                      <div className="ln">
+                        <a onClick={() => ed.setLock(followKeys, ed.lastKeep)} data-testid="lock-all-follow">
+                          把會跟著動的 {followKeys.length} 個結構全部固定
+                        </a>
+                        （再解開想帶動的）
+                      </div>
+                    )}
+                    {p && !rows.length && <div className="ln">這個方向沒有其他結構會被帶動。</div>}
+                    {rows.map(({ comps, hit, keep }) => {
+                      const keys = comps.map((c) => c.key);
+                      const name = namesOf(comps, ed.matName);
+                      return (
+                        <div key={keys.join()} className="aff" title={comps.map((c) => c.label).join('、')} onContextMenu={(e) => (e.preventDefault(), onCtx(keys, e.clientX, e.clientY))}>
+                          <Swatch fill={ed.materials.find((m) => m.id === comps[0].mat)?.color ?? '#ccc'} size={12} />
+                          <span className="nm">{name}</span>
+                          <span className={'chip ' + (hit ? 'lock' : 'follow')}>{!hit ? '跟著移動' : keep !== undefined && keep >= LOCK_FULL ? '完全鎖定' : `固定·最少留 ${nmText(keep ?? 1, ed.nmPerVoxel)}`}</span>
+                          <button type="button" className={'lk' + (hit ? ' on' : '')} title={hit ? `解除固定 ${name}` : `固定 ${name}`} onClick={() => ed.setLock(keys, hit ? null : ed.lastKeep)}>
+                            <LockIcon on={hit} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {lines.map((l) => (
+                      <div key={l.text} className={'ln' + (l.warn ? ' warn' : '')}>
+                        {l.text}
+                        {l.unlock && (
+                          <>
+                            {' '}
+                            <a onClick={() => ed.setLock([l.unlock!], null)}>解除固定</a>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
             </div>
-            <div className="who" aria-live="polite">
-              {waiting && slow ? <div>計算中…</div> : lines.map((l) => <div key={l}>{l}</div>)}
-            </div>
-          </div>
+          )}
         </>
       )}
 

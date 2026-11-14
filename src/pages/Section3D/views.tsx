@@ -1564,8 +1564,15 @@ export function View3D({
         rightRef.current = null;
         // 右鍵點一下（沒拖＝不是平移視角）：在點到的結構上開選單
         if (!r || e.button !== 2 || !onContext || Math.hypot(e.clientX - r.x, e.clientY - r.y) > 4) return;
-        const h = hit(e.clientX, e.clientY);
-        if (h) onContext(h.p, e.clientX, e.clientY);
+        // 拾取用的加速結構是分次建的：第一次可能還沒好，隔一下再試幾次
+        const { clientX: x, clientY: y } = e;
+        const tryHit = (left: number) => {
+          beginPickEvent();
+          const h = hit(x, y);
+          if (h) onContext(h.p, x, y);
+          else if (left > 0) setTimeout(() => tryHit(left - 1), 60);
+        };
+        tryHit(5);
       }}
     >
       <svg

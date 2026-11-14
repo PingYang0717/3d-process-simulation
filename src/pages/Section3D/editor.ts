@@ -549,7 +549,7 @@ export function useEditor() {
       if (!s) return;
       probeFly.current.inflight = true;
       const sig = probeSig;
-      probeIn(s, { keys: editKeys, kind: tool === 'move' ? 'translate' : 'push', dir: faceOf(face).d, locks })
+      probeIn(s, { keys: editKeys, kind: tool === 'move' ? 'translate' : 'push', dir: faceOf(face).d, locks, budgetMs: tool === 'move' ? 60 : 150 })
         .then((p) => setProbe({ sig, p }))
         .catch(() => {})
         .finally(() => {

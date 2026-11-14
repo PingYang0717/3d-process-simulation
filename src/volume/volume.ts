@@ -467,14 +467,19 @@ interface PushRows {
   seeds: number[];
 }
 
-/** adjacentMasks 的紀錄（裁切範圍用）：動到的排在另外兩軸的範圍。 */
+/**
+ * adjacentMasks 的紀錄（裁切範圍用）：動到的排在另外兩軸的範圍；offP／offN＝有一排沿軸的正／負方向一路讀到陣列的盡頭
+ * （陣列是裁切出來的、那一頭又不是模型邊界時，呼叫端要把那一頭開到模型邊界重算）。
+ */
 export interface PushTrace {
   ulo: number;
   uhi: number;
   wlo: number;
   whi: number;
+  offP: boolean;
+  offN: boolean;
 }
-export const newPushTrace = (): PushTrace => ({ ulo: Infinity, uhi: -Infinity, wlo: Infinity, whi: -Infinity });
+export const newPushTrace = (): PushTrace => ({ ulo: Infinity, uhi: -Infinity, wlo: Infinity, whi: -Infinity, offP: false, offN: false });
 
 /** 固定（plan v21 §2）：lock 陣列每一格 0＝沒固定；1–254＝可被壓薄、這一排最少留幾格；LOCK_FULL＝完全鎖定。 */
 export const LOCK_FULL = 255;
@@ -645,6 +650,7 @@ function grow1(v: Volume, tag: Uint16Array, id: number, lock: Uint8Array, a: num
       if (tag[i] === id || lock[i]) break;
       if (emptyMat(data[i])) air = q;
     }
+    if (trace && (q < 0 || q >= len)) s > 0 ? (trace.offP = true) : (trace.offN = true);
     let W: number;
     let unlock = 0;
     if (air >= 0) W = air;
@@ -660,11 +666,13 @@ function grow1(v: Volume, tag: Uint16Array, id: number, lock: Uint8Array, a: num
       const keep = lock[i];
       if (keep === LOCK_FULL) return { why: 'lock', mat: data[i], at: i, keep };
       let run = 1;
-      for (let p = q + s; run <= keep && p >= 0 && p < len; p += s) {
+      let p = q + s;
+      for (; run <= keep && p >= 0 && p < len; p += s) {
         const j = base + p * st;
         if (!lock[j] || data[j] !== data[i]) break;
         run++;
       }
+      if (trace && run <= keep && (p < 0 || p >= len)) s > 0 ? (trace.offP = true) : (trace.offN = true);
       if (run - 1 < keep) return { why: 'lock', mat: data[i], at: i, keep };
       W = q;
       unlock = 1;
@@ -719,6 +727,7 @@ function shrink1(v: Volume, tag: Uint16Array, id: number, lock: Uint8Array, a: n
       if (tag[j] === id || lock[j]) break;
       if (emptyMat(data[j])) air = q;
     }
+    if (trace && (q < 0 || q >= len)) s > 0 ? (trace.offP = true) : (trace.offN = true);
     // 有空氣＝外推時是它吸收的，內縮就還給它：只有切口到那一格空氣之間的往內移一格（和外推互為反向）
     const end = air >= 0 ? air + s : q;
     let to = base + c * st;
@@ -779,6 +788,8 @@ export function adjacentMasks(
   lock0: Uint8Array | null,
   report?: Report,
   trace?: PushTrace,
+  /** 試算用：做完至少一格之後，超過這個時間點（performance.now()）就先停（report.more = true；不算被擋）。 */
+  deadline?: number,
 ): Volume {
   const { X, Y, Z } = vol;
   const N = vol.data.length;
@@ -810,7 +821,12 @@ export function adjacentMasks(
   const alive = ids.map(() => true);
   let done = 0;
   let stop: Block | null = null;
+  let more = false;
   for (; done < steps && ids.length; done++) {
+    if (deadline !== undefined && done > 0 && performance.now() > deadline) {
+      more = true;
+      break;
+    }
     if (multi) {
       tryV.data.set(cur.data);
       tryTag.set(tag);
@@ -853,6 +869,7 @@ export function adjacentMasks(
   if (report) {
     report.done = (report.done ?? 0) + done;
     report.stop = stop;
+    if (more) report.more = true;
     if (stop && stop.at !== undefined) {
       report.blocked++;
       if (stop.mat !== undefined) report.blockedBy[stop.mat] = (report.blockedBy[stop.mat] ?? 0) + 1;

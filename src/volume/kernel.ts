@@ -40,6 +40,8 @@ export interface Report {
   stop?: Block | null;
   /** 'adjacent' 內縮：完全鎖定、沒有補回來而留空的材質（plan v21）。 */
   gaps?: number[];
+  /** 'adjacent' 試算：時間到先停，實際還能做更多。 */
+  more?: boolean;
 }
 export const newReport = (): Report => ({ filled: 0, pushed: 0, removed: 0, blocked: 0, blockedBy: {}, blockedAt: [], skipped: [], fallback: [] });
 

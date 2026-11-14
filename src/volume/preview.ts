@@ -87,11 +87,11 @@ export interface BoxTrial {
  * previewBox，外加試算的結果：跟著移動的推拉要實際算一次才知道旁邊哪些薄層排會跟著動、讀到多遠，
  * 那一次的結果就是這一步的結果，呼叫端（applyOpPrepare、probe）直接拿去用，不必再算第二次。
  */
-export function previewBoxTrial(s: EditState, op: Op): { box: BBox | null; trial?: BoxTrial } {
+export function previewBoxTrial(s: EditState, op: Op, budgetMs?: number): { box: BBox | null; trial?: BoxTrial } {
   const keys = new Set(op.keys);
   const b = unionBBox(s.L.comps.filter((c) => keys.has(c.key)));
   if (!b) return { box: null };
-  if (isAdjacent(op)) return adjacentBox(s, op, b);
+  if (isAdjacent(op)) return adjacentBox(s, op, b, budgetMs);
   return { box: plainBox(s, op, b) };
 }
 
@@ -135,41 +135,64 @@ function plainBox(s: EditState, op: Exclude<Op, AdjPushOp | AdjTranslateOp>, b: 
  * 旁邊哪些排會一起動要實際算過才知道（每推一格都可能多收幾排）——在範圍裡實際算一次（adjTrial），
  * 動到的排碰到範圍的側邊（那一邊不是模型邊界）就把側邊加倍重算。那一次的結果就是這一步的結果。
  */
-function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox): { box: BBox | null; trial?: BoxTrial } {
+function adjacentBox(s: EditState, op: AdjPushOp | AdjTranslateOp, b: BBox, budgetMs?: number): { box: BBox | null; trial?: BoxTrial } {
   const { dir, n } = adjacentDir(op);
   const a = dir[0] ? 0 : dir[1] ? 1 : 2;
   const sg = dir[a] > 0 ? 1 : -1;
   const l = lo(b);
   const h = hi(b);
   const dims = [s.vol.X, s.vol.Y, s.vol.Z];
-  if (op.kind === 'translate' || sg > 0) h[a] = dims[a] - 1;
-  if (op.kind === 'translate' || sg < 0) l[a] = 0;
   const u = a === 0 ? 1 : 0;
   const w = a === 2 ? 1 : 2;
   const keys = [...new Set(op.keys)];
   const table = lockTable(s.L, op.locks);
-  for (let side = 4; ; side *= 2) {
+  // 沿軸：先多留 |n|＋ADJ_REACH 格（外圍都固定時，跟著動的那一串很快就碰到固定的結構）；
+  // 有一排一路讀到裁切範圍的盡頭（那一頭不是模型邊界）就把那一頭放大重算。平移兩頭都會讀，推拉只有推的那一頭。
+  const reach = Math.abs(n) + ADJ_REACH;
+  let extP = op.kind === 'translate' || sg > 0 ? reach : 0;
+  let extN = op.kind === 'translate' || sg < 0 ? reach : 0;
+  // 側邊先多留 4 格；碰到就 32 格；再碰到就整個平面（沒固定的材質一路連出去時本來就會到那裡，不必一次一次加倍重算）
+  let side = 4;
+  for (;;) {
     const bl = l.slice() as Vec3;
     const bh = h.slice() as Vec3;
-    bl[u] -= side;
-    bh[u] += side;
-    bl[w] -= side;
-    bh[w] += side;
+    if (side === Infinity) {
+      bl[u] = 0;
+      bh[u] = dims[u] - 1;
+      bl[w] = 0;
+      bh[w] = dims[w] - 1;
+    } else {
+      bl[u] -= side;
+      bh[u] += side;
+      bl[w] -= side;
+      bh[w] += side;
+    }
+    bh[a] = extP === Infinity ? dims[a] - 1 : bh[a] + extP;
+    bl[a] = extN === Infinity ? 0 : bl[a] - extN;
     const box = clampBox(fromLoHi(bl, bh), s.vol);
     if (!box) return { box: null };
     const vol = cropVolume(s.vol, box);
     const masks = keys.map((k) => cropMask(s.L, new Set([k]), s.vol, box));
     const report = newReport();
     const trace = newPushTrace();
-    const data = adjacentMasks(vol, masks, op.kind, dir, n, cropLock(s.L, table, s.vol, box), report, trace).data;
+    const data = adjacentMasks(vol, masks, op.kind, dir, n, cropLock(s.L, table, s.vol, box), report, trace, budgetMs === undefined ? undefined : performance.now() + budgetMs).data;
     const cl = lo(box);
     const ch = hi(box);
     const cd = [vol.X, vol.Y, vol.Z];
     const sideHit =
       (trace.ulo === 0 && cl[u] > 0) || (trace.uhi === cd[u] - 1 && ch[u] < dims[u] - 1) || (trace.wlo === 0 && cl[w] > 0) || (trace.whi === cd[w] - 1 && ch[w] < dims[w] - 1);
-    if (!sideHit) return { box, trial: { data, report } };
+    const farP = trace.offP && ch[a] < dims[a] - 1;
+    const farN = trace.offN && cl[a] > 0;
+    if (!sideHit && !farP && !farN) return { box, trial: { data, report } };
+    if (sideHit) side = side < 32 ? 32 : Infinity;
+    // 沿軸：先放大 4 倍、再不夠才開到模型邊界（隔著一段空氣才碰到固定的結構時，不必整條都算）
+    if (farP) extP = extP < reach * 4 ? reach * 4 : Infinity;
+    if (farN) extN = extN < reach * 4 ? reach * 4 : Infinity;
   }
 }
+
+/** 'adjacent'：沿推的方向先多留這麼多格（|n| 之外）。 */
+export const ADJ_REACH = 24;
 
 /** 固定的格子在裁切範圍內的 lock（table＝lockTable 的結果；沒有固定的結構回傳 null）。 */
 export function cropLock(L: Labeled, table: Uint8Array, v: Volume, b: BBox): Uint8Array | null {
@@ -200,6 +223,7 @@ export function mergeReport(to: Report, from: Report) {
   to.blockedAt.push(...from.blockedAt);
   to.done = (to.done ?? 0) + (from.done ?? 0);
   to.stop = from.stop;
+  if (from.more) to.more = true;
   if (from.gaps) to.gaps = [...new Set([...(to.gaps ?? []), ...from.gaps])];
 }
 

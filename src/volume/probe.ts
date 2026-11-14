@@ -21,6 +21,8 @@ export interface ProbeReq {
   dir?: Vec3;
   /** 固定的結構。 */
   locks?: LockSpec[];
+  /** 每一次試算最多花多久（毫秒）；時間到先停，回 more（實際還能做更多）。省略＝算到上限。 */
+  budgetMs?: number;
   /** 舊版欄位，不再影響結果。 */
   follow?: boolean;
   liners?: number[];
@@ -51,8 +53,8 @@ export const PROBE_DIRS: Vec3[] = [
 ];
 
 /** 試算的上限：外推最多模擬這麼多格；平移最多看這麼多格。 */
-export const PROBE_MAX = 60;
-export const PROBE_MOVE_MAX = 20;
+export const PROBE_MAX = 24;
+export const PROBE_MOVE_MAX = 8;
 
 const empty = (m: number) => m === AIR || m === VOID;
 
@@ -110,10 +112,10 @@ function vanishSteps(s: EditState, keys: string[], a: number): number {
   return min;
 }
 
-const roomOf = (s: EditState, box: { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }, done: number, stop: Block | null | undefined, max: number): Room => ({
+const roomOf = (s: EditState, box: { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }, done: number, stop: Block | null | undefined, max: number, more?: boolean): Room => ({
   n: done,
   stop: stop && stop.at !== undefined ? { ...stop, at: globalIndex(box, s.vol, [stop.at])[0] } : (stop ?? null),
-  ...(done >= max ? { more: true } : {}),
+  ...(done >= max || more ? { more: true } : {}),
 });
 
 /**
@@ -131,9 +133,9 @@ function probePush(s: EditState, req: ProbeReq & { dir: Vec3 }): Probe {
   const hit = new Set<number>();
   let out: Room = { n: 0, stop: null };
   const trialOp: AdjPushOp = { kind: 'push', keys, scope: fullScope(s.vol), dir, n: PROBE_MAX, follow: true, backfill: 'outer', policy: 'adjacent', locks: req.locks };
-  const { box, trial } = previewBoxTrial(s, trialOp);
+  const { box, trial } = previewBoxTrial(s, trialOp, req.budgetMs);
   if (box && trial) {
-    out = roomOf(s, box, trial.report.done ?? 0, trial.report.stop, PROBE_MAX);
+    out = roomOf(s, box, trial.report.done ?? 0, trial.report.stop, PROBE_MAX, trial.report.more);
     const table = lockTable(s.L, req.locks);
     const vol = cropVolume(s.vol, box);
     const lock = cropLock(s.L, table, s.vol, box);
@@ -169,9 +171,9 @@ function probeMove(s: EditState, req: ProbeReq): Probe {
   const keys = [...new Set(req.keys)];
   const dirs = PROBE_DIRS.map((d): Room => {
     const op: AdjTranslateOp = { kind: 'translate', keys, scope: fullScope(s.vol), d: d.map((v) => v * PROBE_MOVE_MAX) as Vec3, backfill: 'outer', follow: true, policy: 'adjacent', locks: req.locks };
-    const { box, trial } = previewBoxTrial(s, op);
+    const { box, trial } = previewBoxTrial(s, op, req.budgetMs);
     if (!box || !trial) return { n: 0, stop: null };
-    return roomOf(s, box, trial.report.done ?? 0, trial.report.stop, PROBE_MOVE_MAX);
+    return roomOf(s, box, trial.report.done ?? 0, trial.report.stop, PROBE_MOVE_MAX, trial.report.more);
   });
   return { follow: [], hit: [], dirs };
 }

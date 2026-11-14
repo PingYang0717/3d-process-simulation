@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>簡化版 prototype（v22：右鍵固定＋固定狀態）</title>
 <style>
-  :root {
+  :root { color-scheme: light;
     --c-primary: #0b57d0; --c-primary-bg: #e8f1ff; --c-text: #1f2329; --c-text-2: #646a73; --c-text-soft: #3c4048;
     --c-border: #e4e6eb; --c-border-2: #eef0f3; --c-bg: #f5f6f8; --c-bg-sub: #fafbfc; --c-surface: #fff; --c-up: #d46b08;
     --c-warn-bg: #fff8ec; --c-warn-border: #ffd591; --shadow-sm: 0 1px 2px rgba(0,0,0,.06); --radius: 6px; --radius-lg: 8px;
@@ -154,17 +154,17 @@
   .lk.part { opacity: 1; color: #94a3b8; }
   .item.lock .nm { color: #334155; }
   .sider-head a { font-weight: 400; font-size: 12px; color: var(--c-primary); cursor: pointer; white-space: nowrap; }
-  .lockbar { margin: 0 16px 10px; padding: 8px 10px; border-radius: var(--radius); background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155; font-size: 12px; display: flex; gap: 8px; align-items: center; }
-  .lockbar { flex-direction: column; align-items: stretch !important; }
-  .lk-top { display: flex; gap: 8px; align-items: center; }
-  .lockbar span { flex: 1; }
-  .lockbar label { display: flex; align-items: center; gap: 5px; }
-  .lockbar input[type=number] { width: 54px; height: 24px; border: 1px solid var(--c-border); border-radius: 4px; text-align: center; font: inherit; }
+  .lockbar { margin: 4px 16px 12px; padding: 14px; border-radius: var(--radius-lg); background: #f8fafc; border: 1px solid var(--c-border); color: var(--c-text); }
+  .lockbar .ttl { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; }
+  .lockbar .ttl svg { color: #334155; }
+  .lockbar p { margin: 6px 0 12px; font-size: 12px; color: var(--c-text-2); line-height: 1.6; }
+  .lockbar.mini { padding: 8px 10px; display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .lockbar.mini p { margin: 0; flex: 1; }
   .lockrow { margin: -4px 16px 10px; }
   .lockrow .btn { display: inline-flex; align-items: center; gap: 4px; color: var(--c-text-2); }
   .panel.locked .lockrow, .panel.off .lockrow { display: none; }
   .sider-head small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .panel.locked > :not(.sec-title):not(.lockbar):not(.empty):not(.lockrow) { opacity: .3; pointer-events: none; }
+  .panel.locked > :not(.sec-title):not(.lockbar):not(.empty) { display: none; }
   .aff { display: flex; align-items: center; gap: 6px; padding: 2px 0; color: var(--c-text-soft); }
   .aff .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip { flex: none; padding: 0 6px; border-radius: 9px; font-size: 11px; line-height: 18px; background: #f0f1f3; color: var(--c-text-2); }
@@ -183,22 +183,33 @@
   .tip.warn { background: #dc2626; }
   .ch .sub.warn { color: #c2410c; }
   .scn { height: 32px; max-width: 300px; border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-surface); font: inherit; padding: 0 8px; }
-  .locks { flex: none; max-height: 30%; display: flex; flex-direction: column; border-top: 1px solid var(--c-border-2); background: #f8fafc; }
-  .lk-list { overflow: auto; padding: 0 12px 10px 16px; font-size: 12px; }
-  .lk-empty { color: var(--c-text-2); }
-  .lkrow { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
-  .lkrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .locks { flex: none; max-height: 34%; display: flex; flex-direction: column; border-top: 1px solid var(--c-border-2); }
+  .lk-list { overflow: auto; padding: 0 16px 12px; font-size: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .lk-empty { color: var(--c-text-2); line-height: 1.6; }
+  .lkrow { border: 1px solid var(--c-border); border-radius: var(--radius-lg); padding: 8px 10px; background: var(--c-surface); }
+  .lkrow.on { border-color: var(--c-primary); box-shadow: 0 0 0 2px var(--c-primary-bg); }
+  .lkrow .r1 { display: flex; align-items: center; gap: 8px; }
+  .lkrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-size: 13px; font-weight: 600; }
   .lkrow .nm:hover { color: var(--c-primary); }
-  .lkrow.on .nm { color: var(--c-primary); font-weight: 600; }
-  .lkrow select, .lkrow input { height: 24px; border: 1px solid var(--c-border); border-radius: 4px; font: inherit; font-size: 12px; background: #fff; }
-  .lkrow input { width: 48px; text-align: center; }
-  .lkrow .x { width: 22px; height: 22px; border: 0; background: none; border-radius: 4px; color: var(--c-text-2); }
-  .lkrow .x:hover { background: rgba(0,0,0,.08); color: #c2410c; }
-  .ctx { position: fixed; z-index: 10; min-width: 220px; padding: 4px; background: #fff; border: 1px solid var(--c-border); border-radius: var(--radius-lg); box-shadow: 0 6px 24px rgba(0,0,0,.18); font-size: 13px; }
-  .ctx .hd { padding: 4px 10px 5px; color: var(--c-text-2); font-size: 12px; border-bottom: 1px solid var(--c-border-2); margin-bottom: 4px; }
-  .ctx button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; background: none; border-radius: 4px; text-align: left; }
-  .ctx button:hover { background: var(--c-primary-bg); color: var(--c-primary); }
-  .ctx button .ck { width: 14px; flex: none; color: var(--c-primary); }
+  .lkrow .x { flex: none; height: 22px; padding: 0 6px; border: 0; background: none; border-radius: 4px; color: var(--c-text-2); font-size: 12px; }
+  .lkrow .x:hover { background: #fff1e8; color: #c2410c; }
+  .lkrow .r2 { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .lkrow .seg button { height: 22px; padding: 0 8px; }
+  .lkrow .keep { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--c-text-2); white-space: nowrap; }
+  .lkrow .keep b { min-width: 46px; text-align: center; color: var(--c-text); font-weight: 600; }
+  .lkrow .keep button { width: 22px; height: 22px; padding: 0; border: 1px solid var(--c-border); border-radius: 4px; background: var(--c-surface); line-height: 1; }
+  .lkrow .keep button:hover:not(:disabled) { border-color: var(--c-primary); color: var(--c-primary); }
+  .lkrow .hint { margin-top: 6px; color: var(--c-text-2); line-height: 1.5; }
+  .ctx { position: fixed; z-index: 10; width: 264px; padding: 6px; background: #fff; border: 1px solid var(--c-border); border-radius: var(--radius-lg); box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 13px; }
+  .ctx .hd { display: flex; align-items: center; gap: 8px; padding: 4px 8px 8px; font-weight: 600; border-bottom: 1px solid var(--c-border-2); margin-bottom: 4px; }
+  .ctx .hd small { margin-left: auto; font-weight: 400; color: var(--c-text-2); font-size: 12px; }
+  .ctx button { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 7px 8px; border: 0; background: none; border-radius: var(--radius); text-align: left; }
+  .ctx button:hover { background: var(--c-primary-bg); }
+  .ctx button .ic { flex: none; width: 16px; margin-top: 2px; color: var(--c-text-2); display: inline-flex; }
+  .ctx button.cur .ic, .ctx button.cur .t { color: var(--c-primary); }
+  .ctx button .t { display: block; font-weight: 600; }
+  .ctx button .d { display: block; font-size: 12px; color: var(--c-text-2); line-height: 1.45; }
+  .ctx button.off .t { font-weight: 400; }
   .ctx hr { border: 0; border-top: 1px solid var(--c-border-2); margin: 4px 0; }
   .tip { position: fixed; padding: 3px 8px; border-radius: var(--radius); background: var(--c-up); color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; z-index: 5; }
 </style>
@@ -252,7 +263,7 @@
     <div class="panel" id="panel">
       <div class="sec-title">要做什麼<small id="selname"></small> <a id="all-same" hidden></a><span class="grow"></span><button class="fold" data-fold="inspector" title="收合動作面板">»</button></div>
       <div class="empty">先在 3D、切面或左邊的清單點一個結構</div>
-      <div class="lockbar" id="lockbar" hidden><div class="lk-top"><span id="lockmsg"></span><button class="btn sm" id="unlock-sel">解除固定</button></div></div>
+      <div class="lockbar" id="lockbar" hidden><div class="ttl" id="lockttl"></div><p id="lockmsg"></p><button class="btn sm" id="unlock-sel">解除固定</button></div>
       <div class="tools" id="tools"><button data-tool="push">推拉一面</button><button data-tool="move">整塊平移</button><button data-tool="mat">換材質</button></div>
 
       <div id="t-push">
@@ -339,10 +350,10 @@ const setCell = (st, i, m, k) => { st.cnt[st.sid[i]]--; st.mat[i] = m; st.sid[i]
 const put = (st, to, from) => setCell(st, to, st.mat[from], st.sid[from]);
 /**
  * 固定：位置不動、不會跟著別人移動、不能被編輯。
- * - 可以讓出空間（預設）：別人推過來時它變薄，但每一排至少留 N 格，到了才擋住（整面停）；別人退回去時它補回來。
- * - 完全不變：一格都不變。別人推到它＝擋住；別人退開＝中間留空（gap 記下是誰）。
+ * - 可被壓薄（預設）：別人推過來時它變薄，但每一排至少留 N 格，到了才擋住（整面停）；別人退回去時它補回來。
+ * - 完全鎖定：一格都不變。別人推到它＝擋住；別人退開＝中間留空（gap 記下是誰）。
  */
-const locked = new Map(); // 結構 → 被推到時這一排最少要留幾格（Infinity＝完全不變）
+const locked = new Map(); // 結構 → 被推到時這一排最少要留幾格（Infinity＝完全鎖定）
 let lastKeep = 2; // 新固定的預設：至少留 1.0 nm
 let gap = new Set();
 /** a → b 之間整個消失的結構。 */
@@ -409,7 +420,7 @@ function pushRows(st, id, a, s) {
 /**
  * 一排往外推一格之前先看盡頭（跟著動的那一串外面）是什麼：
  * 空氣＝可以；模型邊界＝最外面那個結構少一格（至少留 1 格）；自己＝不行；
- * 固定的結構＝它讓出一格，但這一排不能少於它設定的最少厚度（完全不變＝直接擋住）。
+ * 固定的結構＝它讓出一格，但這一排不能少於它設定的最少厚度（完全鎖定＝直接擋住）。
  */
 function endOf(st, c, L, a, s, id) {
   const last = L.length ? L[L.length - 1] : c, e = next(last, a, s);
@@ -445,7 +456,7 @@ function grow1(st, id, a, s) {
 }
 /**
  * 內縮一格：每一排拿掉切口那一格，外面跟著動的整串跟著退一格。串的盡頭空出來的那一格：
- * 外面是空氣＝空氣；模型邊界＝最外面那個結構補一格；固定但可以讓出空間的＝它補回來（變厚）；完全不變的＝留空。
+ * 外面是空氣＝空氣；模型邊界＝最外面那個結構補一格；固定但可被壓薄的＝它補回來（變厚）；完全鎖定的＝留空。
  */
 function shrink1(st, id, a, s) {
   let done = 0;
@@ -457,8 +468,8 @@ function shrink1(st, id, a, s) {
     const beyond = next(to, a, s), k = beyond >= 0 ? st.sid[beyond] : 0;
     if (beyond < 0) { if (!L.length) setCell(st, to, AIR, 0); } // 邊界：最外面那一格補一格
     else if (L.some((j) => !st.sid[j])) setCell(st, to, AIR, 0); // 串裡本來就有空氣：空氣多一格
-    else if (k !== id && locked.get(k) !== Infinity) put(st, to, beyond); // 可以讓出空間的固定結構：補回來
-    else { if (k !== id) gap.add(k); setCell(st, to, AIR, 0); } // 完全不變：留空
+    else if (k !== id && locked.get(k) !== Infinity) put(st, to, beyond); // 可被壓薄的固定結構：補回來
+    else { if (k !== id) gap.add(k); setCell(st, to, AIR, 0); } // 完全鎖定：留空
     done++;
   }
   if (!done) lastBlock = { why: 'min' };
@@ -643,7 +654,7 @@ function toggleLock(ids) {
   if (!ids.length || drag || pending) return;
   const on = !ids.every((id) => locked.has(id));
   for (const id of ids) on ? locked.set(id, lastKeep) : locked.delete(id);
-  say(`${on ? '已固定' : '已解除固定'}：${namesOf(model, ids)}${on ? (lastKeep === Infinity ? '（完全不變）' : `（位置不動；被推到時可以讓出空間，至少留 ${nm(lastKeep)} nm）`) : ''}`, false);
+  say(`${on ? '已固定' : '已解除固定'}：${namesOf(model, ids)}${on ? (lastKeep === Infinity ? '（完全鎖定）' : `（位置不動；被推到時可被壓薄，最少留 ${nm(lastKeep)} nm）`) : ''}`, false);
   render();
 }
 /** 選結構。add＝Shift／Ctrl＋點：加進選取（只能同材質）；已經選到的再點一次＝拿掉。 */
@@ -933,13 +944,13 @@ document.querySelectorAll('.stepper').forEach((el) => {
 });
 
 // ---------------------------------------------------------------- 左欄清單、右欄動作面板
-/** 固定的方式：keep＝格數（至少留）、Infinity＝完全不變、null＝解除。固定不算一步（不進復原）。 */
+/** 固定的方式：keep＝格數（至少留）、Infinity＝完全鎖定、null＝解除。固定不算一步（不進復原）。 */
 function setLock(ids, keep) {
   ids = ids.filter((id) => model.cnt[id] > 0);
   if (!ids.length || drag || pending) return;
   for (const id of ids) keep == null ? locked.delete(id) : locked.set(id, keep);
   if (keep != null) lastKeep = keep;
-  say(keep == null ? `已解除固定：${namesOf(model, ids)}` : `已固定：${namesOf(model, ids)}（${keep === Infinity ? '完全不變' : `可以讓出空間，至少留 ${nm(keep)} nm`}）`, false);
+  say(keep == null ? `已解除固定：${namesOf(model, ids)}` : `已固定：${namesOf(model, ids)}（${keep === Infinity ? '完全鎖定' : `固定位置，可被壓薄，最少留 ${nm(keep)} nm`}）`, false);
   render();
 }
 /** 右欄「固定的結構」：目前鎖了誰、怎麼鎖，直接在這裡改。 */
@@ -947,23 +958,23 @@ function drawLocks(st) {
   const rows = [...locked].filter(([id]) => st.cnt[id] > 0).sort((p, q) => p[0] - q[0]);
   $('#lk-sum').textContent = rows.length ? `${rows.length} 個` : '';
   $('#unlock-all2').hidden = !rows.length;
-  if (document.activeElement?.closest?.('#lk-list')) return; // 正在輸入就不重畫
-  $('#lk-list').innerHTML = rows.length ? rows.map(([id, kp]) => `<div class="lkrow ${ui.sels.includes(id) ? 'on' : ''}" data-id="${id}"><span class="sw" style="background:${MATS[st.structs[id].mat].color}"></span><span class="nm" title="點一下選這個結構">${st.structs[id].name}</span>`
-    + `<select title="被別的結構推到時"><option value="flex" ${kp !== Infinity ? 'selected' : ''}>至少留</option><option value="full" ${kp === Infinity ? 'selected' : ''}>完全不變</option></select>`
-    + (kp !== Infinity ? `<input type="number" min="0.5" step="0.5" value="${nm(kp)}" title="最少保留的厚度"> nm` : '')
-    + `<button class="x" title="解除固定">✕</button></div>`).join('')
-    : '<div class="lk-empty">還沒有固定的結構。在結構上按右鍵就能固定；固定的結構位置不動，也不會被別的結構帶著走。</div>';
+  $('#lk-list').innerHTML = rows.length ? rows.map(([id, kp]) => {
+    const full = kp === Infinity;
+    return `<div class="lkrow ${ui.sels.includes(id) ? 'on' : ''}" data-id="${id}">`
+      + `<div class="r1"><span class="sw" style="background:${MATS[st.structs[id].mat].color}"></span><span class="nm" title="點一下選這個結構">${st.structs[id].name}</span><button class="x" title="解除固定">解除</button></div>`
+      + `<div class="r2"><span class="seg"><button data-mode="flex" class="${full ? '' : 'on'}">可被壓薄</button><button data-mode="full" class="${full ? 'on' : ''}">完全鎖定</button></span>`
+      + (full ? '' : `<span class="keep">最少留 <button data-d="-1" ${kp <= 1 ? 'disabled' : ''}>−</button><b>${nm(kp)} nm</b><button data-d="1">＋</button></span>`) + `</div>`
+      + `<div class="hint">${full ? '形狀和位置都不變。別的結構推到它就停。' : `位置不動。別的結構推過來時它會變薄，薄到 ${nm(kp)} nm 就停。`}</div></div>`;
+  }).join('') : '<div class="lk-empty">還沒有固定的結構。<br>在結構上按<b>右鍵</b>就能固定，固定後不會被別的結構帶著走。</div>';
 }
 $('#lk-list').onclick = (e) => {
   const r = e.target.closest('.lkrow'); if (!r) return;
-  if (e.target.closest('.x')) setLock([+r.dataset.id], null);
-  else if (e.target.closest('.nm')) { ui.anchor = null; select(+r.dataset.id); }
-};
-$('#lk-list').onchange = (e) => {
-  const r = e.target.closest('.lkrow'); if (!r) return;
-  const full = r.querySelector('select').value === 'full', inp = r.querySelector('input');
-  e.target.blur();
-  setLock([+r.dataset.id], full ? Infinity : Math.max(1, Math.round((+(inp?.value) || 1) / NM)));
+  const id = +r.dataset.id, kp = locked.get(id), b = e.target.closest('button');
+  if (e.target.closest('.nm')) { ui.anchor = null; return select(id); }
+  if (!b) return;
+  if (b.classList.contains('x')) setLock([id], null);
+  else if (b.dataset.mode) setLock([id], b.dataset.mode === 'full' ? Infinity : kp === Infinity ? 2 : kp);
+  else if (b.dataset.d) setLock([id], Math.max(1, kp + +b.dataset.d));
 };
 $('#unlock-all2').onclick = () => setLock([...locked.keys()], null);
 /** 右鍵選單：固定／換固定方式／解除固定。不改變目前的選取，所以可以一邊選著要改的結構、一邊鎖旁邊的。 */
@@ -972,12 +983,12 @@ function openCtx(x, y, ids) {
   if (!ids.length || drag || pending || ui.before) return closeCtx();
   const all = ids.every((id) => locked.has(id)), any = ids.some((id) => locked.has(id));
   const cur = all && ids.every((id) => locked.get(id) === locked.get(ids[0])) ? locked.get(ids[0]) : undefined;
-  const flex = lastKeep === Infinity ? 2 : lastKeep, ck = (on) => `<span class="ck">${on ? '✓' : ''}</span>`;
-  $('#ctx').innerHTML = `<div class="hd">${namesOf(model, ids)}${any ? (all ? '（已固定）' : '（部分已固定）') : ''}</div>`
-    + `<button data-keep="${cur !== undefined && cur !== Infinity ? cur : flex}">${ck(cur !== undefined && cur !== Infinity)}固定：可以讓出空間，至少留 ${nm(cur !== undefined && cur !== Infinity ? cur : flex)} nm</button>`
-    + `<button data-keep="Infinity">${ck(cur === Infinity)}固定：完全不變</button>`
-    + (any ? `<hr><button data-keep="off">${ck(false)}解除固定</button>` : '')
-    + `<hr><button data-keep="sel">${ck(false)}選取${ids.length > 1 ? '這些結構' : '這個結構'}</button>`;
+  const flex = cur !== undefined && cur !== Infinity ? cur : lastKeep === Infinity ? 2 : lastKeep;
+  const item = (keep, on, cls, t, d) => `<button data-keep="${keep}" class="${on ? 'cur' : ''} ${cls}"><span class="ic">${on ? '✓' : cls === 'off' ? '' : LOCK_OFF.replace(/15/g, '14')}</span><span><span class="t">${t}</span>${d ? `<span class="d">${d}</span>` : ''}</span></button>`;
+  $('#ctx').innerHTML = `<div class="hd"><span class="sw" style="background:${MATS[model.structs[ids[0]].mat].color}"></span>${namesOf(model, ids)}<small>${all ? '已固定' : any ? '部分已固定' : '未固定'}</small></div>`
+    + item(flex, cur !== undefined && cur !== Infinity, '', '固定位置（可被壓薄）', `不會被帶著走；被推到時變薄，最少留 ${nm(flex)} nm`)
+    + item('Infinity', cur === Infinity, '', '完全鎖定', '形狀和位置都不變；別的結構推到它就停')
+    + (any ? '<hr>' + item('off', false, 'off', '解除固定', '') : '');
   const el = $('#ctx'); el.hidden = false; el._ids = ids;
   el.style.left = Math.min(x, innerWidth - el.offsetWidth - 8) + 'px'; el.style.top = Math.min(y, innerHeight - el.offsetHeight - 8) + 'px';
 }
@@ -985,8 +996,7 @@ function closeCtx() { $('#ctx').hidden = true; }
 $('#ctx').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return;
   const ids = $('#ctx')._ids, k = b.dataset.keep; closeCtx();
-  if (k === 'sel') { ui.anchor = null; select(ids[ids.length - 1]); ui.sels = ids.filter((id) => model.structs[id].mat === model.structs[ids[ids.length - 1]].mat); render(); }
-  else setLock(ids, k === 'off' ? null : +k);
+  setLock(ids, k === 'off' ? null : +k);
 };
 $('#ctx').oncontextmenu = (e) => e.preventDefault();
 addEventListener('pointerdown', (e) => { if (!e.target.closest('#ctx')) closeCtx(); }, true);
@@ -1018,7 +1028,9 @@ function drawPanel(st) {
   $('#unlock-all').hidden = !locked.size;
   $('#panel').classList.toggle('locked', !!sel && !eds.length);
   $('#lockbar').hidden = !sel || !nLock;
-  $('#lockmsg').textContent = !eds.length ? '已固定：位置不動，也不能改它。固定方式在下面「固定的結構」調整。' : `選到的裡面有 ${nLock} 個已固定，這一步不會動它們。`;
+  $('#lockbar').classList.toggle('mini', !!eds.length);
+  $('#lockttl').innerHTML = eds.length ? '' : `${LOCK_ON} ${namesOf(st, ui.sels)} 已固定`;
+  $('#lockmsg').textContent = !eds.length ? '固定的結構不能編輯。要改它請先解除固定；固定方式可以在下面「固定的結構」調整。' : `選到的裡面有 ${nLock} 個已固定，這一步不會動它們。`;
 drawLocks(st);
   $('#selname').textContent = sel ? `：${namesOf(st, ui.sels)}` : '';
   $('#all-same').hidden = !sel || ui.sels.length >= same;
@@ -1038,7 +1050,7 @@ drawLocks(st);
     const room = (kind, face, sign) => roomOf(st, { kind, ids: eds, face, n: sign });
     // 這一步會碰到誰：一個結構一行，寫出它會怎樣，旁邊可以直接固定／解除
     const ROLE = { follow: ['跟著移動', 0], lock: ['固定', 2] };
-    const roleText = (k, r) => (r === 'follow' ? '跟著移動' : locked.get(k) === Infinity ? '固定·完全不變' : `固定·可壓到 ${nm(locked.get(k))} nm`);
+    const roleText = (k, r) => (r === 'follow' ? '跟著移動' : locked.get(k) === Infinity ? '完全鎖定' : `固定·最少留 ${nm(locked.get(k))} nm`);
     const aff = [...nb.roles].sort((p, q) => ROLE[p[1]][1] - ROLE[q[1]][1] || p[0] - q[0]).map(([k, r]) => `<div class="aff" data-id="${k}"><span class="sw" style="background:${MATS[st.structs[k].mat].color}"></span><span class="nm">${st.structs[k].name}</span><span class="chip ${r}">${roleText(k, r)}</span>${lockBtn([k], st.structs[k].name)}</div>`);
     const nFol = [...nb.roles].filter(([, r]) => r === 'follow').map(([k]) => k);
     if (nFol.length > 1) aff.unshift(`<div class="ln"><a data-lock="${nFol.join(',')}">把會跟著動的 ${nFol.length} 個全部固定</a>（再解開想帶動的）</div>`);
@@ -1113,13 +1125,13 @@ const byName = (n) => model.structs.find((s) => s && s.name === n).id;
 const SCN = [
   ['情境示範：自由操作', null],
   ['1 預設：沒固定的全部跟著', { sel: ['Si fin 1'], face: '右', note: '拖「右」箭頭往外：HfO₂、TiN、Poly-Si，連右邊的 Si fin 2 都整片往右移。右欄列出會被帶動的結構，不想動的在它上面按右鍵固定。' }],
-  ['2 固定外圍（至少留 1 nm）', { lock: [['Poly-Si 1', 2], ['Poly-Si 2', 2], ['STI SiO₂', 2], ['Si fin 2', 2]], sel: ['Si fin 1'], face: '右', note: 'Poly-Si、STI、Si fin 2 固定但可以讓出空間：Si fin 1 外推時只有 HfO₂、TiN 跟著，Poly-Si 和 STI 位置不動、變薄，壓到剩 1 nm 就停；內縮時它們會補回來。試試只解除 Si fin 2 的固定，看它被帶動的樣子。' }],
-  ['3 完全不變 → 外推被擋', { lock: [['TiN 1', Infinity]], sel: ['Si fin 1'], face: '右', note: 'TiN 1 設成完全不變：Si fin 1 右面推不出去（整面一起停）。右欄寫出被誰擋住，可以一鍵解除固定。' }],
-  ['4 內縮＋完全不變 → 中間留空', { lock: [['HfO₂ 1', Infinity]], sel: ['Si fin 1'], face: '右', note: '按「右面內縮」：HfO₂ 1 完全不變所以不跟，Si fin 1 和它之間留空；另一個閘極的 HfO₂ 3、TiN 3 照常跟著退。' }],
+  ['2 固定外圍（至少留 1 nm）', { lock: [['Poly-Si 1', 2], ['Poly-Si 2', 2], ['STI SiO₂', 2], ['Si fin 2', 2]], sel: ['Si fin 1'], face: '右', note: 'Poly-Si、STI、Si fin 2 固定但可被壓薄：Si fin 1 外推時只有 HfO₂、TiN 跟著，Poly-Si 和 STI 位置不動、變薄，壓到剩 1 nm 就停；內縮時它們會補回來。試試只解除 Si fin 2 的固定，看它被帶動的樣子。' }],
+  ['3 完全鎖定 → 外推被擋', { lock: [['TiN 1', Infinity]], sel: ['Si fin 1'], face: '右', note: 'TiN 1 設成完全鎖定：Si fin 1 右面推不出去（整面一起停）。右欄寫出被誰擋住，可以一鍵解除固定。' }],
+  ['4 內縮＋完全鎖定 → 中間留空', { lock: [['HfO₂ 1', Infinity]], sel: ['Si fin 1'], face: '右', note: '按「右面內縮」：HfO₂ 1 完全鎖定所以不跟，Si fin 1 和它之間留空；另一個閘極的 HfO₂ 3、TiN 3 照常跟著退。' }],
   ['5 內縮到整個消失 → 先問', { sel: ['SiN 1'], face: '上', n: 3, note: 'SiN 1 只有 3 格厚。按「上面內縮 3 格」或把箭頭往下拖 3 格以上：不會直接做，先問你要「只縮到剩 1 格」還是「照做」。' }],
-  ['6 選到固定的結構', { lock: [['Poly-Si 1', 2]], sel: ['Poly-Si 1'], face: '右', note: 'Poly-Si 1 已固定：沒有箭頭、動作都不能按。右欄「固定的結構」可以改「至少留幾 nm」或設成完全不變，按 ✕ 或右鍵解除固定。' }],
+  ['6 選到固定的結構', { lock: [['Poly-Si 1', 2]], sel: ['Poly-Si 1'], face: '右', note: 'Poly-Si 1 已固定：沒有箭頭、動作都不能按。右欄「固定的結構」可以改「至少留幾 nm」或設成完全鎖定，按 ✕ 或右鍵解除固定。' }],
   ['7 多選裡有固定的', { lock: [['HfO₂ 2', 2]], sel: ['HfO₂ 1', 'HfO₂ 2', 'HfO₂ 3', 'HfO₂ 4'], face: '上', note: '同材質全選，其中 HfO₂ 2 已固定：這一步只動另外三個，面板上會說明。' }],
-  ['8 整塊平移碰到固定', { lock: [['Poly-Si 1', Infinity]], sel: ['SiN 1'], tool: 'move', note: 'SiN 1 往下搬會壓到完全不變的 Poly-Si 1：「下」不能按；往上搬可以，但 Poly-Si 1 不會補上來，中間留空。' }],
+  ['8 整塊平移碰到固定', { lock: [['Poly-Si 1', Infinity]], sel: ['SiN 1'], tool: 'move', note: 'SiN 1 往下搬會壓到完全鎖定的 Poly-Si 1：「下」不能按；往上搬可以，但 Poly-Si 1 不會補上來，中間留空。' }],
 ];
 $('#scn').innerHTML = SCN.map(([t], k) => `<option value="${k}">${t}</option>`).join('');
 const NOTE0 = $('#note').textContent;

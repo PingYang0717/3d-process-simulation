@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>簡化版 prototype（v20：固定與消失提醒）</title>
+<style>
+  :root {
+    --c-primary: #0b57d0; --c-primary-bg: #e8f1ff; --c-text: #1f2329; --c-text-2: #646a73; --c-text-soft: #3c4048;
+    --c-border: #e4e6eb; --c-border-2: #eef0f3; --c-bg: #f5f6f8; --c-bg-sub: #fafbfc; --c-surface: #fff; --c-up: #d46b08;
+    --c-warn-bg: #fff8ec; --c-warn-border: #ffd591; --shadow-sm: 0 1px 2px rgba(0,0,0,.06); --radius: 6px; --radius-lg: 8px;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font: 13px/1.5 -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif; color: var(--c-text); background: var(--c-bg); display: flex; flex-direction: column; font-feature-settings: "tnum"; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .mock-note { flex: none; padding: 3px 12px; background: var(--c-warn-bg); border-bottom: 1px solid var(--c-warn-border); color: #ad4e00; font-size: 12px; }
+  .topbar { flex: none; height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--c-surface); border-bottom: 1px solid var(--c-border-2); }
+  .brand { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  .brand i { width: 28px; height: 28px; border-radius: var(--radius); background: var(--c-primary); display: inline-block; }
+  .file { color: var(--c-text-2); font-size: 12px; white-space: nowrap; }
+  .grow { flex: 1; }
+  .btn { height: 32px; padding: 0 12px; border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-surface); white-space: nowrap; }
+  .btn.sm { height: 26px; padding: 0 8px; font-size: 12px; }
+  .btn:hover:not(:disabled) { border-color: var(--c-primary); color: var(--c-primary); }
+  .btn.primary { background: var(--c-primary); border-color: var(--c-primary); color: #fff; }
+  .btn.primary:hover { color: #fff !important; opacity: .9; }
+  .body { flex: 1; min-height: 0; display: flex; }
+
+  /* 左欄：結構清單（和原版同一個位置） */
+  .sider { flex: none; width: 240px; display: flex; flex-direction: column; background: var(--c-surface); border-right: 1px solid var(--c-border-2); }
+  .sider-head { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 12px 16px 8px; font-weight: 600; }
+  .sider-head small { flex: 1; font-weight: 400; font-size: 12px; color: var(--c-text-2); }
+  .list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 8px; }
+  .grp { width: 100%; border: 0; background: none; text-align: left; padding: 5px 8px 3px; border-radius: var(--radius); display: flex; align-items: center; gap: 8px; font-weight: 500; }
+  .grp:hover { background: rgba(0,0,0,.04); }
+  .grp .eye { display: inline-flex; color: var(--c-text-2); }
+  .grp.hid { color: #a0a4ab; }
+  .grp.hid .sw { background: transparent !important; border-style: dashed; }
+  .grp.hid ~ .item { }
+  .item.hid { color: #a0a4ab; }
+  .grp small { margin-left: auto; color: var(--c-text-2); font-size: 12px; font-weight: 400; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex: none; }
+  .item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 3px 8px 3px 30px; border-radius: var(--radius); font-size: 12px; color: var(--c-text-soft); }
+  .item:hover { background: rgba(0,0,0,.04); }
+  .item.on { background: var(--c-primary-bg); color: var(--c-primary); font-weight: 600; }
+  .sider-foot { flex: none; padding: 10px 16px; border-top: 1px solid var(--c-border-2); font-size: 12px; color: var(--c-text-2); }
+
+  /* 中間：3D 在上、三張切面橫排在下（原版排版，不改） */
+  .canvas-area { flex: 1; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+  .pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--c-surface); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-sm); }
+  .pane-3d { flex: 1.45; }
+  .pane-head { min-height: 40px; flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 14px; border-bottom: 1px solid var(--c-border-2); white-space: nowrap; }
+  .pane-head b { font-weight: 600; }
+  .pane-foot { height: 32px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-top: 1px solid var(--c-border-2); font-size: 12px; color: var(--c-text-2); background: var(--c-bg-sub); white-space: nowrap; overflow: hidden; }
+  .seg { display: inline-flex; padding: 2px; background: #f0f1f3; border-radius: var(--radius); }
+  .seg button { height: 24px; padding: 0 10px; border: 0; background: none; border-radius: 4px; font-size: 12px; color: var(--c-text-2); }
+  .seg button.on { background: var(--c-surface); box-shadow: 0 1px 2px rgba(0,0,0,.12); color: var(--c-text); font-weight: 600; }
+  .view3d { flex: 1; min-height: 0; position: relative; background: var(--c-bg); overflow: hidden; touch-action: none; }
+  .view3d canvas { display: block; width: 100%; height: 100%; }
+  .viewbar { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 2px; padding: 2px; background: rgba(255,255,255,.94); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+  .viewbar button { height: 28px; padding: 0 10px; border: 0; background: none; border-radius: var(--radius); font-size: 12px; }
+  .viewbar button:hover { background: rgba(0,0,0,.05); }
+  .legend { position: absolute; left: 12px; top: 12px; background: rgba(255,255,255,.92); border: 1px solid var(--c-border); border-radius: var(--radius-lg); padding: 6px 10px; font-size: 12px; line-height: 1.7; pointer-events: none; }
+  .legend b { color: var(--c-up); }
+  .alabel { position: absolute; transform: translate(-50%, -50%); font-size: 13px; font-weight: 700; color: #ad4e00; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; pointer-events: none; }
+  .slices { flex: 1; min-height: 0; display: flex; gap: 12px; }
+  .slice-pane .pane-head { min-height: 34px; height: 34px; padding: 4px 10px; }
+  .stepper { display: inline-flex; align-items: center; border: 1px solid var(--c-border); border-radius: var(--radius); overflow: hidden; }
+  .stepper button { width: 24px; height: 24px; border: 0; background: none; }
+  .stepper button:hover { background: rgba(0,0,0,.05); }
+  .stepper span { min-width: 58px; text-align: center; font-size: 12px; border-left: 1px solid var(--c-border); border-right: 1px solid var(--c-border); line-height: 24px; }
+  .slice-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; background-image: linear-gradient(#f0f1f3 1px, transparent 1px), linear-gradient(90deg, #f0f1f3 1px, transparent 1px); background-size: 16px 16px; }
+  .slice-body canvas { max-width: 100%; max-height: 100%; cursor: pointer; box-shadow: 0 0 0 1px var(--c-border); background: #fff; }
+
+  /* 右欄：原版的 Inspector 換成簡化的動作面板 */
+  .inspector { flex: none; width: 330px; display: flex; flex-direction: column; background: var(--c-surface); border-left: 1px solid var(--c-border-2); }
+  .panel { flex: none; max-height: 64%; overflow: auto; padding-bottom: 14px; }
+  .changes { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--c-border-2); }
+  .ch-head { flex: none; display: flex; align-items: baseline; gap: 8px; padding: 10px 16px 6px; }
+  .ch-head b { font-size: 14px; font-weight: 600; }
+  .ch-head small { color: var(--c-text-2); font-size: 12px; }
+  .ch-head a { color: var(--c-primary); cursor: pointer; font-size: 12px; white-space: nowrap; }
+  .ch-list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 8px; }
+  .ch-empty { padding: 4px 8px; color: var(--c-text-2); font-size: 12px; }
+  .ch { display: flex; gap: 8px; align-items: baseline; width: 100%; border: 0; background: none; text-align: left; padding: 5px 8px; border-radius: var(--radius); font-size: 12px; }
+  .ch:hover { background: rgba(0,0,0,.04); }
+  .ch .no { flex: none; width: 18px; height: 18px; border-radius: 50%; background: #f0f1f3; color: var(--c-text-2); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
+  .ch .tx { flex: 1; min-width: 0; }
+  .ch .sub { color: var(--c-text-2); }
+  .ch small { flex: none; color: var(--c-text-2); }
+  .sec-title { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 12px 16px 8px; font-weight: 600; font-size: 14px; }
+  .sec-title small { font-weight: 400; font-size: 13px; color: var(--c-text-2); }
+  .sec-title a { font-weight: 400; font-size: 12px; color: var(--c-primary); cursor: pointer; margin-left: 6px; white-space: nowrap; }
+  .panel kbd { display: block; font: 10px/1.2 inherit; color: var(--c-text-2); font-weight: 400; }
+  .panel.off > :not(.sec-title):not(.empty) { opacity: .3; pointer-events: none; }
+  .empty { display: none; margin: 0 16px 8px; padding: 10px 12px; border-radius: var(--radius); background: var(--c-primary-bg); color: var(--c-primary); }
+  .panel.off .empty { display: block; }
+  .tools { display: flex; margin: 0 16px; padding: 2px; background: #f0f1f3; border-radius: var(--radius-lg); }
+  .tools button { flex: 1; height: 34px; border: 0; background: none; border-radius: var(--radius); }
+  .tools button.on { background: var(--c-surface); box-shadow: 0 1px 2px rgba(0,0,0,.12); font-weight: 600; color: var(--c-primary); }
+  .row { margin: 14px 16px 0; }
+  .lbl { color: var(--c-text-2); font-size: 12px; margin-bottom: 4px; }
+  .faces { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+  .faces button, .dpad button { height: 42px; line-height: 1.25; border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-surface); }
+  .faces button.on { border-color: var(--c-up); background: #fff3e6; color: var(--c-up); font-weight: 600; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  .dpad button:hover:not(:disabled) { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .two button { height: 48px; line-height: 1.25; white-space: nowrap; border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-surface); font-size: 14px; font-weight: 600; }
+  .two button:hover:not(:disabled) { border-color: var(--c-up); color: var(--c-up); background: #fff3e6; }
+  .step { display: flex; align-items: center; gap: 6px; color: var(--c-text-2); font-size: 12px; }
+  .step input { width: 56px; height: 28px; border: 1px solid var(--c-border); border-radius: var(--radius); text-align: center; font: inherit; }
+  .nb { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .nb button { border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-surface); padding: 6px 4px 8px; text-align: center; }
+  .nb button.on { border-color: var(--c-primary); background: var(--c-primary-bg); color: var(--c-primary); font-weight: 600; }
+  .nb svg { display: block; margin: 2px auto 0; }
+  .who { margin-top: 6px; font-size: 12px; color: var(--c-text-2); min-height: 18px; }
+  .mats button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 5px 8px; border-radius: var(--radius); text-align: left; }
+  .mats button:hover { background: rgba(0,0,0,.04); }
+  .mats button.on::after { content: "✓ 目前"; margin-left: auto; color: var(--c-primary); font-size: 12px; }
+  .insp-foot { flex: none; padding: 10px 16px; border-top: 1px solid var(--c-border-2); font-size: 12px; display: flex; gap: 8px; align-items: flex-start; }
+  .insp-foot .dot { width: 8px; height: 8px; border-radius: 50%; background: #52c41a; margin-top: 5px; flex: none; }
+  .insp-foot.changed .dot { background: #fa8c16; }
+  .insp-foot a { color: var(--c-primary); cursor: pointer; white-space: nowrap; }
+  /* v19：左右兩欄與 2D 切面可以收合 */
+  .fold { flex: none; width: 24px; height: 24px; padding: 0; border: 0; background: none; border-radius: var(--radius); color: var(--c-text-2); display: inline-flex; align-items: center; justify-content: center; }
+  .fold:hover { background: rgba(0,0,0,.06); color: var(--c-primary); }
+  .rail { display: none; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; width: 100%; height: 100%; border: 0; background: none; color: var(--c-text-2); }
+  .rail:hover { background: rgba(0,0,0,.04); color: var(--c-primary); }
+  .rail span { writing-mode: vertical-rl; letter-spacing: 2px; font-size: 12px; }
+  .sider.collapsed, .inspector.collapsed { width: 36px; }
+  .sider.collapsed > :not(.rail), .inspector.collapsed > :not(.rail) { display: none; }
+  .sider.collapsed > .rail, .inspector.collapsed > .rail { display: flex; }
+  .slices-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  .slices-wrap.collapsed { flex: none; }
+  .slices-wrap.collapsed .slices { display: none; }
+  .slices-bar { flex: none; height: 34px; display: flex; align-items: center; gap: 8px; width: 100%; padding: 0 12px; border: 0; text-align: left; background: var(--c-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+  .slices-bar:hover { color: var(--c-primary); }
+  .slices-bar b { font-weight: 600; }
+  .slices-bar small { color: var(--c-text-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slices-bar .chev { display: inline-block; transition: transform .15s; color: var(--c-text-2); }
+  .slices-wrap:not(.collapsed) .slices-bar .chev { transform: rotate(90deg); }
+  /* v20：固定（鎖）與消失提醒 */
+  .lk { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; color: #b3b8c0; opacity: 0; }
+  .grp .lk { margin-left: 2px; }
+  .item { display: flex; align-items: center; }
+  .item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item:hover .lk, .grp:hover .lk, .aff .lk, .lk.on { opacity: 1; }
+  .lk:hover { background: rgba(0,0,0,.08); color: var(--c-text); }
+  .lk.on { color: #334155; }
+  .lk.part { opacity: 1; color: #94a3b8; }
+  .item.lock .nm { color: #334155; }
+  .sider-head a { font-weight: 400; font-size: 12px; color: var(--c-primary); cursor: pointer; white-space: nowrap; }
+  .lockbar { margin: 0 16px 10px; padding: 8px 10px; border-radius: var(--radius); background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  .lockbar span { flex: 1; }
+  .lockrow { margin: -4px 16px 10px; }
+  .lockrow .btn { display: inline-flex; align-items: center; gap: 4px; color: var(--c-text-2); }
+  .panel.locked .lockrow, .panel.off .lockrow { display: none; }
+  .sider-head small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .panel.locked > :not(.sec-title):not(.lockbar):not(.empty):not(.lockrow) { opacity: .3; pointer-events: none; }
+  .aff { display: flex; align-items: center; gap: 6px; padding: 2px 0; color: var(--c-text-soft); }
+  .aff .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { flex: none; padding: 0 6px; border-radius: 9px; font-size: 11px; line-height: 18px; background: #f0f1f3; color: var(--c-text-2); }
+  .chip.follow { background: var(--c-primary-bg); color: var(--c-primary); }
+  .chip.lock { background: #e2e8f0; color: #334155; }
+  .who .ln { margin-top: 4px; }
+  .who .ln.warn { color: #c2410c; }
+  .who a { color: var(--c-primary); cursor: pointer; white-space: nowrap; }
+  .lchip { position: absolute; transform: translate(-50%, -100%); display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px 1px 4px; border-radius: 10px; background: rgba(51,65,85,.92); color: #fff; font-size: 11px; white-space: nowrap; pointer-events: none; }
+  .lchip.hit { background: #dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,.25); }
+  .confirm { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); width: min(460px, calc(100% - 24px)); padding: 12px 14px; background: #fff; border: 1px solid #fdba74; border-left: 4px solid #ea580c; border-radius: var(--radius-lg); box-shadow: 0 6px 24px rgba(0,0,0,.18); z-index: 4; }
+  .confirm b { display: block; font-size: 14px; margin-bottom: 2px; }
+  .confirm p { margin: 0 0 10px; color: var(--c-text-2); font-size: 12px; }
+  .confirm .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn.danger { border-color: #ea580c; color: #c2410c; }
+  .tip.warn { background: #dc2626; }
+  .ch .sub.warn { color: #c2410c; }
+  .scn { height: 32px; max-width: 300px; border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-surface); font: inherit; padding: 0 8px; }
+  .tip { position: fixed; padding: 3px 8px; border-radius: var(--radius); background: var(--c-up); color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; z-index: 5; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.min.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div class="mock-note" id="note">prototype v20：① 結構可以「固定」（清單上的鎖、右欄按鈕、或按 L）② 外推／內縮預設連外層一起動，碰到固定的就停 ③ 會讓結構整個消失的操作先問過你。右上角「情境示範」可以一鍵擺好各種狀況。</div>
+
+<div class="topbar">
+  <span class="brand"><i></i>Section Editor</span><span class="file">內建範例 · 48×38×40 · 1 格 = 0.5 nm</span>
+  <span class="grow"></span>
+  <select class="scn" id="scn" title="一鍵擺好要示範的狀況"></select>
+  <button class="btn" id="upload">上傳 .vti</button>
+</div>
+
+<div class="body">
+  <div class="sider" id="sider">
+    <button class="rail" data-fold="sider" title="展開結構清單"><b>»</b><span>結構</span></button>
+    <div class="sider-head">結構<small>點材質＝顯示／隱藏</small><a id="unlock-all" hidden>全部解除固定</a><button class="fold" data-fold="sider" title="收合結構清單">«</button></div>
+    <div class="list" id="list"></div>
+    <div class="sider-foot" id="sel-foot"></div>
+  </div>
+
+  <div class="canvas-area">
+    <div class="pane pane-3d">
+      <div class="pane-head"><b>3D</b><span class="grow"></span>
+        <span class="seg" id="mode"><button data-m="after" class="on">改後</button><button data-m="before">改前</button></span>
+        <button class="btn sm" id="undo" title="復原（Ctrl+Z）">↶ 復原</button><button class="btn sm" id="redo" title="重做（Ctrl+Y）">↷ 重做</button>
+      </div>
+      <div class="view3d" id="view3d">
+        <div class="legend"><b>點一下</b>＝選結構<br><b>拖箭頭</b>＝改（放開就完成；箭頭貼在面上）<br><b>拖其他地方</b>＝轉視角<br><b>Shift＋點</b>＝多選同材質<br><b>L</b>＝固定／解除固定</div>
+        <div class="viewbar" id="viewbar"><button data-v="front">正視</button><button data-v="top">上視</button><button data-v="side">側視</button><button data-v="iso">等角</button><button data-v="home">全貌</button><button data-v="fit">對準選取</button></div>
+  <div class="confirm" id="confirm" hidden><b id="cf-title"></b><p id="cf-text"></p><div class="acts"><button class="btn primary" id="cf-safe"></button><button class="btn danger" id="cf-force"></button><button class="btn" id="cf-cancel">取消（Esc）</button></div></div>
+      </div>
+      <div class="pane-foot"><span>左鍵拖＝轉視角；滾輪＝縮放；右鍵拖＝平移；Esc＝取消選取；Ctrl+A＝同材質全選；Ctrl+Z＝復原；F＝對準選取</span><span class="grow"></span><span id="cross"></span></div>
+    </div>
+    <div class="slices-wrap collapsed" id="slices-wrap">
+    <button class="slices-bar" data-fold="slices-wrap" title="展開／收合 2D 切面"><span class="chev">▸</span><b>2D 切面</b><small>XY 正面 · XZ 上視 · YZ 側面（點一下展開／收合）</small></button>
+    <div class="slices">
+      <div class="pane slice-pane"><div class="pane-head"><b>XY 正面</b><span class="stepper" data-ax="2"><button>‹</button><span></span><button>›</button></span></div><div class="slice-body"><canvas id="s-xy"></canvas></div></div>
+      <div class="pane slice-pane"><div class="pane-head"><b>XZ 上視</b><span class="stepper" data-ax="1"><button>‹</button><span></span><button>›</button></span></div><div class="slice-body"><canvas id="s-xz"></canvas></div></div>
+      <div class="pane slice-pane"><div class="pane-head"><b>YZ 側面</b><span class="stepper" data-ax="0"><button>‹</button><span></span><button>›</button></span></div><div class="slice-body"><canvas id="s-yz"></canvas></div></div>
+    </div>
+    </div>
+  </div>
+
+  <div class="inspector" id="inspector">
+    <button class="rail" data-fold="inspector" title="展開動作面板"><b>«</b><span>要做什麼 · 改了哪些</span></button>
+    <div class="panel" id="panel">
+      <div class="sec-title">要做什麼<small id="selname"></small> <a id="all-same" hidden></a><span class="grow"></span><button class="fold" data-fold="inspector" title="收合動作面板">»</button></div>
+      <div class="empty">先在 3D、切面或左邊的清單點一個結構</div>
+      <div class="lockrow"><button class="btn sm" id="lockbtn" title="固定之後不能改它，別的結構推拉時也動不到它"></button></div>
+      <div class="lockbar" id="lockbar" hidden><span id="lockmsg"></span><button class="btn sm" id="unlock-sel">解除固定</button></div>
+      <div class="tools" id="tools"><button data-tool="push">推拉一面</button><button data-tool="move">整塊平移</button><button data-tool="mat">換材質</button></div>
+
+      <div id="t-push">
+        <div class="row"><div class="lbl">哪一面（或直接點 3D 上的箭頭）</div><div class="faces" id="faces"></div></div>
+        <div class="row two"><button id="shrink"></button><button id="grow"></button></div>
+      </div>
+      <div id="t-move" hidden>
+        <div class="row"><div class="lbl">往哪邊搬（按一下搬一次，或在 3D 上拖箭頭）</div><div class="dpad" id="dpad"></div></div>
+      </div>
+      <div id="t-step" class="row step">每次 <input id="n" type="number" min="1" max="20" value="1"> 格 ＝ <span id="nm"></span> nm</div>
+      <div id="t-nb" class="row">
+        <div class="lbl">外層材質（預設跟著移動；固定的不會動）</div>
+        <div class="nb" id="nb">
+          <button data-nb="follow">跟著移動
+            <svg width="104" height="46" viewBox="0 0 104 46"><rect x="6" y="2" width="92" height="6" fill="#eef0f3"/><rect x="6" y="8" width="92" height="12" fill="#c9b6e8"/><rect x="6" y="20" width="92" height="24" fill="#e8604c"/><path d="M52 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg></button>
+          <button data-nb="stay">留在原地
+            <svg width="104" height="46" viewBox="0 0 104 46"><rect x="6" y="2" width="92" height="14" fill="#eef0f3"/><rect x="6" y="16" width="92" height="4" fill="#c9b6e8"/><rect x="6" y="20" width="92" height="24" fill="#e8604c"/><path d="M52 40V26m-5 5 5-6 5 6" stroke="#fff" stroke-width="2" fill="none"/></svg></button>
+        </div>
+        <div class="who" id="who"></div>
+      </div>
+      <div id="t-mat" hidden>
+        <div class="row"><div class="lbl">換成哪一種（點一下就換）</div><div class="mats" id="mats"></div></div>
+      </div>
+    </div>
+    <div class="changes">
+      <div class="ch-head"><b>改了哪些</b><small id="ch-sum"></small><span class="grow"></span><a id="reset" hidden>全部還原</a></div>
+      <div class="ch-list" id="ch-list"></div>
+    </div>
+    <div class="insp-foot" id="foot"><span class="dot"></span><span id="msg" class="grow">尚未改動</span><a id="undo2" hidden>復原</a></div>
+  </div>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const $ = (s) => document.querySelector(s);
+// ---------------------------------------------------------------- 體素模型
+const X = 48, Y = 38, Z = 40, N = X * Y * Z, NM = 0.5, LINER_MAX = 4, AIR = 0;
+const DIM = [X, Y, Z], STEP = [1, X, X * Y];
+const MATS = [
+  { name: '空氣', color: '#ffffff' }, { name: 'Si (p)', color: '#ddd8cb' }, { name: 'STI SiO₂', color: '#9fd3e8' }, { name: 'Si fin', color: '#f3b9a1' },
+  { name: 'HfO₂', color: '#7fc8a9' }, { name: 'TiN', color: '#8e9aaf' }, { name: 'Poly-Si', color: '#e8604c' }, { name: 'SiN', color: '#c9b6e8' }, { name: 'SiGe', color: '#e3b505' },
+];
+const FACES = {
+  上: { a: 1, s: 1, opp: '下' }, 下: { a: 1, s: -1, opp: '上' }, 左: { a: 0, s: -1, opp: '右' },
+  右: { a: 0, s: 1, opp: '左' }, 前: { a: 2, s: 1, opp: '後' }, 後: { a: 2, s: -1, opp: '前' },
+};
+const idx = (x, y, z) => (z * Y + y) * X + x;
+const coord = (i) => { const x = i % X, y = ((i - x) / X) % Y; return [x, y, (i - x - y * X) / (X * Y)]; };
+/** 沿軸 a 走 s 一格；出界回 -1。 */
+const next = (i, a, s) => { const c = coord(i)[a] + s; return c < 0 || c >= DIM[a] ? -1 : i + s * STEP[a]; };
+
+function initial() {
+  const st = { mat: new Uint8Array(N), sid: new Uint8Array(N), structs: [null], cnt: null };
+  const add = (mat, n) => { st.structs.push({ id: st.structs.length, mat, name: `${MATS[mat].name}${n ? ' ' + n : ''}` }); return st.structs.length - 1; };
+  const fill = (x0, x1, y0, y1, z0, z1, id, keep) => {
+    for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const i = idx(x, y, z);
+      if (keep && !keep(st.mat[i])) continue;
+      st.mat[i] = st.structs[id].mat; st.sid[i] = id;
+    }
+  };
+  fill(0, X - 1, 0, 5, 0, Z - 1, add(1));
+  fill(0, X - 1, 6, 10, 0, Z - 1, add(2));
+  const fins = [[11, 16], [31, 36]];
+  fins.forEach(([a, b], k) => fill(a, b, 6, 20, 0, Z - 1, add(3, k + 1)));
+  const notFin = (m) => m !== 3;
+  [[8, 15], [24, 31]].forEach(([z0, z1], g) => {
+    fill(4, 43, 11, 28, z0, z1, add(6, g + 1), (m) => m === AIR);
+    fins.forEach(([a, b], k) => {
+      fill(a - 2, b + 2, 11, 22, z0, z1, add(5, g * 2 + k + 1), notFin);
+      fill(a - 1, b + 1, 11, 21, z0, z1, add(4, g * 2 + k + 1), notFin);
+    });
+    fill(4, 43, 29, 31, z0, z1, add(7, g + 1));
+  });
+  markThin(st);
+  st.cnt = new Int32Array(st.structs.length);
+  for (let i = 0; i < N; i++) st.cnt[st.sid[i]]++;
+  return st;
+}
+/**
+ * 哪些結構是「薄層」：載入時決定一次，之後怎麼改都不變（Poly 被蓋薄了也還是固定的）。
+ * 每一格的厚度＝穿過它的三個方向裡最短的那一段；結構裡一半以上的格子厚度 ≤ LINER_MAX 格就是薄層
+ * （用中位數，轉角那幾格比較厚不影響判斷）。
+ */
+function markThin(st) {
+  const local = new Uint8Array(N).fill(255);
+  for (let a = 0; a < 3; a++) {
+    const b = (a + 1) % 3, c = (a + 2) % 3, p = [0, 0, 0];
+    for (p[b] = 0; p[b] < DIM[b]; p[b]++) for (p[c] = 0; p[c] < DIM[c]; p[c]++) {
+      let k = 0;
+      while (k < DIM[a]) {
+        p[a] = k; const i0 = idx(p[0], p[1], p[2]), id = st.sid[i0];
+        let e = k + 1;
+        while (e < DIM[a] && st.sid[i0 + (e - k) * STEP[a]] === id) e++;
+        const len = Math.min(255, e - k);
+        if (id) for (let t = k; t < e; t++) { const i = i0 + (t - k) * STEP[a]; if (len < local[i]) local[i] = len; }
+        k = e;
+      }
+    }
+  }
+  const total = new Array(st.structs.length).fill(0), thinCells = new Array(st.structs.length).fill(0);
+  for (let i = 0; i < N; i++) { const id = st.sid[i]; if (!id) continue; total[id]++; if (local[i] <= LINER_MAX) thinCells[id]++; }
+  st.structs.forEach((s, id) => { if (s) s.thin = thinCells[id] * 2 >= total[id]; });
+}
+const cloneSt = (st) => ({ mat: st.mat.slice(), sid: st.sid.slice(), cnt: st.cnt.slice(), structs: st.structs.map((s) => s && { ...s }) });
+/** 改一格（cnt＝每個結構剩幾格，用來判斷「整個消失」）。 */
+const setCell = (st, i, m, k) => { st.cnt[st.sid[i]]--; st.mat[i] = m; st.sid[i] = k; st.cnt[k]++; };
+const put = (st, to, from) => setCell(st, to, st.mat[from], st.sid[from]);
+/**
+ * v20 固定：固定的結構一格都不會變。
+ * - 它不能被編輯、不會跟著移動、也不會被吃掉或變厚；
+ * - 別人外推／平移要用到它的格子＝擋住（整面停）；
+ * - 別人內縮後本來該由它補上的地方＝留空（空氣），gap 記下是誰。
+ */
+const locked = new Set();
+let gap = new Set();
+/** a → b 之間整個消失的結構。 */
+const vanishedIn = (a, b) => a.structs.filter((s) => s && a.cnt[s.id] > 0 && b.cnt[s.id] === 0);
+
+/** 從 i 起沿 (a, s) 收集貼著的薄層（可以一層疊一層）；遇到空氣、結構 id 自己、或不是薄層的結構就停。 */
+function liners(st, i, a, s, id) {
+  const out = [];
+  while (i >= 0) {
+    const k = st.sid[i];
+    if (!k || k === id || !st.structs[k].thin || locked.has(k)) break; // 固定的薄層不跟
+    out.push(i);
+    i = next(i, a, s);
+  }
+  return out;
+}
+/** 結構在 (a, s) 方向每一排最外側的那一格。 */
+function outer(st, id, a, s) {
+  const res = [], b = (a + 1) % 3, c = (a + 2) % 3, p = [0, 0, 0];
+  for (p[b] = 0; p[b] < DIM[b]; p[b]++) for (p[c] = 0; p[c] < DIM[c]; p[c]++) for (let k = 0; k < DIM[a]; k++) {
+    p[a] = s > 0 ? DIM[a] - 1 - k : k;
+    const i = idx(p[0], p[1], p[2]);
+    if (st.sid[i] === id) { res.push(i); break; }
+  }
+  return res;
+}
+function bbox(st, id) {
+  const lo = [X, Y, Z], hi = [-1, -1, -1];
+  for (let i = 0; i < N; i++) if (st.sid[i] === id) { const c = coord(i); for (let k = 0; k < 3; k++) { if (c[k] < lo[k]) lo[k] = c[k]; if (c[k] > hi[k]) hi[k] = c[k]; } }
+  return hi[0] < 0 ? null : { lo, hi };
+}
+/** 最近一次被擋下來的原因：{ why: 'edge' | 'last' | 'self', name }。 */
+let lastBlock = null;
+/**
+ * 往外一格會吃到 b 這一格：只有緊貼的那一層可以變薄，而且至少要留 1 格
+ * （不會把一層吃光、也不會動到更外面那一層）。空氣可以吃；出界、碰到自己不行。
+ */
+function canTake(st, b, a, s, id) {
+  if (b < 0) return { why: 'edge' };
+  if (st.mat[b] === AIR) return null;
+  const k = st.sid[b];
+  if (locked.has(k)) return { why: 'lock', name: st.structs[k].name, sid: k };
+  if (k === id) return { why: 'self' };
+  const b2 = next(b, a, s);
+  return b2 >= 0 && st.sid[b2] === k ? null : { why: 'last', name: st.structs[k].name };
+}
+/**
+ * 這一步要動的每一排（v19）：回傳每一排的「切口」那一格。
+ * 結構自己的排＝最外側那一格；跟著移動時，再從切口往旁邊（同一層）找相連的薄層——那一排也在同一層切開，
+ * 所以包在外面的薄層整圈一起動（側壁推出去，蓋在上面的那一段、轉角也跟著），不會只有結構那幾排在動。
+ * 往旁邊碰到不是薄層的就停，所以離得遠、只是材質相連的薄層不會被拉動。
+ */
+function pushRows(st, id, a, s, follow) {
+  const cuts = outer(st, id, a, s);
+  if (!follow) return cuts;
+  const b = (a + 1) % 3, c = (a + 2) % 3, rowKey = (i) => { const p = coord(i); return p[b] * 4096 + p[c]; };
+  // 由外往內一層一層收：一排可以從好幾層走到時取最外側那一層（結果和掃描順序無關）
+  const seeds = cuts.slice().sort((p, q) => s * (coord(q)[a] - coord(p)[a])), seen = new Set(cuts.map(rowKey));
+  for (const seed of seeds) {
+    const stack = [seed];
+    while (stack.length) {
+      const i = stack.pop();
+      for (const [la, ls] of [[b, 1], [b, -1], [c, 1], [c, -1]]) {
+        const nb = next(i, la, ls);
+        if (nb < 0) continue;
+        const k = st.sid[nb];
+        if (!k || k === id || !st.structs[k].thin || locked.has(k) || seen.has(rowKey(nb))) continue;
+        seen.add(rowKey(nb)); cuts.push(nb); stack.push(nb);
+      }
+    }
+  }
+  return cuts;
+}
+/**
+ * 外推一格（整面一起，有一排推不動就整面不動）：每一排在切口多長一格（切口那一格往外複製一格），
+ * 跟著移動＝外面貼著的薄層整列往外移一格，薄層外面那一層變薄一格；留在原地＝緊貼的那一層變薄一格。
+ */
+function grow1(st, id, a, s, follow) {
+  const plan = [];
+  for (const c of pushRows(st, id, a, s, follow)) {
+    const t = next(c, a, s);
+    const L = follow && t >= 0 ? liners(st, t, a, s, id) : [];
+    const block = canTake(st, L.length ? next(L[L.length - 1], a, s) : t, a, s, id);
+    if (block) { lastBlock = block; return 0; }
+    plan.push([c, t, L]);
+  }
+  for (const [c, t, L] of plan) {
+    for (let j = L.length - 1; j >= 0; j--) put(st, next(L[j], a, s), L[j]);
+    put(st, t, c);
+  }
+  return plan.length;
+}
+/** 內縮一格：每一排拿掉切口那一格；跟著移動＝薄層整列跟著退；空出來的由外面的材質補滿。 */
+function shrink1(st, id, a, s, follow) {
+  let done = 0; // v20：可以一路縮到消失（由上層決定要不要先問）
+  for (const c of pushRows(st, id, a, s, follow)) { // 排與排互不相干，切口先全部找好再改
+    const o = next(c, a, s);
+    const L = follow && o >= 0 ? liners(st, o, a, s, id) : [];
+    let to = c;
+    for (const j of L) { put(st, to, j); to = j; }
+    const beyond = next(to, a, s);
+    if (beyond >= 0 && locked.has(st.sid[beyond])) { gap.add(st.sid[beyond]); setCell(st, to, AIR, 0); } // 固定的不補過來：留空
+    else if (beyond >= 0) put(st, to, beyond); else if (!L.length) setCell(st, to, AIR, 0);
+    done++;
+  }
+  if (!done) lastBlock = { why: 'min' };
+  return done;
+}
+/** 包在結構外面的薄層：從結構出發，一路沿著相連的薄層收（轉角也收得到），碰到不是薄層的就停。 */
+function shellMask(st, id, mask) {
+  const queue = [];
+  for (let i = 0; i < N; i++) if (st.sid[i] === id) { mask[i] = 1; queue.push(i); }
+  while (queue.length) {
+    const i = queue.pop();
+    for (let a = 0; a < 3; a++) for (const s of [1, -1]) {
+      const nb = next(i, a, s);
+      if (nb < 0 || mask[nb]) continue;
+      const k = st.sid[nb];
+      if (k && k !== id && st.structs[k].thin && !locked.has(k)) { mask[nb] = 2; queue.push(nb); }
+    }
+  }
+}
+/** 整塊搬一格：前面緊貼的那一層變薄、後面空出來的由後面的材質補滿；跟著移動＝外面的薄層一起搬。 */
+function move1(st, id, a, s, follow) {
+  const mask = new Uint8Array(N);
+  if (follow) shellMask(st, id, mask); else for (let i = 0; i < N; i++) if (st.sid[i] === id) mask[i] = 1;
+  const cells = [];
+  for (let i = 0; i < N; i++) {
+    if (!mask[i]) continue;
+    const t = next(i, a, s);
+    if (t < 0 || !mask[t]) { const block = canTake(st, t, a, s, id); if (block) { lastBlock = block; return 0; } }
+    cells.push(i);
+  }
+  if (!cells.length) return 0;
+  const mats = cells.map((i) => st.mat[i]), sids = cells.map((i) => st.sid[i]);
+  const fills = cells.map((i) => { let j = i; do j = next(j, a, -s); while (j >= 0 && mask[j]); return j; });
+  const ok = (j) => j >= 0 && !locked.has(st.sid[j]); // 後面是固定的就不補：留空
+  for (const j of fills) if (j >= 0 && locked.has(st.sid[j])) gap.add(st.sid[j]);
+  const fm = fills.map((j) => (ok(j) ? st.mat[j] : AIR)), fs = fills.map((j) => (ok(j) ? st.sid[j] : 0));
+  cells.forEach((i, k) => setCell(st, i, fm[k], fs[k]));
+  for (const pass of [2, 1]) cells.forEach((i, k) => { if (mask[i] === pass) setCell(st, next(i, a, s), mats[k], sids[k]); });
+  return cells.length;
+}
+/** 套用一步，回傳實際做了幾格（帶正負號）。 */
+function applyOp(st, op) {
+  if (op.kind === 'mat') {
+    let changed = 0;
+    for (const id of op.ids) {
+      const s = st.structs[id];
+      if (s.mat === op.mat) continue;
+      s.mat = op.mat; changed++;
+      for (let i = 0; i < N; i++) if (st.sid[i] === id) st.mat[i] = op.mat;
+      let k = 1; // 名字跟著材質換：SiN 1 → SiGe 1
+      while (st.structs.some((t) => t && t !== s && t.name === `${MATS[op.mat].name} ${k}`)) k++;
+      s.name = `${MATS[op.mat].name} ${k}`;
+    }
+    return changed;
+  }
+  const f = FACES[op.face], sign = Math.sign(op.n);
+  let k = 0;
+  lastBlock = null; gap = new Set();
+  const allGap = new Set();
+  for (; k < Math.abs(op.n); k++) {
+    // 每一格都先在複本上試：多選要每個結構都做得到才做；safe＝會讓結構消失的那一格不做
+    const t = cloneSt(st), ids = op.ids.filter((id) => t.cnt[id] > 0);
+    if (!ids.length) { lastBlock = { why: 'min' }; break; }
+    gap = new Set();
+    const ok = ids.every((id) => (op.kind === 'move' ? move1(t, id, f.a, f.s * sign, op.follow) : sign > 0 ? grow1(t, id, f.a, f.s, op.follow) : shrink1(t, id, f.a, f.s, op.follow)));
+    if (!ok) break;
+    const gone = op.safe ? vanishedIn(st, t) : [];
+    if (gone.length) { lastBlock = { why: 'vanish', name: gone.map((g) => g.name).join('、') }; break; }
+    st.mat.set(t.mat); st.sid.set(t.sid); st.cnt.set(t.cnt);
+    for (const g of gap) allGap.add(g);
+  }
+  gap = allGap;
+  return k * sign;
+}
+/** 會跟著的鄰居（材質名稱，依碰到的順序）。 */
+const matNames = (set) => [...set].sort((p, q) => p - q).map((m) => MATS[m].name);
+/**
+ * 這一步會碰到的鄰居。follow＝開著「跟著移動」時：薄層（follow）一起動，薄層外面厚的那一層（stay）不動；
+ * 關著時：貼著的全部留在原地（stay）。sids＝會跟著的結構。
+ */
+function neighbors(st, ids, kind, face, follow) {
+  const fol = new Set(), stay = new Set(), sids = new Set(), roles = new Map();
+  const hit = (i) => { const k = st.sid[i]; if (locked.has(k)) roles.set(k, 'lock'); else { stay.add(st.mat[i]); if (!roles.has(k)) roles.set(k, 'stay'); } };
+  for (const id of ids) {
+  if (kind === 'move') {
+    const mask = new Uint8Array(N);
+    if (follow) shellMask(st, id, mask); else for (let i = 0; i < N; i++) if (st.sid[i] === id) mask[i] = 1;
+    for (let i = 0; i < N; i++) {
+      if (!mask[i]) continue;
+      if (mask[i] === 2) { fol.add(st.mat[i]); sids.add(st.sid[i]); }
+      for (let a = 0; a < 3; a++) for (const s of [1, -1]) { const nb = next(i, a, s); if (nb >= 0 && !mask[nb] && st.mat[nb] !== AIR) hit(nb); }
+    }
+  } else {
+    const f = FACES[face];
+    for (const c of pushRows(st, id, f.a, f.s, follow)) {
+      if (st.sid[c] !== id) { fol.add(st.mat[c]); sids.add(st.sid[c]); } // 旁邊跟著動的那幾排
+      const t = next(c, f.a, f.s);
+      if (t < 0 || st.mat[t] === AIR) continue;
+      const L = follow ? liners(st, t, f.a, f.s, id) : [];
+      for (const l of L) { fol.add(st.mat[l]); sids.add(st.sid[l]); }
+      const b = L.length ? next(L[L.length - 1], f.a, f.s) : t;
+      if (b >= 0 && st.mat[b] !== AIR && st.sid[b] !== id) hit(b);
+    }
+  }
+  }
+  for (const k of sids) roles.set(k, 'follow');
+  for (const id of ids) roles.delete(id);
+  return { follow: matNames(fol), stay: matNames(stay), sids, roles };
+}
+const limitText = (b) => !b ? '' : b.why === 'lock' ? `到已固定的 ${b.name} 為止` : b.why === 'vanish' ? `再多 ${b.name} 就會整個消失` : b.why === 'min' ? '已經沒有東西可以縮' : b.why === 'edge' ? '到模型邊界為止' : b.why === 'self' ? '到碰到自己為止' : `到 ${b.name} 剩 1 格為止`;
+const blockText = (b) => !b ? '' : b.why === 'lock' ? `被已固定的 ${b.name} 擋住` : b.why === 'vanish' ? `再做下去 ${b.name} 會整個消失` : b.why === 'edge' ? '已經到模型邊界' : b.why === 'self' ? '會碰到自己' : b.why === 'min' ? '已經沒有東西可以縮' : `${b.name} 只剩 1 格`;
+/** 這個方向最多還能做幾格、被什麼擋住（在複本上試，不動到模型）。 */
+function roomOf(st, op) {
+  const t = cloneSt(st), n = Math.abs(applyOp(t, { ...op, n: Math.sign(op.n) * 60, safe: true })); // 不會讓任何結構消失的最大格數
+  return { n, block: lastBlock };
+}
+/** 這一步之後，沒有跟著動的鄰居誰被蓋掉、誰補上空出來的地方。 */
+function effects(before, after, ids, folSids) {
+  const own = new Set(ids);
+  const lost = new Set(), gained = new Set();
+  for (let i = 0; i < N; i++) {
+    const b = before.sid[i], a = after.sid[i];
+    if (a === b) continue;
+    if (b && !own.has(b) && !folSids.has(b)) lost.add(before.mat[i]);
+    if (a && !own.has(a) && !folSids.has(a)) gained.add(after.mat[i]);
+  }
+  const both = new Set([...lost].filter((m) => gained.has(m)));
+  return { lost: matNames([...lost].filter((m) => !both.has(m))), gained: matNames([...gained].filter((m) => !both.has(m))), both: matNames(both) };
+}
+
+// ---------------------------------------------------------------- 狀態
+const KEYCAP = { 上: '↑', 下: '↓', 左: '←', 右: '→', 前: 'PgDn', 後: 'PgUp' };
+const KEY_FACE = { ArrowUp: '上', ArrowDown: '下', ArrowLeft: '左', ArrowRight: '右', PageDown: '前', PageUp: '後' };
+const EYE_ON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l18 18M10.6 5.1A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.5 6.6C3.7 8.5 2 12 2 12s3.6 7 10 7c1.6 0 3-.4 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.200 4.200"/></svg>';
+const LOCK_ON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2" fill="currentColor" fill-opacity=".25"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+const LOCK_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.500-1.900"/></svg>';
+/** 清單／面板上的鎖：全部固定＝實心、部分＝淡色、沒有＝滑過才出現。 */
+const lockBtn = (ids, label) => { const n = ids.filter((id) => locked.has(id)).length; return `<span class="lk ${n === ids.length ? 'on' : n ? 'part' : ''}" data-lock="${ids.join(',')}" title="${n === ids.length ? '解除固定' : '固定'} ${label}">${n ? LOCK_ON : LOCK_OFF}</span>`; };
+const ORIG = initial();
+let model = cloneSt(ORIG), undoStack = [], redoStack = []; // 每一筆：{ st: 這一步之前的狀態, text, id, cells }
+const hidden = new Set(); // 在 3D 隱藏的材質
+const diffCount = (a, b) => { let n = 0; for (let i = 0; i < N; i++) if (a.mat[i] !== b.mat[i]) n++; return n; };
+const ui = { anchor: null, sels: [], get sel() { return this.sels[this.sels.length - 1] || 0; }, tool: 'push', face: '上', nb: 'follow', cur: [24, 20, 12], before: false };
+let drag = null;
+let pending = null; // 等使用者確認的一步：{ op, live, safeN, gone }
+const shown = () => (ui.before ? ORIG : drag ? drag.live : pending ? pending.live : model);
+/** 選到的裡面可以編輯的（沒固定的）。 */
+const editable = () => ui.sels.filter((id) => !locked.has(id));
+const stepN = () => Math.max(1, Math.min(20, Math.round(+$('#n').value) || 1));
+const nm = (k) => (Math.abs(k) * NM).toFixed(1);
+const curOp = (face, n) => ({ kind: ui.tool === 'move' ? 'move' : 'push', ids: editable(), face, n, follow: ui.nb === 'follow' });
+/** 選到的結構怎麼稱呼：一個＝名字；兩三個＝全部列出；更多＝「Poly-Si ×4」。 */
+const namesOf = (st, ids) => (ids.length <= 3 ? ids.map((id) => st.structs[id].name).join('、') : `${MATS[st.structs[ids[0]].mat].name} ×${ids.length}`);
+
+/** 一步的說明：第一句是做了什麼，後面每一句是一種鄰居怎麼了（都寫出幾格）；沒做滿再加一句為什麼。 */
+function describe(op, n, name, nb, eff, block, gone, gaps) {
+  if (op.kind === 'mat') return [`${name} 換成 ${MATS[op.mat].name}（現在叫 ${namesOf(model, op.ids)}）`];
+  const k = Math.abs(n), parts = [];
+  parts.push(op.kind === 'push' ? `${name} ${op.face}面${n > 0 ? '外推' : '內縮'} ${k} 格（${nm(n)} nm）` : `${name} 往${n > 0 ? op.face : FACES[op.face].opp}搬 ${k} 格（${nm(n)} nm）`);
+  if (op.follow && nb.follow.length) parts.push(`${nb.follow.join('、')} 跟著移動 ${k} 格`);
+  if (eff.lost.length) parts.push(`${eff.lost.join('、')} 變薄 ${k} 格`);
+  if (eff.gained.length) parts.push(`${eff.gained.join('、')} 變厚 ${k} 格`);
+  if (eff.both.length) parts.push(`${eff.both.join('、')} 一側變薄、另一側變厚 ${k} 格`);
+  if (gaps.length) parts.push(`${gaps.join('、')} 已固定、沒有跟著：中間留空`);
+  if (gone.length) parts.push(`⚠ ${gone.join('、')} 整個消失`);
+  if (k < Math.abs(op.n) && block && !(block.why === 'min' && gone.length)) parts.push(`只做了 ${k} 格：${blockText(block)}`);
+  return parts;
+}
+function say(t, canUndo) { $('#msg').textContent = t; $('#undo2').hidden = !canUndo; }
+/** 會消失先問：放開拖曳／按按鈕後不直接套用，讓使用者選「做到不消失為止」、「照做」或「取消」。 */
+function askVanish(op, live, gone) {
+  const t = cloneSt(model), safeN = applyOp(t, { ...op, safe: true });
+  pending = { op, live, safeN, gone };
+  const names = gone.map((g) => g.name).join('、'), k = Math.abs(safeN), verb = op.kind === 'move' ? '搬' : op.n > 0 ? '外推' : '內縮';
+  $('#cf-title').textContent = `⚠ 這一步會讓 ${names} 整個消失`;
+  $('#cf-text').textContent = `${verb} ${Math.abs(op.n)} 格之後 ${names} 一格都不剩（之後還是可以用「復原」救回來）。`;
+  $('#cf-safe').textContent = k ? `只${verb} ${k} 格（保留 ${names}）` : '不能再少了'; $('#cf-safe').disabled = !k;
+  $('#cf-force').textContent = `照做，讓 ${names} 消失`;
+  $('#confirm').hidden = false;
+  say(`等你確認：${names} 會整個消失`, false);
+  render();
+}
+function closeAsk(act) {
+  if (!pending) return;
+  const p = pending; pending = null; $('#confirm').hidden = true;
+  if (act === 'safe') commit({ ...p.op, n: p.safeN }, true);
+  else if (act === 'force') commit(p.op, true);
+  else { say('已取消，沒有改動', false); render(); }
+}
+function commit(op, force) {
+  if (op.kind !== 'mat' && !op.ids.length) return say('選到的結構已固定，先解除固定才能改', false);
+  if (op.kind !== 'mat' && !force) {
+    const t = cloneSt(model); applyOp(t, op);
+    const gone = vanishedIn(model, t);
+    if (gone.length) return askVanish(op, t, gone);
+  }
+  const before = cloneSt(model);
+  const nb = op.kind === 'mat' ? null : neighbors(model, op.ids, op.kind, op.n > 0 || op.kind === 'push' ? op.face : FACES[op.face].opp, op.follow);
+  const name = namesOf(model, op.ids);
+  const n = applyOp(model, op);
+  const block = lastBlock, gaps = [...gap].map((k) => model.structs[k].name), gone = vanishedIn(before, model).map((g) => g.name);
+  ui.sels = ui.sels.filter((id) => model.cnt[id] > 0);
+  if (!n) { model = before; say(op.kind === 'mat' ? '已經是這個材質' : `擋下來了：${blockText(block)}`, false); return render(); }
+  const parts = describe(op, n, name, nb, nb && effects(before, model, op.ids, nb.sids), block, gone, gaps), text = parts.join(' · ');
+  undoStack.push({ st: before, text, parts, ids: op.ids, cells: diffCount(before, model) }); if (undoStack.length > 50) undoStack.shift(); redoStack = [];
+  say(text, true);
+  render();
+}
+function undo() {
+  if (pending) return closeAsk();
+  if (!undoStack.length) return;
+  const e = undoStack.pop();
+  redoStack.push({ ...e, st: model }); model = e.st;
+  if (e.reset) undoStack = e.prev;
+  say(e.reset ? '已取消全部還原' : `已復原：${e.text}`, false); render();
+}
+function redo() {
+  if (!redoStack.length) return;
+  const e = redoStack.pop();
+  if (e.reset) undoStack = [{ ...e, st: model, prev: undoStack }]; else undoStack.push({ ...e, st: model });
+  model = e.st; say(`已重做：${e.text}`, true); render();
+}
+/** 固定／解除固定：全部都固定了＝解除，否則＝全部固定。固定不算一步（不進復原）。 */
+function toggleLock(ids) {
+  ids = ids.filter((id) => model.cnt[id] > 0);
+  if (!ids.length || drag || pending) return;
+  const on = !ids.every((id) => locked.has(id));
+  for (const id of ids) on ? locked.add(id) : locked.delete(id);
+  say(`${on ? '已固定' : '已解除固定'}：${namesOf(model, ids)}${on ? '（不能改它，別的結構也動不到它）' : ''}`, false);
+  render();
+}
+/** 選結構。add＝Shift／Ctrl＋點：加進選取（只能同材質）；已經選到的再點一次＝拿掉。 */
+function select(id, moveCursor = true, add = false) {
+  if (!id) { if (add) return; ui.sels = []; }
+  else if (add && ui.sels.length) {
+    if (ui.sels.includes(id)) ui.sels = ui.sels.filter((x) => x !== id);
+    else if (model.structs[id].mat !== model.structs[ui.sel].mat) { say(`只能多選相同材質：已選的是 ${MATS[model.structs[ui.sel].mat].name}`, false); return; }
+    else ui.sels.push(id);
+  } else ui.sels = [id];
+  if (ui.sel) hidden.delete(model.structs[ui.sel].mat); // 選到隱藏的材質就把它打開
+  const b = ui.sel && bbox(model, ui.sel);
+  if (b && moveCursor) ui.cur = b.lo.map((v, k) => Math.floor((v + b.hi[k]) / 2));
+  render();
+}
+/** 同材質全選（Ctrl+A、面板上的「選全部」）。 */
+function selectSame() {
+  if (!ui.sel) return;
+  const m = model.structs[ui.sel].mat, last = ui.sel;
+  ui.sels = [...model.structs.filter((s) => s && s.mat === m && s.id !== last).map((s) => s.id), last];
+  render();
+}
+
+// ---------------------------------------------------------------- 3D
+const host = $('#view3d');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+host.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#f5f6f8');
+const camera = new THREE.PerspectiveCamera(40, 1, 0.5, 2000);
+const CENTER = new THREE.Vector3(X / 2, Y / 2, Z / 2), SIZE = Math.hypot(X, Y, Z);
+scene.add(new THREE.HemisphereLight(new THREE.Color(0.62, 0.62, 0.62), new THREE.Color(0.5, 0.5, 0.5), Math.PI));
+const key = new THREE.DirectionalLight(0xffffff, 0.3 * Math.PI); key.position.set(1, 2, 1.5); scene.add(key);
+
+// 按在箭頭上＝編輯（先攔下來，OrbitControls 才不會開始轉）
+host.addEventListener('pointerdown', onDownCapture, true);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(CENTER); controls.zoomToCursor = true; controls.minDistance = 8; controls.maxDistance = SIZE * 6;
+controls.maxPolarAngle = Math.PI - 0.02; controls.minPolarAngle = 0.02;
+const VIEWS = { front: [0, 0, 1], top: [0, 1, 0.001], side: [1, 0, 0], iso: [0.75, 0.55, 1], home: [0.75, 0.55, 1] };
+function setView(v) {
+  let c = CENTER, d = SIZE * 1.3;
+  const b = v === 'fit' && ui.sel && bbox(model, ui.sel);
+  if (b) { c = new THREE.Vector3(...b.lo.map((l, k) => (l + b.hi[k] + 1) / 2)); d = Math.max(18, Math.hypot(...b.hi.map((h, k) => h - b.lo[k] + 1)) * 1.7); }
+  const dir = v === 'fit' ? camera.position.clone().sub(controls.target).normalize() : new THREE.Vector3(...VIEWS[v]).normalize();
+  controls.target.copy(c); camera.position.copy(c).addScaledVector(dir, d); controls.update(); dirty = true;
+}
+
+const mainMat = new THREE.MeshLambertMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+const lockEdgeMat = new THREE.LineBasicMaterial({ color: 0x1e293b, transparent: true, opacity: 0.85 });
+let chips = []; // 固定的結構頭上的小鎖：{ el, pos }
+// 聚焦：選到的結構照原色畫，其他結構半透明（先只寫深度、再上色，才不會前後疊色不均）
+const ghostDepthMat = new THREE.MeshBasicMaterial({ colorWrite: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+const ghostMat = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.4, depthWrite: false });
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x0b57d0, depthTest: false, transparent: true, opacity: 0.7 });
+let dyn = [], pickables = [], faceQuad = null;
+const COL = MATS.map((m) => new THREE.Color(m.color));
+/** 體素表面 → 網格。cellOk(i)：這一格要不要畫；faceOk(i, nb)：朝 nb（-1＝出界）的那一面要不要畫。 */
+function buildGeom(st, cellOk, faceOk) {
+  const pos = [], nor = [], col = [], cells = [];
+  for (let i = 0; i < N; i++) {
+    if (!cellOk(i)) continue;
+    const p = coord(i), cc = COL[st.mat[i]];
+    for (let a = 0; a < 3; a++) for (const s of [1, -1]) {
+      if (!faceOk(i, next(i, a, s))) continue;
+      const b = (a + 1) % 3, c = (a + 2) % 3, o = [...p];
+      if (s > 0) o[a] += 1;
+      const q = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => { const w = [...o]; w[b] += u; w[c] += v; return w; });
+      for (const k of s > 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2]) { pos.push(...q[k]); nor.push(a === 0 ? s : 0, a === 1 ? s : 0, a === 2 ? s : 0); col.push(cc.r, cc.g, cc.b); }
+      cells.push(i);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.userData.cells = cells;
+  return g;
+}
+function addMesh(g, mat, order, pick) {
+  const m = mat.isLineBasicMaterial ? new THREE.LineSegments(g, mat) : new THREE.Mesh(g, mat);
+  m.renderOrder = order; scene.add(m); dyn.push(m);
+  if (pick) pickables.push(m);
+  return m;
+}
+function draw3d(st) {
+  for (const o of dyn) { scene.remove(o); o.geometry.dispose(); }
+  dyn = []; pickables = [];
+  if (faceQuad) { scene.remove(faceQuad); faceQuad.children.forEach((q) => q.geometry.dispose()); faceQuad = null; }
+  const vis = (i) => i >= 0 && st.mat[i] !== AIR && !hidden.has(st.mat[i]);
+  const b = ui.sel && !ui.before && bbox(st, ui.sel);
+  arrows.visible = !!b && ui.tool !== 'mat' && !locked.has(ui.sel) && !pending;
+  // 固定的結構：深色外框＋頭上一個小鎖（被它擋住時變紅）
+  for (const c of chips) c.el.remove();
+  chips = [];
+  if (!ui.before) for (const id of locked) {
+    const lb = vis(st.sid.indexOf(id)) && bbox(st, id);
+    if (!lb) continue;
+    const lg = buildGeom(st, (i) => st.sid[i] === id, (i, nb) => nb < 0 || st.sid[nb] !== id);
+    addMesh(new THREE.EdgesGeometry(lg), lockEdgeMat, 3, false); lg.dispose();
+    const el = document.createElement('div');
+    el.className = 'lchip' + (drag && drag.block?.sid === id ? ' hit' : ''); el.innerHTML = LOCK_ON.replace(/15/g, '11') + st.structs[id].name;
+    host.append(el); chips.push({ el, pos: new THREE.Vector3((lb.lo[0] + lb.hi[0] + 1) / 2, lb.hi[1] + 1, (lb.lo[2] + lb.hi[2] + 1) / 2) });
+  }
+  if (!b) addMesh(buildGeom(st, vis, (i, nb) => !vis(nb)), mainMat, 0, true);
+  else {
+    const picked = new Set(ui.sels), isSel = (i) => picked.has(st.sid[i]);
+    const sel = buildGeom(st, isSel, (i, nb) => nb < 0 || !isSel(nb));
+    addMesh(sel, mainMat, 0, true);
+    const rest = buildGeom(st, (i) => vis(i) && !isSel(i), (i, nb) => !vis(nb));
+    addMesh(rest, ghostDepthMat, 1, false);
+    addMesh(rest.clone(), ghostMat, 2, true).geometry.userData.cells = rest.userData.cells;
+    addMesh(new THREE.EdgesGeometry(sel), edgeMat, 3, false);
+    const lo = new THREE.Vector3(...b.lo), hi = new THREE.Vector3(b.hi[0] + 1, b.hi[1] + 1, b.hi[2] + 1);
+    const mid = lo.clone().add(hi).multiplyScalar(0.5);
+    // v19：箭頭貼在那一面實際的表面上（不是外框中央），挑離「點的位置」最近的那一格；從清單選＝離外框中央最近
+    const ref = ui.anchor ? new THREE.Vector3(...ui.anchor) : mid;
+    for (const [name, f] of Object.entries(FACES)) {
+      let best = null, bd = Infinity;
+      for (const i of outer(st, ui.sel, f.a, f.s)) {
+        const q = coord(i).map((v) => v + 0.5); q[f.a] += f.s * 0.5;
+        const d = (q[0] - ref.x) ** 2 + (q[1] - ref.y) ** 2 + (q[2] - ref.z) ** 2 - (q[f.a] - ref.getComponent(f.a)) ** 2; // 只比面內的距離
+        if (d < bd) { bd = d; best = q; }
+      }
+      const p = best ? new THREE.Vector3(...best) : mid.clone().setComponent(f.a, f.s > 0 ? hi.getComponent(f.a) : lo.getComponent(f.a));
+      arrowOf[name].position.copy(p);
+      arrowOf[name].userData.on = ui.tool === 'push' && ui.face === name;
+    }
+    if (ui.tool === 'push') { // 每個選到的結構都把要動的那一面塗橘色
+      const f = FACES[ui.face], b1 = (f.a + 1) % 3, c1 = (f.a + 2) % 3;
+      faceQuad = new THREE.Group();
+      for (const id of editable()) {
+        const bb = bbox(st, id);
+        if (!bb) continue;
+        const l = bb.lo, h = bb.hi.map((v) => v + 1);
+        const q = new THREE.Mesh(new THREE.PlaneGeometry(h[b1] - l[b1], h[c1] - l[c1]), new THREE.MeshBasicMaterial({ color: 0xfa8c16, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthTest: false }));
+        q.position.set((l[0] + h[0]) / 2, (l[1] + h[1]) / 2, (l[2] + h[2]) / 2).setComponent(f.a, f.s > 0 ? h[f.a] : l[f.a]);
+        if (f.a === 0) q.rotation.set(0, Math.PI / 2, Math.PI / 2); else if (f.a === 1) q.rotation.set(Math.PI / 2, 0, Math.PI / 2);
+        q.renderOrder = 4; faceQuad.add(q);
+      }
+      scene.add(faceQuad);
+    }
+  }
+  dirty = true;
+}
+// 六個面把手（橘色箭頭，螢幕上固定大小）
+const arrows = new THREE.Group(); scene.add(arrows);
+const arrowOf = {}, labelOf = {};
+for (const [name, f] of Object.entries(FACES)) {
+  const g = new THREE.Group();
+  const m = new THREE.MeshBasicMaterial({ color: 0xd46b08, depthTest: false, transparent: true });
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.62, 10), m); shaft.position.y = 0.36;
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.36, 14), m); head.position.y = 0.84;
+  const hit = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 1.1, 8), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })); hit.position.y = 0.55;
+  for (const o of [shaft, head, hit]) { o.renderOrder = 6; o.userData.face = name; g.add(o); }
+  const d = [0, 0, 0]; d[f.a] = f.s;
+  g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...d));
+  g.userData = { dir: new THREE.Vector3(...d), mat: m };
+  arrows.add(g); arrowOf[name] = g;
+  const l = document.createElement('div'); l.className = 'alabel'; l.textContent = name; host.append(l); labelOf[name] = l;
+}
+let hover = null, dirty = true;
+function frameLoop() {
+  requestAnimationFrame(frameLoop);
+  const w = host.clientWidth, h = host.clientHeight;
+  if (renderer.domElement.width !== Math.round(w * renderer.getPixelRatio()) || renderer.domElement.height !== Math.round(h * renderer.getPixelRatio())) { renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); dirty = true; }
+  if (!dirty) return;
+  dirty = false;
+  camera.updateMatrixWorld(); // 標籤位置要用這一幀的相機
+  const pxWorld = (p) => (2 * Math.tan((camera.fov * Math.PI) / 360) * camera.position.distanceTo(p)) / h; // 1 px 在那個深度是幾格
+  for (const [name, g] of Object.entries(arrowOf)) {
+    const k = pxWorld(g.position) * 52;
+    g.scale.setScalar(k);
+    g.userData.mat.color.set(hover === name || g.userData.on || drag?.face === name ? 0xfaad14 : 0xd46b08);
+    g.userData.mat.opacity = g.userData.dir.dot(camera.position.clone().sub(g.position)) > 0 || g.userData.on ? 1 : 0.5;
+    const tip = g.position.clone().addScaledVector(g.userData.dir, k * 1.28).project(camera);
+    const l = labelOf[name];
+    l.style.display = arrows.visible && tip.z < 1 ? '' : 'none';
+    l.style.left = ((tip.x + 1) / 2) * w + 'px'; l.style.top = ((1 - tip.y) / 2) * h + 'px';
+  }
+  for (const c of chips) { const q = c.pos.clone().project(camera); c.el.style.display = q.z < 1 ? '' : 'none'; c.el.style.left = ((q.x + 1) / 2) * w + 'px'; c.el.style.top = ((1 - q.y) / 2) * h - 4 + 'px'; }
+  renderer.render(scene, camera);
+}
+controls.addEventListener('change', () => (dirty = true));
+
+const ray = new THREE.Raycaster();
+const ndc = (e) => { camera.updateMatrixWorld(); const r = host.getBoundingClientRect(); return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); };
+const arrowAt = (e) => { if (!arrows.visible) return null; ray.setFromCamera(ndc(e), camera); const hit = ray.intersectObjects(arrows.children, true)[0]; return hit ? hit.object.userData.face : null; };
+const toScreen = (v) => { camera.updateMatrixWorld(); const p = v.clone().project(camera); return [((p.x + 1) / 2) * host.clientWidth, ((1 - p.y) / 2) * host.clientHeight]; };
+let downAt = null;
+function onDownCapture(e) {
+  if (e.target.closest('.viewbar') || e.target.closest('.confirm')) return;
+  downAt = [e.clientX, e.clientY];
+  const face = e.button === 0 && arrowAt(e);
+  if (!face) return;
+  e.stopPropagation(); e.preventDefault();
+  if (ui.tool === 'push') ui.face = face;
+  const g = arrowOf[face], p0 = toScreen(g.position), p1 = toScreen(g.position.clone().add(g.userData.dir));
+  let vx = p1[0] - p0[0], vy = p1[1] - p0[1], len = Math.hypot(vx, vy);
+  if (len < 1.5) { vx = 0; vy = -8; len = 8; } // 正對著看：改用上下拖
+  drag = { face, x: e.clientX, y: e.clientY, ux: vx / len, uy: vy / len, px: Math.max(4, len), n: 0, live: model, want: 0 };
+  host.setPointerCapture(e.pointerId);
+  render();
+}
+host.addEventListener('pointermove', (e) => {
+  if (!drag) { const f = e.buttons ? hover : arrowAt(e); if (f !== hover) { hover = f; host.style.cursor = f ? 'grab' : ''; dirty = true; } return; }
+  const want = Math.round(((e.clientX - drag.x) * drag.ux + (e.clientY - drag.y) * drag.uy) / drag.px);
+  if (want !== drag.want) { drag.want = want; drag.live = cloneSt(model); drag.n = want ? applyOp(drag.live, curOp(drag.face, want)) : 0; drag.block = want && Math.abs(drag.n) < Math.abs(want) ? lastBlock : null; drag.gone = vanishedIn(model, drag.live); draw3d(drag.live); draw2d(drag.live); }
+  const tip = $('#tip'), f = FACES[drag.face];
+  tip.hidden = false; tip.style.left = e.clientX + 16 + 'px'; tip.style.top = e.clientY - 28 + 'px';
+  tip.classList.toggle('warn', !!(drag.gone?.length || drag.block?.why === 'lock'));
+  tip.textContent = drag.gone?.length ? `⚠ ${drag.gone.map((g) => g.name).join('、')} 會整個消失（放開後再確認）` : !drag.n ? (want ? `擋下來了：${blockText(drag.block)}` : '順著箭頭拖＝外推，反方向＝內縮') : drag.block ? `只能 ${Math.abs(drag.n)} 格：${blockText(drag.block)}` : ui.tool === 'move' ? `往${drag.n > 0 ? drag.face : f.opp}搬 ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）` : `${drag.n > 0 ? '外推' : '內縮'} ${Math.abs(drag.n)} 格（${nm(drag.n)} nm）`;
+});
+host.addEventListener('pointerup', (e) => {
+  if (drag) { const d = drag; drag = null; $('#tip').hidden = true; if (d.n) commit(curOp(d.face, d.n)); else render(); return; }
+  if (e.button !== 0 || !downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4 || e.target.closest('.viewbar') || e.target.closest('.confirm') || pending) return;
+  ray.setFromCamera(ndc(e), camera);
+  const hit = ray.intersectObjects(pickables)[0];
+  ui.anchor = hit ? hit.point.toArray() : null;
+  select(hit ? shown().sid[hit.object.geometry.userData.cells[Math.floor(hit.faceIndex / 2)]] : 0, true, e.shiftKey || e.ctrlKey || e.metaKey);
+});
+host.addEventListener('contextmenu', (e) => e.preventDefault());
+$('#viewbar').onclick = (e) => { const v = e.target.dataset.v; if (v) setView(v); };
+
+// ---------------------------------------------------------------- 2D 切面（只看）
+const SL = [ // [canvas, 橫軸, 直軸, 法線軸, 直軸往上?]
+  ['#s-xy', 0, 1, 2, true], ['#s-xz', 0, 2, 1, false], ['#s-yz', 2, 1, 0, true],
+];
+const K = 6;
+function draw2d(st) {
+  for (const [sel, ua, va, na, flip] of SL) {
+    const cv = $(sel), W = DIM[ua], H = DIM[va];
+    if (cv.width !== W * K) { cv.width = W * K; cv.height = H * K; }
+    const g = cv.getContext('2d'), p = [0, 0, 0];
+    p[na] = ui.cur[na];
+    g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
+    const at = (u, v) => { p[ua] = u; p[va] = v; return u < 0 || v < 0 || u >= W || v >= H ? -1 : idx(p[0], p[1], p[2]); };
+    const py = (v) => (flip ? H - 1 - v : v) * K;
+    for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) { const m = st.mat[at(u, v)]; if (m) { g.fillStyle = MATS[m].color; g.fillRect(u * K, py(v), K, K); } }
+    if (locked.size && !ui.before) { // 固定的結構畫斜線
+      g.strokeStyle = 'rgba(30,41,59,.55)'; g.lineWidth = 1; g.beginPath();
+      for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) if (locked.has(st.sid[at(u, v)])) { g.moveTo(u * K, py(v) + K); g.lineTo(u * K + K, py(v)); }
+      g.stroke();
+    }
+    if (ui.sel && !ui.before) {
+      g.fillStyle = '#0b57d0';
+      const isSel = (u, v) => { const i = at(u, v); return i >= 0 && ui.sels.includes(st.sid[i]); };
+      for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) {
+        if (!isSel(u, v)) continue;
+        const x = u * K, y = py(v), up = flip ? v + 1 : v - 1, dn = flip ? v - 1 : v + 1;
+        if (!isSel(u - 1, v)) g.fillRect(x, y, 2, K);
+        if (!isSel(u + 1, v)) g.fillRect(x + K - 2, y, 2, K);
+        if (!isSel(u, up)) g.fillRect(x, y, K, 2);
+        if (!isSel(u, dn)) g.fillRect(x, y + K - 2, K, 2);
+      }
+    }
+    g.fillStyle = 'rgba(212,107,8,.8)'; // 十字
+    g.fillRect(ui.cur[ua] * K + K / 2 - 0.5, 0, 1, cv.height); g.fillRect(0, py(ui.cur[va]) + K / 2 - 0.5, cv.width, 1);
+    cv.onclick = (e) => {
+      const r = cv.getBoundingClientRect(), u = Math.floor(((e.clientX - r.left) / r.width) * W), vv = Math.floor(((e.clientY - r.top) / r.height) * H), v = flip ? H - 1 - vv : vv;
+      if (u < 0 || v < 0 || u >= W || v >= H) return;
+      ui.cur[ua] = u; ui.cur[va] = v;
+      ui.anchor = ui.cur.map((c) => c + 0.5);
+      const id = shown().sid[at(u, v)];
+      if (id) select(id, false, e.shiftKey || e.ctrlKey || e.metaKey); else render();
+    };
+  }
+  document.querySelectorAll('.stepper').forEach((el) => { const a = +el.dataset.ax; el.children[1].textContent = `${'xyz'[a]} = ${ui.cur[a]}`; });
+  $('#cross').textContent = `十字 (${ui.cur.join(', ')})`;
+}
+document.querySelectorAll('.stepper').forEach((el) => {
+  const a = +el.dataset.ax;
+  el.children[0].onclick = () => { ui.cur[a] = Math.max(0, ui.cur[a] - 1); draw2d(shown()); };
+  el.children[2].onclick = () => { ui.cur[a] = Math.min(DIM[a] - 1, ui.cur[a] + 1); draw2d(shown()); };
+});
+
+// ---------------------------------------------------------------- 左欄清單、右欄動作面板
+function drawPanel(st) {
+  const groups = new Map();
+  for (const s of st.structs) if (s && st.cnt[s.id] > 0) (groups.get(s.mat) ?? groups.set(s.mat, []).get(s.mat)).push(s);
+  $('#list').innerHTML = [...groups].map(([m, ss]) => {
+    const hid = hidden.has(m);
+    return `<button class="grp ${hid ? 'hid' : ''}" data-mat="${m}" title="${hid ? '點一下顯示' : '點一下隱藏'}"><span class="sw" style="background:${MATS[m].color}"></span>${MATS[m].name}<small>×${ss.length}</small><span class="eye">${hid ? EYE_OFF : EYE_ON}</span>${lockBtn(ss.map((s) => s.id), `全部 ${MATS[m].name}`)}</button>`
+      + ss.map((s) => `<button class="item ${ui.sels.includes(s.id) ? 'on' : ''} ${hid ? 'hid' : ''} ${locked.has(s.id) ? 'lock' : ''}" data-id="${s.id}"><span class="nm">${s.name}</span>${lockBtn([s.id], s.name)}</button>`).join('');
+  }).join('');
+  const steps = undoStack.filter((e) => !e.reset);
+  $('#ch-list').innerHTML = steps.length
+    ? steps.map((e, k) => `<button class="ch" data-ids="${e.ids.join(',')}" title="點一下選這個結構"><span class="no">${k + 1}</span><span class="tx">${e.parts[0]}${e.parts.slice(1).map((t) => `<div class="sub">${t}</div>`).join('')}</span><small>${e.cells.toLocaleString()} 體素</small></button>`).join('')
+    : '<div class="ch-empty">還沒有改動。每做一步，這裡會多一行。</div>';
+  if ($('#ch-list').dataset.n !== String(steps.length)) { $('#ch-list').dataset.n = steps.length; $('#ch-list').scrollTop = 1e6; } // 新的一步捲到看得到
+  $('#ch-sum').textContent = steps.length ? `${steps.length} 步 · 和原始差 ${diffCount(model, ORIG).toLocaleString()} 體素` : '';
+  $('#reset').hidden = !steps.length; $('#foot').classList.toggle('changed', steps.length > 0);
+  const sel = ui.sel ? st.structs[ui.sel] : null, b = sel && bbox(st, sel.id);
+  const same = sel ? st.structs.filter((t) => t && t.mat === sel.mat).length : 0;
+  $('#sel-foot').textContent = sel ? `已選 ${namesOf(st, ui.sels)}` : '還沒選取結構';
+  $('#panel').classList.toggle('off', !sel || ui.before);
+  const eds = editable(), nLock = ui.sels.length - eds.length;
+  $('#unlock-all').hidden = !locked.size;
+  $('#panel').classList.toggle('locked', !!sel && !eds.length);
+  $('#lockbar').hidden = !sel || !nLock;
+  $('#lockmsg').textContent = !eds.length ? '已固定：不能改它，別的結構推拉時也動不到它。' : `選到的裡面有 ${nLock} 個已固定，這一步不會動它們。`;
+  $('#lockbtn').hidden = !sel || ui.before || !eds.length; $('#lockbtn').innerHTML = LOCK_OFF + ` 固定${ui.sels.length > 1 ? '選到的結構' : '這個結構'}（L）`;
+  $('#selname').textContent = sel ? `：${namesOf(st, ui.sels)}` : '';
+  $('#all-same').hidden = !sel || ui.sels.length >= same;
+  if (sel) $('#all-same').textContent = `選全部 ${MATS[sel.mat].name}（${same}）`;
+  for (const x of $('#tools').children) x.classList.toggle('on', x.dataset.tool === ui.tool);
+  for (const x of $('#mode').children) x.classList.toggle('on', (x.dataset.m === 'before') === ui.before);
+  $('#t-push').hidden = ui.tool !== 'push'; $('#t-move').hidden = ui.tool !== 'move'; $('#t-mat').hidden = ui.tool !== 'mat';
+  $('#t-step').hidden = $('#t-nb').hidden = ui.tool === 'mat';
+  $('#nm').textContent = nm(stepN());
+  $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length;
+  if (!sel || !b || !eds.length) return;
+  $('#faces').innerHTML = Object.keys(FACES).map((k) => `<button data-face="${k}" class="${k === ui.face ? 'on' : ''}">${k}<kbd>${KEYCAP[k]}</kbd></button>`).join('');
+  $('#grow').innerHTML = `${ui.face}面外推 ${stepN()} 格<kbd>＋</kbd>`; $('#shrink').innerHTML = `${ui.face}面內縮 ${stepN()} 格<kbd>－</kbd>`;
+  if (ui.tool !== 'mat') {
+    const can = neighbors(st, eds, ui.tool, ui.face, true).follow.length > 0; // 有沒有薄層可以跟
+    const on = can && ui.nb === 'follow', nb = neighbors(st, eds, ui.tool, ui.face, on);
+    for (const x of $('#nb').children) { x.classList.toggle('on', can && x.dataset.nb === ui.nb); x.disabled = !can; }
+    // 事先算好每個方向還能做幾格、被什麼擋住：做不到的按鈕反灰，滑過去看原因
+    const room = (kind, face, sign) => roomOf(st, { kind, ids: eds, face, n: sign, follow: on });
+    // 這一步會碰到誰：一個結構一行，寫出它會怎樣，旁邊可以直接固定／解除
+    const ROLE = { follow: ['跟著移動', 0], stay: ['厚度會變', 1], lock: ['已固定', 2] };
+    const aff = [...nb.roles].sort((p, q) => ROLE[p[1]][1] - ROLE[q[1]][1] || p[0] - q[0]).map(([k, r]) => `<div class="aff"><span class="sw" style="background:${MATS[st.structs[k].mat].color}"></span><span class="nm">${st.structs[k].name}</span><span class="chip ${r}">${ROLE[r][0]}</span>${lockBtn([k], st.structs[k].name)}</div>`);
+    const lines = [], unlock = (bl) => (bl?.why === 'lock' ? ` <a data-lock="${bl.sid}">解除固定</a>` : '');
+    if (ui.tool === 'push') {
+      const out = room('push', ui.face, 1), inn = room('push', ui.face, -1);
+      $('#grow').disabled = !out.n; $('#grow').title = out.n ? '' : blockText(out.block);
+      $('#shrink').disabled = !inn.n && inn.block?.why !== 'vanish'; $('#shrink').title = inn.n ? '' : blockText(inn.block);
+      lines.push(out.n ? `<div class="ln">最多可外推 ${out.n} 格（${limitText(out.block)}）${unlock(out.block)}</div>` : `<div class="ln warn">不能外推：${blockText(out.block)}${out.block?.why === 'last' ? `（先把 ${out.block.name} 往外推）` : ''}${unlock(out.block)}</div>`);
+      lines.push(`<div class="ln ${inn.block?.why === 'vanish' ? 'warn' : ''}">${inn.n ? `最多可內縮 ${inn.n} 格` : '不能再內縮'}（${limitText(inn.block)}${inn.block?.why === 'vanish' ? '，會先問你' : ''}）</div>`);
+    } else {
+      $('#dpad').innerHTML = ['上', '左', '前', '下', '右', '後'].map((k) => { const r = room('move', k, 1); return `<button data-face="${k}" ${r.n ? `title="最多 ${r.n} 格"` : `disabled title="${blockText(r.block)}"`}>${k}<kbd>${KEYCAP[k]}</kbd></button>`; }).join('');
+    }
+    $('#who').innerHTML = aff.join('') + lines.join('');
+  }
+  $('#mats').innerHTML = MATS.map((m, k) => `<button class="${k === sel.mat ? 'on' : ''}" data-m="${k}"><span class="sw" style="background:${m.color}"></span>${m.name}</button>`).join('');
+}
+function render() { const st = shown(); draw3d(st); draw2d(st); drawPanel(st); }
+
+const lockOf = (e) => { const l = e.target.closest('[data-lock]'); return l ? l.dataset.lock.split(',').map(Number) : null; };
+$('#who').onclick = (e) => { const l = lockOf(e); if (l) toggleLock(l); };
+$('#lockbtn').onclick = () => toggleLock(editable());
+$('#unlock-sel').onclick = () => toggleLock(ui.sels.filter((id) => locked.has(id)));
+$('#unlock-all').onclick = () => toggleLock([...locked]);
+$('#cf-safe').onclick = () => closeAsk('safe'); $('#cf-force').onclick = () => closeAsk('force'); $('#cf-cancel').onclick = () => closeAsk();
+$('#list').onclick = (e) => {
+  const l = lockOf(e); if (l) return toggleLock(l);
+  const b = e.target.closest('.item'), g = e.target.closest('.grp');
+  if (b) { ui.anchor = null; return select(+b.dataset.id, true, e.shiftKey || e.ctrlKey || e.metaKey); }
+  if (!g) return;
+  const m = +g.dataset.mat;
+  if (hidden.has(m)) hidden.delete(m); else { hidden.add(m); if (ui.sel && model.structs[ui.sel].mat === m) ui.sels = []; }
+  render();
+};
+$('#ch-list').onclick = (e) => { const b = e.target.closest('.ch'); if (!b) return; const ids = b.dataset.ids.split(',').map(Number); ui.anchor = null; select(ids[ids.length - 1]); ui.sels = ids; render(); };
+$('#all-same').onclick = selectSame;
+$('#tools').onclick = (e) => { const b = e.target.closest('button'); if (b) { ui.tool = b.dataset.tool; render(); } };
+$('#faces').onclick = (e) => { const b = e.target.closest('button'); if (b) { ui.face = b.dataset.face; render(); } };
+$('#nb').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) { ui.nb = b.dataset.nb; render(); } };
+$('#n').oninput = () => drawPanel(shown());
+$('#grow').onclick = () => commit(curOp(ui.face, stepN()));
+$('#shrink').onclick = () => commit(curOp(ui.face, -stepN()));
+$('#dpad').onclick = (e) => { const b = e.target.closest('button'); if (b && !b.disabled) commit(curOp(b.dataset.face, stepN())); };
+$('#mats').onclick = (e) => { const b = e.target.closest('button'); if (b) commit({ kind: 'mat', ids: [...ui.sels], mat: +b.dataset.m }); };
+$('#undo').onclick = $('#undo2').onclick = undo;
+$('#redo').onclick = redo;
+$('#reset').onclick = () => { undoStack = [{ st: model, text: '全部還原', reset: true, prev: undoStack }]; redoStack = []; model = cloneSt(ORIG); say('已全部還原成原始的樣子', true); render(); };
+$('#mode').onclick = (e) => { const m = e.target.dataset.m; if (m) { ui.before = m === 'before'; render(); } };
+document.querySelectorAll('[data-fold]').forEach((b) => (b.onclick = () => { $('#' + b.dataset.fold).classList.toggle('collapsed'); draw2d(shown()); dirty = true; }));
+$('#upload').onclick = () => say('（prototype 只有內建範例）正式版和原版一樣可以上傳 .vti／.npy', false);
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+  if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+  else if (mod && k === 'y') { e.preventDefault(); redo(); }
+  else if (mod && k === 'a') { e.preventDefault(); selectSame(); }
+  else if (pending) { if (k === 'escape') closeAsk(); }
+  else if (k === 'l' && !mod) toggleLock(ui.sels)
+  else if (k === 'escape') { if (drag) { drag = null; $('#tip').hidden = true; render(); } else select(0); }
+  else if (k === 'f') setView('fit');
+  else if (k === 'h') setView('home');
+  else if (!ui.sel || ui.before || mod || !editable().length) return;
+  // 方向鍵、PgUp／PgDn：推拉＝選那一面，平移＝往那邊搬一次；＋／－：外推／內縮
+  else if (KEY_FACE[e.key]) {
+    e.preventDefault();
+    if (ui.tool === 'push') { ui.face = KEY_FACE[e.key]; render(); } else if (ui.tool === 'move') commit(curOp(KEY_FACE[e.key], stepN()));
+  } else if (ui.tool === 'push' && (e.key === '+' || e.key === '=')) { e.preventDefault(); commit(curOp(ui.face, stepN())); }
+  else if (ui.tool === 'push' && (e.key === '-' || e.key === '_')) { e.preventDefault(); commit(curOp(ui.face, -stepN())); }
+});
+
+// ---------------------------------------------------------------- 情境示範（一鍵擺好）
+const byName = (n) => model.structs.find((s) => s && s.name === n).id;
+const SCN = [
+  ['情境示範：自由操作', null],
+  ['1 預設：外層跟著動', { sel: ['Si fin 1'], face: '右', note: '拖「右」箭頭往外：HfO₂、TiN 整圈跟著移動，Poly-Si 變薄。右欄列出每個外層會怎樣，旁邊的鎖可以直接固定。' }],
+  ['2 外層薄層固定 → 外推被擋', { lock: ['TiN 1'], sel: ['Si fin 1'], face: '右', note: 'TiN 1 已固定：Si fin 1 右面推不出去（整面一起停，HfO₂ 不會被擠扁）。右欄寫出被誰擋住，可以一鍵解除固定。' }],
+  ['3 厚的外層固定 → 沒有空間', { lock: ['Poly-Si 1'], sel: ['Si fin 1'], face: '右', note: 'Poly-Si 1 已固定：薄層沒有地方可去，所以 Si fin 1 也推不動。往上推也一樣。' }],
+  ['4 內縮＋外層固定 → 中間留空', { lock: ['HfO₂ 1'], sel: ['Si fin 1'], face: '右', note: '按「右面內縮」：HfO₂ 1 固定不跟，Si fin 1 和它之間留空；另一個閘極的 HfO₂ 3、TiN 3 照常跟著退。' }],
+  ['5 內縮到整個消失 → 先問', { sel: ['SiN 1'], face: '上', n: 3, note: 'SiN 1 只有 3 格厚。按「上面內縮 3 格」或把箭頭往下拖 3 格以上：不會直接做，先問你要「只縮到剩 1 格」還是「照做」。' }],
+  ['6 選到固定的結構', { lock: ['Si fin 1'], sel: ['Si fin 1'], face: '右', note: 'Si fin 1 已固定：沒有箭頭、動作都不能按，只能先解除固定。3D 上有深色外框和小鎖。' }],
+  ['7 多選裡有固定的', { lock: ['HfO₂ 2'], sel: ['HfO₂ 1', 'HfO₂ 2', 'HfO₂ 3', 'HfO₂ 4'], face: '上', note: '同材質全選，其中 HfO₂ 2 已固定：這一步只動另外三個，面板上會說明。' }],
+  ['8 整塊平移碰到固定', { lock: ['Poly-Si 1'], sel: ['SiN 1'], tool: 'move', note: 'SiN 1 往下搬會壓到已固定的 Poly-Si 1：「下」不能按；往上搬可以，但 Poly-Si 1 不會補上來，中間留空。' }],
+];
+$('#scn').innerHTML = SCN.map(([t], k) => `<option value="${k}">${t}</option>`).join('');
+const NOTE0 = $('#note').textContent;
+$('#scn').onchange = () => {
+  const c = SCN[+$('#scn').value][1];
+  pending = null; drag = null; $('#confirm').hidden = true;
+  model = cloneSt(ORIG); undoStack = []; redoStack = []; locked.clear(); hidden.clear(); ui.before = false; ui.anchor = null;
+  ui.tool = c?.tool ?? 'push'; ui.nb = 'follow'; $('#n').value = c?.n ?? 1;
+  for (const n of c?.lock ?? []) locked.add(byName(n));
+  ui.sels = (c?.sel ?? []).map(byName);
+  if (c?.face) ui.face = c.face;
+  $('#note').textContent = c ? `情境 ${SCN[+$('#scn').value][0]}｜${c.note}` : NOTE0;
+  say(c ? '情境已擺好' : '已回到原始範例', false);
+  render(); setView(ui.sel ? 'fit' : 'home');
+};
+
+setView('home');
+select(model.structs.find((s) => s && s.name === 'Si fin 1').id);
+ui.face = '右'; render();
+frameLoop();
+window.__proto = { ui, hidden, locked, toggleLock, commit, curOp, get pending() { return pending; }, get lastBlock() { return lastBlock; }, get model() { return model; }, bbox, arrowOf, toScreen, camera, controls };
+</script>
+</body>
+</html>

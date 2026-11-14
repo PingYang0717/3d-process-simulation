@@ -964,30 +964,34 @@ function setLock(ids, keep) {
 }
 /** 右欄「固定的結構」：目前鎖了誰、怎麼鎖，直接在這裡改。 */
 function drawLocks(st) {
-  const rows = [...locked].filter(([id]) => st.cnt[id] > 0).sort((p, q) => p[0] - q[0]);
-  $('#lk-sum').textContent = rows.length ? `${rows.length} 個` : '';
-  $('#unlock-all2').hidden = !rows.length;
-  $('#lk-list').innerHTML = rows.length ? rows.map(([id, kp]) => {
-    const full = kp === Infinity;
-    return `<div class="lkrow ${ui.sels.includes(id) ? 'on' : ''}" data-id="${id}">`
-      + `<div class="r1"><span class="sw" style="background:${MATS[st.structs[id].mat].color}"></span><span class="nm" title="點一下選這個結構">${st.structs[id].name}</span><button class="x" title="解除固定">解除</button></div>`
+  const all = [...locked].filter(([id]) => st.cnt[id] > 0).sort((p, q) => p[0] - q[0]);
+  // 同材質、同一種固定方式的合成一張卡片（多選一次固定的就會在一起），改設定＝整批一起改
+  const groups = new Map();
+  for (const [id, kp] of all) { const key = st.structs[id].mat + '|' + kp; (groups.get(key) ?? groups.set(key, { kp, ids: [] }).get(key)).ids.push(id); }
+  $('#lk-sum').textContent = all.length ? `${all.length} 個` : '';
+  $('#unlock-all2').hidden = !all.length;
+  $('#lk-list').innerHTML = all.length ? [...groups.values()].map(({ kp, ids }) => {
+    const full = kp === Infinity, on = ids.every((id) => ui.sels.includes(id));
+    return `<div class="lkrow ${on ? 'on' : ''}" data-ids="${ids.join(',')}">`
+      + `<div class="r1"><span class="sw" style="background:${MATS[st.structs[ids[0]].mat].color}"></span><span class="nm" title="${ids.map((id) => st.structs[id].name).join('、')}（點一下選取）">${namesOf(st, ids)}</span><button class="x" title="解除固定">解除</button></div>`
       + `<div class="r2"><span class="seg"><button data-mode="flex" class="${full ? '' : 'on'}" title="位置不動；別的結構推過來時它會變薄，薄到最少保留的厚度就停">可被壓薄</button><button data-mode="full" class="${full ? 'on' : ''}" title="形狀和位置都不變；別的結構推到它就停">完全鎖定</button></span>`
       + (full ? '' : `<span class="keep">最少留 <button data-d="-1" ${kp <= 1 ? 'disabled' : ''}>−</button><b>${nm(kp)} nm</b><button data-d="1">＋</button></span>`) + `</div>`
       + `</div>`;
-  }).join('') : '<div class="lk-empty">還沒有固定的結構。<br>在結構上按<b>右鍵</b>就能固定，固定後不會被別的結構帶著走。</div>';
+  }).join('') : '<div class="lk-empty">還沒有固定的結構。<br>在結構上按<b>右鍵</b>就能固定（多選時整批一起），固定後不會被別的結構帶著走。</div>';
 }
 $('#lk-list').onclick = (e) => {
   const r = e.target.closest('.lkrow'); if (!r) return;
-  const id = +r.dataset.id, kp = locked.get(id), b = e.target.closest('button');
-  if (e.target.closest('.nm')) { ui.anchor = null; return select(id); }
+  const ids = r.dataset.ids.split(',').map(Number), kp = locked.get(ids[0]), b = e.target.closest('button');
+  if (e.target.closest('.nm')) { ui.anchor = null; select(ids[ids.length - 1]); ui.sels = ids; return render(); }
   if (!b) return;
-  if (b.classList.contains('x')) setLock([id], null);
-  else if (b.dataset.mode) setLock([id], b.dataset.mode === 'full' ? Infinity : kp === Infinity ? 2 : kp);
-  else if (b.dataset.d) setLock([id], Math.max(1, kp + +b.dataset.d));
+  if (b.classList.contains('x')) setLock(ids, null);
+  else if (b.dataset.mode) setLock(ids, b.dataset.mode === 'full' ? Infinity : kp === Infinity ? 2 : kp);
+  else if (b.dataset.d) setLock(ids, Math.max(1, kp + +b.dataset.d));
 };
 $('#unlock-all2').onclick = () => setLock([...locked.keys()], null);
 /** 右鍵選單：固定／換固定方式／解除固定。不改變目前的選取，所以可以一邊選著要改的結構、一邊鎖旁邊的。 */
 function openCtx(x, y, ids) {
+  if (ids.length === 1 && ui.sels.length > 1 && ui.sels.includes(ids[0])) ids = [...ui.sels]; // 在多選的其中一個上按右鍵＝整批一起
   ids = ids.filter((id) => model.cnt[id] > 0);
   if (!ids.length || drag || pending || ui.before) return closeCtx();
   const all = ids.every((id) => locked.has(id)), any = ids.some((id) => locked.has(id));
@@ -1013,7 +1017,7 @@ addEventListener('wheel', closeCtx, true);
 const ctxOn = (el, idsOf) => el.addEventListener('contextmenu', (e) => { const ids = idsOf(e); if (ids) { e.preventDefault(); openCtx(e.clientX, e.clientY, ids); } });
 ctxOn($('#list'), (e) => { const it = e.target.closest('.item'), g = e.target.closest('.grp'); return it ? [+it.dataset.id] : g ? g.querySelector('.lk').dataset.lock.split(',').map(Number) : null; });
 ctxOn($('#who'), (e) => { const a = e.target.closest('.aff'); return a ? [+a.dataset.id] : null; });
-ctxOn($('#lk-list'), (e) => { const a = e.target.closest('.lkrow'); return a ? [+a.dataset.id] : null; });
+ctxOn($('#lk-list'), (e) => { const a = e.target.closest('.lkrow'); return a ? a.dataset.ids.split(',').map(Number) : null; });
 function drawPanel(st) {
   const groups = new Map();
   for (const s of st.structs) if (s && st.cnt[s.id] > 0) (groups.get(s.mat) ?? groups.set(s.mat, []).get(s.mat)).push(s);

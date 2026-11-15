@@ -22,7 +22,7 @@ import { StructureList } from './StructureList';
 import { UploadPanel } from './UploadPanel';
 import { ActionPanel } from './ActionPanel';
 import { type CtxTarget, LockMenu, LockPanel } from './LockUi';
-import { StepList } from './StepList';
+import { ChangeList } from './ChangeList';
 import { faceName, nmText } from './stepWords';
 import { surfaceHandles } from './handles3d';
 import { PROBE_DIRS } from '../../volume/probe';
@@ -279,7 +279,7 @@ export default function Section3DPage() {
     ed.setCursor(p);
     ed.pickVoxel((p[2] * ed.vol.Y + p[1]) * ed.vol.X + p[0], m);
   });
-  // 右鍵選單（固定／解除固定）：在多選的其中一個上按＝整批一起；不改變選取
+  // 右鍵選單（換材質、固定／解除固定）：在多選的其中一個上按＝整批一起；不改變選取
   const [ctx, setCtx] = useState<CtxTarget | null>(null);
   const openCtx = useEvent((keys: string[], x: number, y: number) => {
     if (peek || ed.busy) return;
@@ -468,7 +468,7 @@ export default function Section3DPage() {
           <br />
           <b>Shift＋點</b>＝多選同材質
           <br />
-          <b>右鍵</b>＝固定／解除固定
+          <b>右鍵</b>＝換材質／固定
         </div>
         <WithLivePv live={livePv} pv={pv}>
           {(p) => (
@@ -486,7 +486,7 @@ export default function Section3DPage() {
               scope={ed.scope}
               cursor={ed.cursor}
               mode={mode}
-              tool={peek || !ed.editKeys.length || ed.tool === 'mat' || ed.ask ? null : 'handles'}
+              tool={peek || !ed.editKeys.length || ed.ask ? null : 'handles'}
               dimOthers={ed.sel.size > 0 && !peek}
               faceOp={ed.faceOp}
               onCommit={ed.commitAsk}
@@ -563,7 +563,7 @@ export default function Section3DPage() {
     <>
       <ActionPanel ed={ed} peek={peek} onCtx={openCtx} />
       <LockPanel ed={ed} onCtx={openCtx} />
-      <StepList ed={ed} />
+      <ChangeList ed={ed} />
       <div className={'insp-foot' + (ed.diffCount ? ' changed' : '')}>
         <span className={'dot' + (ed.diffCount ? ' warn' : '')} />
         <span className="grow foot-msg" aria-live="polite">

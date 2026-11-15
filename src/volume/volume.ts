@@ -1731,3 +1731,20 @@ export const unionBBox = (comps: { bbox: BBox }[]): BBox | null =>
         { ...comps[0].bbox },
       )
     : null;
+
+/** 載入時在模型四周各加這麼多格空氣：推拉、平移可以超出原本的模型範圍，不會被邊界擋住或切掉。 */
+export const PAD = 24;
+
+/** 六個方向各加 pad 格空氣（新的陣列）。 */
+export function padVolume(v: Volume, pad = PAD): Volume {
+  const X = v.X + 2 * pad;
+  const Y = v.Y + 2 * pad;
+  const Z = v.Z + 2 * pad;
+  const data = new Uint8Array(X * Y * Z);
+  for (let z = 0; z < v.Z; z++)
+    for (let y = 0; y < v.Y; y++) {
+      const src = (z * v.Y + y) * v.X;
+      data.set(v.data.subarray(src, src + v.X), ((z + pad) * Y + y + pad) * X + pad);
+    }
+  return { X, Y, Z, data };
+}

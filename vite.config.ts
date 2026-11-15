@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
@@ -14,6 +14,4 @@ export default defineConfig({
       },
     },
   },
-  // 逐體素的測試在整個範例上跑（約 200 萬格），單一測試給長一點
-  test: { environment: 'node', testTimeout: 120_000 },
 });

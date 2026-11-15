@@ -1,7 +1,7 @@
-// 右欄上半（plan v17 §5.1、§5.3、§5.5；v21）：三個動作、哪一面、兩顆動作鈕、每次 n 格、這一步會帶動誰（可以直接固定）、試算的說明、材質清單。
+// 右欄上半（plan v17 §5.1、§5.3、§5.5；v21）：兩個動作、哪一面、兩顆動作鈕、每次 n 格、這一步會帶動誰（可以直接固定）、試算的說明。換材質在右鍵選單。
 import { useEffect, useState } from 'react';
 import { Button, InputNumber, Tooltip, Typography } from 'antd';
-import { type Comp, LOCK_FULL, isVoid } from '../../volume/volume';
+import { type Comp, LOCK_FULL } from '../../volume/volume';
 import type { Block } from '../../volume/kernel';
 import { Swatch } from '../../ui/Swatch';
 import { type Editor, STEP_MAX, type Tool } from './editor';
@@ -14,7 +14,6 @@ const { Text } = Typography;
 const TOOLS: { k: Tool; label: string }[] = [
   { k: 'push', label: '推拉一面' },
   { k: 'move', label: '整塊平移' },
-  { k: 'mat', label: '換材質' },
 ];
 /** 平移的六顆方向鍵的排列（3 × 2）。 */
 const DPAD: FaceName[] = ['上', '左', '前', '下', '右', '後'];
@@ -39,7 +38,7 @@ export function ActionPanel({ ed, peek, onCtx }: { ed: Editor; peek: boolean; on
   const inN = room(p?.in);
   const working = !!ed.busy;
   // 試算超過 300 ms 還沒回來：寫「計算中…」（plan v17 §9；結果回來之前按鈕照常可按，真正套用時 Worker 仍會擋）
-  const waiting = sel && !allLocked && !peek && ed.tool !== 'mat' && !p;
+  const waiting = sel && !allLocked && !peek && !p;
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     setSlow(false);
@@ -149,8 +148,7 @@ export function ActionPanel({ ed, peek, onCtx }: { ed: Editor; peek: boolean; on
         </div>
       )}
 
-      {ed.tool !== 'mat' && (
-        <>
+      <>
           <div className="row step">
             每次
             <InputNumber size="small" min={1} max={STEP_MAX} value={n} precision={0} onChange={(v) => v !== null && ed.setStepN(v)} disabled={off} style={{ width: 64 }} aria-label="每次幾格" />
@@ -203,24 +201,9 @@ export function ActionPanel({ ed, peek, onCtx }: { ed: Editor; peek: boolean; on
               </div>
             </div>
           )}
-        </>
-      )}
+      </>
+      <div className="hint">換材質、固定：在結構上按<b>右鍵</b></div>
 
-      {ed.tool === 'mat' && (
-        <div className="row">
-          <div className="lbl">換成哪一種（點一下就換）</div>
-          <div className="mats">
-            {ed.materials
-              .filter((m) => m.id !== 0)
-              .map((m) => (
-                <button key={m.id} type="button" className={m.id === ed.selMat ? 'on' : ''} disabled={off || working} onClick={() => ed.setMaterial(m.id)}>
-                  <Swatch fill={m.color} isVoid={isVoid(m.id)} size={12} />
-                  <span>{m.name}</span>
-                </button>
-              ))}
-          </div>
-        </div>
-      )}
       {!off && working && (
         <Text type="secondary" style={{ fontSize: 12 }}>
           計算中…

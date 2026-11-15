@@ -1,6 +1,6 @@
-// 固定（plan v21 §2、v22）：右鍵選單、右欄「固定的結構」、鎖的圖示。
+// 右鍵選單（換材質、固定）、右欄「固定的結構」、鎖的圖示。
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { LOCK_FULL, type Comp } from '../../volume/volume';
+import { LOCK_FULL, type Comp, isVoid } from '../../volume/volume';
 import { Swatch } from '../../ui/Swatch';
 import type { Editor } from './editor';
 import { namesOf, nmText } from './stepWords';
@@ -22,7 +22,7 @@ export interface CtxTarget {
 /** 在結構上按右鍵：多選時在其中一個上按＝整批一起。 */
 export type OpenCtx = (keys: string[], x: number, y: number) => void;
 
-/** 右鍵選單：固定位置（可被壓薄）／完全鎖定／解除固定。不改變目前的選取。 */
+/** 右鍵選單：換材質（點一下就換；固定的結構不換）、固定位置（可被壓薄）／完全鎖定／解除固定。不改變目前的選取。 */
 export function LockMenu({ ed, target, onClose }: { ed: Editor; target: CtxTarget; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: target.x, top: target.y });
@@ -69,6 +69,23 @@ export function LockMenu({ ed, target, onClose }: { ed: Editor; target: CtxTarge
         {namesOf(comps, ed.matName)}
         <small>{all ? '已固定' : any ? '部分已固定' : '未固定'}</small>
       </div>
+      <div className="sec">換材質{all ? '（已固定，先解除才能換）' : any ? '（已固定的不換）' : ''}</div>
+      <div className="mats" data-testid="ctx-mats">
+        {ed.materials
+          .filter((m) => m.id !== 0)
+          .map((m) => {
+            const now = comps.every((c) => c.mat === m.id);
+            return (
+              <button key={m.id} type="button" role="menuitem" className={now ? 'cur' : ''} disabled={all || now} title={now ? '目前的材質' : `換成 ${m.name}`} onClick={() => (ed.setMaterial(m.id, keys), onClose())}>
+                <Swatch fill={m.color} isVoid={isVoid(m.id)} size={12} />
+                <span className="nm">{m.name}</span>
+                {now && <span className="ck">✓</span>}
+              </button>
+            );
+          })}
+      </div>
+      <hr />
+      <div className="sec">固定</div>
       <button type="button" role="menuitem" className={cur !== undefined && cur < LOCK_FULL ? 'cur' : ''} onClick={() => pick(flex)} data-testid="lock-flex">
         <span className="ic">{cur !== undefined && cur < LOCK_FULL ? '✓' : <LockIcon on={false} />}</span>
         <span>

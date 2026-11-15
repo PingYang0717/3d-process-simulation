@@ -42,6 +42,7 @@ import {
   DIFF_BIT,
   hexToRgb,
   voxelFromHit,
+  PAD,
 } from '../../volume/volume';
 import { call, sidOf } from '../../volume/client';
 import type { EditState, Op } from '../../volume/ops';
@@ -526,7 +527,8 @@ export function View3D({
       }
       anim = { p0: camera.position.clone(), p1: pos, t0: controls.target.clone(), t1: target, start: performance.now(), ms: 300 };
     };
-    const fullRadius = () => 0.5 * Math.hypot(vol.X, vol.Y, vol.Z);
+    // 全貌只看原本的模型（外圍那一圈空氣不算）
+    const fullRadius = () => 0.5 * Math.hypot(Math.max(8, vol.X - 2 * PAD), Math.max(8, vol.Y - 2 * PAD), Math.max(8, vol.Z - 2 * PAD));
     const probe = new Raycaster();
     /** 從 pos 看 target 會不會先被別的面擋住（對準選取用）。 */
     const occluded = (pos: Vector3, target: Vector3, radius: number) => {

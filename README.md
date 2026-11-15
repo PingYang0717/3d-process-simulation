@@ -1,6 +1,6 @@
 # Section Editor 3D（簡化版）
 
-在瀏覽器裡直接改 TCAD 輸出的 3D 材質體素（`.vti`，VTK ImageData；也接受 `.npy`）。v19 起畫面上沒有匯出（Worker 裡寫 `.vti` 的程式與測試還在）。這是 plan v17（`docs/plan-v17-simple-version.md`）的簡化版：只留**推拉一面、整塊平移、換材質**三個動作，沒有 split、沒有 2D 編輯；完整版留在 `claude/upbeat-einstein-wod16i` 分支。
+在瀏覽器裡直接改 TCAD 輸出的 3D 材質體素（`.vti`，VTK ImageData；也接受 `.npy`）。v19 起畫面上沒有匯出（Worker 裡寫 `.vti` 的程式還在）。這是 plan v17（`docs/plan-v17-simple-version.md`）的簡化版：只留**推拉一面、整塊平移、換材質**三個動作，沒有 split、沒有 2D 編輯；目前是給使用者看的 demo，測試先全部拿掉；完整版留在 `claude/upbeat-einstein-wod16i` 分支。
 
 最大原則：沒碰到的體素一個都不變；一步只會改變緊貼那一層的厚度，畫面事先寫出誰跟著、誰變薄、最多能推幾格。
 
@@ -9,7 +9,6 @@
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # 逐體素測試（vitest）
 npm run build      # 型別檢查 + 打包
 ```
 
@@ -25,12 +24,14 @@ npm run build      # 型別檢查 + 打包
 - **材質開關**：清單的材質列整列點一下＝在 3D 顯示／隱藏（切面照常畫）；雙擊名字改名、點色塊改色；列尾的鎖＝整個材質固定／解除固定。
 - **推拉一面**：選面（面板六顆按鈕、點 3D 上的箭頭、或方向鍵）→「上面內縮 1 格」「上面外推 1 格」；或在 3D 上順著箭頭拖＝外推、反方向＝內縮，游標旁即時顯示「上面外推 3 格（1.5 nm）」，放開完成。只動那個方向每一排最外側的表面；外面沒固定的結構全部跟著移動（v21，見下面的規則）。內縮到選到的結構會整個消失時先問：「只縮到還保留它」、「照做」或「取消」。
 - **整塊平移**：六顆方向鍵按一下搬一次，或拖箭頭；形狀與大小不變。
-- **換材質**：點一下就換；結構名字跟著材質重新編號（「SiN 1 換成 SiGe（現在叫 SiGe 1）」）。固定的結構不能換。
+- **換材質**：在結構上按**右鍵**（3D、切面、清單都可以；多選時整批一起）→ 選單上半的材質點一下就換；結構名字跟著材質重新編號（「SiN 1 換成 SiGe（現在叫 SiGe 1）」）。固定的結構不能換。
 - **每次 n 格**：預設 1，旁邊寫等於幾 nm；按鈕、方向鍵、＋／－都用它。
 - **固定**（v21／v22）：在結構上按**右鍵**（3D、切面、左邊清單、右欄「這一步會帶動誰」都可以；多選時在其中一個上按＝整批一起；右鍵拖仍是平移視角）→「固定位置（可被壓薄）」：不會被帶著走，被推到時變薄、最少留 N nm；或「完全鎖定」：形狀和位置都不變，別的結構推到它就停。固定的結構不能編輯（選到它只有一張「已固定」的卡片）、3D 上有深色線框、清單列尾有鎖。固定不算一步，不進復原。
 - **固定的結構**（右欄中間）：目前鎖了誰、怎麼鎖；同材質同設定的合成一張卡片，可以直接切換「可被壓薄｜完全鎖定」、用 −／＋ 調最少保留的厚度、解除，或「全部解除」。
 - **這一步會帶動誰**（推拉）：事先列出會跟著移動的結構與會被推到的固定結構（同材質合成一行，旁邊的鎖可以直接固定／解除；「把會跟著動的全部固定」方便先全鎖再解開想帶動的），以及「最多可外推 N 格（到 X 壓到最少厚度為止）」「最多可內縮 N 格（再多就會整個消失）」；推不動時按鈕反灰、寫出被誰擋，旁邊可以直接解除固定。
-- **做完之後**：最底下一行與「改了哪些」寫出每個鄰居怎麼了，都寫出幾格（「Si fin 2 上面外推 2 格（1.0 nm）· HfO₂、TiN 跟著移動 2 格 · Poly-Si 變薄 2 格」）；沒做滿再加一句為什麼。「改了哪些」一步一筆，點一筆＝選回那一組結構；「全部還原」回到原始，它本身也可以復原。
+- **做完之後**：最底下一行寫出這一步每個鄰居怎麼了（「Si fin 2 上面外推 2 格（1.0 nm）· HfO₂、TiN 跟著移動 2 格」）；沒做滿再加一句為什麼。
+- **改了哪些**：列的是**目前和原始不一樣的結構**（狀態，不是歷程）：每個結構一行，寫它和原始差在哪裡（「上面外推 4 格」「往左移 4 格」「由 SiN 換成 SiGe」「已經消失」），同材質同改動的合成一行；復原之後那一行就消失。點一行＝選那一組結構；「全部還原」回到原始，它本身也可以復原。
+- **模型外圍**：載入時四周各加 24 格空氣（`volume.ts` 的 `PAD`），推拉、平移可以超出原本的模型範圍，不會被邊界擋住或切掉；用完這 24 格才會停。
 - **看改動**：3D 標題列「改後｜改前」（切面放大時這一組和復原／重做移到主切面的標題列）。
 - **放大切面**（plan v18，唯讀）：每張切面右上角的放大鈕，不必先選結構；它變成主畫面，3D 與另外兩張縮到旁邊的小窗（3D 仍可轉、可點、可拖箭頭）。主切面上滾輪＝朝游標縮放（0.25～32 px／體素）、Ctrl＋滾輪＝換片、拖拉（左鍵、右鍵、中鍵都可以）＝平移、點一下＝選結構、雙擊空白＝整張放進視窗；右下角縮放列有倍率、`1:1`、`8×`、適合、對準選取。每個方向記住上次的縮放。回 3D：「← 回 3D」、小 3D 右上角的按鈕、或 Esc。
 ### 鍵盤
@@ -76,19 +77,17 @@ npm run build      # 型別檢查 + 打包
 | `src/volume/report.ts` | 一步的報告摘要；`stepEffects`：由補丁算每種鄰居跟著移動／變薄／變厚 |
 | `src/volume/workerCore.ts`、`worker.ts`、`client.ts` | Worker：原始（`base`）與目前（`cur`）兩本帳簿；load（結構分析）、fork、apply、derive（復原／重做）、probe、chunks、layer、preview、export、vti／npy 解碼 |
 | `src/volume/vti.ts` | `.vti` 讀（各種編碼、zlib、比例陣列＋FieldData）寫（UInt8 CellData；同格式寫回只重壓改到的 block） |
-| `src/volume/demo17.ts`、`ref/proto17.ts` | prototype 的 48×38×40 模型（y 上下顛倒）與 prototype 規則的逐格寫法（`kernel17.test.ts` 的對照） |
 | `src/pages/Section3D/editor.ts` | `useEditor`：一本帳簿、選取（同材質多選）、三個動作、試算、復原／重做／全部還原、鍵盤、載入 |
 | `src/pages/Section3D/index.tsx` | 版面（頂端列、左欄、中間 3D＋切面、右欄）、即時預覽 |
-| `src/pages/Section3D/ActionPanel.tsx`、`StepList.tsx`、`stepWords.ts` | 右欄的動作面板、「改了哪些」、一步的白話說明（純函式） |
+| `src/pages/Section3D/ActionPanel.tsx`、`ChangeList.tsx`、`changes.ts`、`stepWords.ts` | 右欄的動作面板、「改了哪些」（和原始比的狀態清單）、一步的白話說明（純函式） |
 | `src/pages/Section3D/views.tsx`、`handles3d.ts` | `View3D`（Worker greedy mesh、選取層與輪廓線、箭頭、即時預覽網格）、`SliceView`、箭頭的純函式（`surfaceHandles`：貼在表面上的位置） |
 | `src/pages/Section3D/SliceZoom.tsx`、`sliceXf.ts`、`SliceOverlay.tsx` | 放大的切面（唯讀、可縮放平移、縮放列）、視圖變換的純函式（適合／對準／朝游標縮放）、切面上的十字與範圍框（和 `SliceView` 共用） |
 | `src/pages/Section3D/StructureList.tsx`、`UploadPanel.tsx`、`BusyBar.tsx` | 左欄、上傳（.vti 偵測確認／.npy）、計算中的膠囊（進度與取消） |
 | `scripts/bench.ts` | `npx vite-node scripts/bench.ts [load|step|probe|export] [scale ...]` |
-| `scripts/e2e/m0.cjs`、`m17.cjs`、`m18.cjs`、`perf.cjs` | 驗收與量測（Playwright，先 `npm run dev`）：載入、plan v17 的整條路徑與規則、plan v18 的開啟即主畫面與切面放大、G5 的一步時間 |
 | `scripts/build-proto.mjs` | `node scripts/build-proto.mjs out.html`：esbuild 打成單一 .html（Worker 內嵌） |
 
 ## 大陣列
 
 所有 O(N) 的事都在 Web Worker：解碼、結構分析、每一步（只在外框裡算、原地貼補丁）、網格（切 chunk，一步之後只重算碰到的 chunk）、試算、匯出。主執行緒只貼補丁、差量更新 diff 與體積帳。第一次改之前要把原始抄一份當「目前」的帳簿，這一份在載入後的閒置時間分段先抄好。復原／重做存補丁（最多 50 步或 256 MB）。Worker 忙的時候最多再排 3 步；計算中可以取消。
 
-量法：`npx vite-node scripts/bench.ts step 1 3`、`node scripts/e2e/perf.cjs http://localhost:5173 1 3`。數字與沒達到的目標見 plan v17 §12。
+量法：`npx vite-node scripts/bench.ts step 1 3`。數字與沒達到的目標見 plan v17 §12。

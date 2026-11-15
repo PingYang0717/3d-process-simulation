@@ -2,7 +2,7 @@
 // 每一步送 Worker（只在外框裡算），回來後主執行緒原地貼補丁；復原／重做存補丁（50 步或 256 MB）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from 'antd';
-import { type BBox, type Comp, type Labeled, type LockSpec, type Material, type Vec3, type Volume, LOCK_FULL, MATERIALS, coordOf, demoVolume, idx, materialsFor, nameComponents, unionBBox } from '../../volume/volume';
+import { type BBox, type Comp, type Labeled, type LockSpec, type Material, type Vec3, type Volume, LOCK_FULL, MATERIALS, coordOf, demoVolume, idx, materialsFor, nameComponents, padVolume, unionBBox } from '../../volume/volume';
 import { type EditState, type Op, isAdjacent, matNameOf } from '../../volume/ops';
 import type { FractionArray } from '../../volume/vti';
 import { fullScope } from '../../volume/scope';
@@ -13,6 +13,7 @@ import type { OpReport } from '../../volume/report';
 import type { Probe } from '../../volume/probe';
 import { overlayOpen, typingIn, usePersisted } from '../../ui/persist';
 import { useEvent } from '../../ui/useEvent';
+import { changesOf } from './changes';
 import { type FaceName, FACES, OPPOSITE, blockedText, faceName, faceOf, materialParts, namesOf, nmText, stepParts } from './stepWords';
 
 export { type EditState, type Op, applyOp, matNameOf } from '../../volume/ops';
@@ -62,8 +63,8 @@ export interface Meta {
 export type SelectMode = 'set' | 'add' | 'toggle';
 export const selectModeOf = (e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): SelectMode => (e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'toggle' : 'set');
 
-/** 三個動作（plan v17 §5.3）。 */
-export type Tool = 'push' | 'move' | 'mat';
+/** 面板上的兩個動作；換材質在右鍵選單。 */
+export type Tool = 'push' | 'move';
 
 /** 這本帳簿在 Worker 裡的名字。 */
 export const OWNER = 'cur';
@@ -138,7 +139,7 @@ export function useEditor() {
   const [lastKey, setLastKey] = useState<string | null>(null);
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<Vec3>([0, 0, 0]);
-  const [tool, setTool] = usePersisted<Tool>('v17tool', 'push', (v): v is Tool => v === 'push' || v === 'move' || v === 'mat');
+  const [tool, setTool] = usePersisted<Tool>('v17tool', 'push', (v): v is Tool => v === 'push' || v === 'move');
   const [face, setFace] = usePersisted<FaceName>('v17face', '上', (v): v is FaceName => FACES.some((f) => f.name === v));
   const [stepN, setStepNRaw] = usePersisted('v17n', 1, (v): v is number => typeof v === 'number' && v >= 1 && v <= STEP_MAX);
   const setStepN = (n: number) => setStepNRaw(Math.max(1, Math.min(STEP_MAX, Math.round(n) || 1)));
@@ -197,6 +198,8 @@ export function useEditor() {
     return m;
   }, [L, selIdx, selBox, vol]);
   const diffCount = buf?.diffCount ?? 0;
+  /** 「改了哪些」：目前和原始不一樣的結構（狀態；每次帳簿換版本重算一次）。 */
+  const changes = useMemo(() => (ready ? changesOf(orig, cur, buf?.diff ?? null, buf?.touch ?? null, matName, nmPerVoxel) : []), [ready, orig, cur, buf, matName, nmPerVoxel]);
   const scope = useMemo(() => fullScope(vol), [vol]);
 
   // ---- 第一次改之前：把原始抄一份當帳簿（載入完就在 idle 時分段先抄好，不卡在按下去的那一刻） ----
@@ -519,10 +522,11 @@ export function useEditor() {
     const op = moveOp(f, n);
     if (op) commitAsk(op);
   });
-  /** 換材質（固定的結構不換）。 */
-  const setMaterial = useEvent((m: number) => {
-    if (!editKeys.length) return;
-    commit({ kind: 'material', keys: editKeys, scope, m });
+  /** 換材質（固定的結構不換）。keys 省略＝目前選到的。 */
+  const setMaterial = useEvent((m: number, keys?: string[]) => {
+    const ks = keys ? keys.filter((k) => compByKey.has(k) && !lockMap.has(k)) : editKeys;
+    if (!ks.length) return;
+    commit({ kind: 'material', keys: ks, scope, m });
   });
   /** 固定／解除固定：keep＝最少留幾格（LOCK_FULL＝完全鎖定）、null＝解除。 */
   const setLock = useEvent((keys: string[], keep: number | null) => {
@@ -540,7 +544,7 @@ export function useEditor() {
 
   // ---- 試算（plan v17 §5.4.4）：同時最多一個在飛、永遠送最新的 ----
   const [probe, setProbe] = useState<{ sig: string; p: Probe } | null>(null);
-  const probeSig = ready && editKeys.length && tool !== 'mat' ? `${sidOf(cur)}|${[...editKeys].sort().join(',')}|${tool}|${tool === 'push' ? face : ''}|${locks.map((l) => l.join(':')).join(',')}` : '';
+  const probeSig = ready && editKeys.length ? `${sidOf(cur)}|${[...editKeys].sort().join(',')}|${tool}|${tool === 'push' ? face : ''}|${locks.map((l) => l.join(':')).join(',')}` : '';
   const probeFly = useRef<{ inflight: boolean; pending: (() => void) | null }>({ inflight: false, pending: null });
   useEffect(() => {
     if (!probeSig) return;
@@ -584,8 +588,10 @@ export function useEditor() {
   });
 
   // ---- 載入與材質 ----
-  const loadVolume = useCallback(async (v: Volume, m: Meta, mats?: Material[]) => {
+  const loadVolume = useCallback(async (v0: Volume, m: Meta, mats?: Material[]) => {
     if (running.current) return;
+    // 四周加一圈空氣：推拉、平移不受原本的模型範圍限制
+    const v = padVolume(v0);
     setBusy('分析結構中…');
     running.current = true;
     try {
@@ -615,7 +621,7 @@ export function useEditor() {
       setAsk(null);
       setCursor([v.X >> 1, v.Y >> 1, v.Z >> 1]);
       if (m.spacing) setNmPerVoxel(m.unit === 'um' ? m.spacing[0] * 1000 : m.spacing[0]);
-      setLast({ text: '已載入。推拉時沒固定的外層會全部跟著移動；不想動的結構按右鍵固定', canUndo: false, at: Date.now() });
+      setLast({ text: '已載入。推拉時沒固定的外層會全部跟著移動；不想動的結構按右鍵固定；換材質也在右鍵', canUndo: false, at: Date.now() });
     } finally {
       setBusy(null);
       running.current = false;
@@ -687,7 +693,7 @@ export function useEditor() {
       if (f && sel.size) {
         e.preventDefault();
         if (tool === 'move') move(f.name, stepN);
-        else if (tool === 'push') setFace(f.name);
+        else setFace(f.name);
         return;
       }
       if ((e.key === '+' || e.key === '=' || e.key === '-') && sel.size && tool === 'push') {
@@ -724,6 +730,7 @@ export function useEditor() {
     future,
     steps,
     diffCount,
+    changes,
     undo,
     redo,
     resetAll,

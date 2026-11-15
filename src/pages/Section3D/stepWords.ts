@@ -35,21 +35,21 @@ const FULL = 255;
 /** 「做不到」的原因（擋下來的那一刻）。 */
 export function blockText(b: Block | null, matName: (id: number) => string, who?: string) {
   if (!b) return '';
-  if (b.why === 'edge') return '已經到模型邊界';
+  if (b.why === 'edge') return '已經到外圍預留空間的盡頭';
   if (b.why === 'self') return '會碰到自己';
   if (b.why === 'min') return '已經沒有東西可以縮';
   if (b.why === 'lock') return b.keep === FULL ? `被完全鎖定的 ${blockWho(b, matName, who)} 擋住` : `${blockWho(b, matName, who)} 已經壓到它的最少厚度`;
-  return `${blockWho(b, matName, who)} 在模型邊界只剩 1 格`;
+  return `${blockWho(b, matName, who)} 在預留空間的盡頭只剩 1 格`;
 }
 
 /** 「最多可以做到哪裡」的說明（面板事先告知用）。 */
 export function limitText(b: Block | null, matName: (id: number) => string, who?: string) {
   if (!b) return '';
-  if (b.why === 'edge') return '到模型邊界為止';
+  if (b.why === 'edge') return '到外圍預留空間的盡頭為止';
   if (b.why === 'self') return '到碰到自己為止';
   if (b.why === 'min') return '到縮完為止';
   if (b.why === 'lock') return b.keep === FULL ? `到完全鎖定的 ${blockWho(b, matName, who)} 為止` : `到 ${blockWho(b, matName, who)} 壓到最少厚度為止`;
-  return `到 ${blockWho(b, matName, who)} 在模型邊界剩 1 格為止`;
+  return `到 ${blockWho(b, matName, who)} 在預留空間的盡頭剩 1 格為止`;
 }
 
 export const nmText = (n: number, nmPerVoxel: number) => `${(Math.abs(n) * nmPerVoxel).toFixed(1)} nm`;

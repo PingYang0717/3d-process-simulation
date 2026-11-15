@@ -4,8 +4,8 @@
 import type { BBox, Vec3 } from '../../volume/volume';
 
 /** 把手在螢幕上的大小（像素，不隨縮放變）與點得到的半徑。 */
-export const HANDLE_PX = 18;
-export const HANDLE_HIT_PX = 14;
+export const HANDLE_PX = 24;
+export const HANDLE_HIT_PX = 22;
 /**
  * 正對著看：法線 1 格投影到螢幕的長度 < 面內 1 格長度 × 這個比例（約偏離視線 15° 以內），改用垂直位移估算。
  * 以前是固定 4 px：縮到整個模型都看得到時 1 格本來就不到 4 px，幾乎每一面都被當成正對著看，

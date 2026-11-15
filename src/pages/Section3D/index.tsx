@@ -256,14 +256,14 @@ export default function Section3DPage() {
 
   // 選取的結構改變時：箭頭的外框（最後選的那一個）
   const handleBox = useStable(ed.handleComp?.bbox ?? null, sameBBox);
-  // 箭頭貼在結構實際的表面上、離十字最近的那一格（plan v19 §3.2）
+  // 箭頭貼在結構實際的表面上、每一面的中央（表面上離外框中心最近的那一格）
   const handlePos = useStable(
     useMemo(() => {
       const c = ed.handleComp;
       const ci = c ? ed.cur.L.comps.indexOf(c) : -1;
-      return c && ci >= 0 ? surfaceHandles(ed.cur.L.labels, ed.vol.X, ed.vol.Y, ci, c.bbox, ed.cursor) : null;
+      return c && ci >= 0 ? surfaceHandles(ed.cur.L.labels, ed.vol.X, ed.vol.Y, ci, c.bbox, [(c.bbox.x0 + c.bbox.x1) / 2, (c.bbox.y0 + c.bbox.y1) / 2, (c.bbox.z0 + c.bbox.z1) / 2]) : null;
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [ed.cur, ed.handleComp, ed.cursor]),
+    }, [ed.cur, ed.handleComp]),
     (p, q) => p === q || (!!p && !!q && p.every((f, k) => f.pos.join() === q[k].pos.join())),
   );
   const selBBox = useStable(ed.selBox, sameBBox);
@@ -462,7 +462,7 @@ export default function Section3DPage() {
         <div className="legend" aria-hidden>
           <b>點一下</b>＝選結構
           <br />
-          <b>拖箭頭</b>＝改（放開就完成；箭頭在十字附近的面上）
+          <b>拖箭頭</b>＝改（放開就完成；箭頭在每一面的中央）
           <br />
           <b>拖其他地方</b>＝轉視角
           <br />

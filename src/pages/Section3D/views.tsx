@@ -963,11 +963,11 @@ export function View3D({
   useEffect(() => {
     const c = ctxRef.current;
     if (!c) return;
-    // 有選取：其他結構淡到 0.40（plan v17 D9，鄰居怎麼跟著動要看得清楚；選取另外由選取層畫實色）
+    // 有選取：其他結構淡到 0.15（還看得出鄰居怎麼跟著動，但不擋住選到的結構和箭頭；選取另外由選取層畫實色）
     const dim = dimOthers && mode !== 'orig';
     for (const mat of [c.mesh.material, c.previewMesh.material]) {
       const main = mat === c.mesh.material;
-      const op = dim && main ? 0.4 : 1;
+      const op = dim && main ? 0.15 : 1;
       mat.transparent = op < 1;
       mat.opacity = op;
       mat.depthWrite = op === 1;
@@ -1146,7 +1146,7 @@ export function View3D({
         const front = facesCamera(h.dir, toEye) || on;
         obj.visible = true;
         const len = HANDLE_PX * 2 * wpp * (on ? 1.25 : 1);
-        (obj as ArrowHelper).setLength(len, len * 0.45, len * 0.3);
+        (obj as ArrowHelper).setLength(len, len * 0.5, len * 0.4);
         (obj as ArrowHelper).setColor(on ? HANDLE_HOT : handleColor(h.dir));
         for (const m of [(obj as ArrowHelper).line.material, (obj as ArrowHelper).cone.material] as (LineBasicMaterial | MeshBasicMaterial)[]) m.opacity = front ? 1 : 0.35;
         const label = obj.userData.label as Sprite | undefined;
